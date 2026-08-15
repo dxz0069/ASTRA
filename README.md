@@ -1,203 +1,106 @@
 <div align="center">
 
-<img src="./README/banner.png" alt="Cairn Banner"/>
+# ASTRA · 星辰
 
-# Cairn
-### More Than Just AI Penetration Testing — Towards General State-Space Search
+### 星图导航引擎 —— 面向 AI 攻防全链路的状态空间搜索与决策系统
 
-<p>
-  <a href="https://zc.tencent.com/hackathon" target="_blank" rel="noopener noreferrer">
-    <img src="./README/tencent.png" alt="Tencent" height="55" />
-  </a>
-  <a href="https://zc.tencent.com/hackathon" target="_blank" rel="noopener noreferrer">
-    <img src="./README/tch.png" alt="TCH" height="55" />
-  </a>
-</p>
-
-Cairn is a general-purpose problem-solving engine. <br/>It defines no roles, no workflows. Given an origin and a goal, it searches for a path through an unknown state space. <br/>AI Penetration Testing is one such problem — and a proven one.
-
-<p>
-  <a href="https://discord.gg/nDSy4NZVP" target="_blank" rel="noopener noreferrer">
-    <img src="https://img.shields.io/badge/Discord-5865F2?style=flat-square&logo=discord&logoColor=white" alt="Discord" />
-  </a>
-  <a href="https://x.com/le1xia0" target="_blank" rel="noopener noreferrer">
-    <img src="https://img.shields.io/badge/X-000000?style=flat-square&logo=x&logoColor=white" alt="X" />
-  </a>
-</p>
+ASTRA 不定义角色，不预设工作流。给定一个起点与一个目标，它在未知状态空间中搜索路径。
+AI 漏洞挖掘与渗透测试只是这类问题的第一片已证明的星域。
 
 </div>
 
-<p align="center">
-  <a href="https://www.bilibili.com/video/BV1a8R5BhEVi/" target="_blank" rel="noopener noreferrer">
-    <img src="./README/cairn.png" alt="Cairn runtime screenshot" width="900" />
-  </a>
-</p>
+## 是什么
 
-## What is Cairn?
+安全攻防本质上是在近乎无限的状态空间中做**有向搜索**：
 
-Penetration testing is fundamentally a **directed search through a near-infinite state space**:
+- **起点（Origin）**：已知（目标地址、目标系统、靶场题目）
+- **目标（Goal）**：明确（拿到 flag、定位漏洞、完成利用）
+- **路径（Path）**：未知
 
-- **Origin**: known (target IP, target system)
-- **Goal**: defined (get a shell, capture the flag)
-- **Path**: unknown
+这一结构与漏洞研究、CTF、二进制分析并无不同。ASTRA 为这一类问题而生。
 
-This structure is not unique to penetration testing. Vulnerability research, mathematical proof, CTF challenges — any problem with a clear starting point, a clear success condition, and an unknown path in between shares the same shape.
+引擎基于**星图（Star Chart）**架构，用显式的星记-航向图支撑协作探索，三种原语足矣：
 
-Cairn is built for this class of problems. Penetration testing is the first domain it has been validated on.
+| 原语 | 含义 |
+|------|------|
+| **星记（Stellar）** | 一条已确认的客观发现，写入星图 |
+| **航向（Bearing）** | 一个声明但尚未执行的探索方向 |
+| **指引（Guidance）** | 任意时刻注入的人类判断，星探下次读取时吸收 |
 
-The engine is built on a **Blackboard Architecture** with an explicit fact-intent graph. Three primitives are all it needs:
+星图从 `origin` 向 `goal` 生长：每颗新星记都是一块踏脚石，每个航向都是一步迈向未知。
 
-| Concept | Meaning |
-|---------|---------|
-| **Fact** | A confirmed, objective finding written to the board |
-| **Intent** | A declared direction of exploration, not yet executed |
-| **Hint** | Human judgment injected at any time; absorbed by agents on the next read |
+星探（Scout）运行 OODA 循环——观察整张星图、定位当前态势、决定下一批航向、行动探索——并把发现写回为新的星记。
+星探没有固定角色，任务由星图当前状态在运行时生成，而非来自预定义岗位说明。
 
-The graph grows from `origin` toward `goal`. Every new Fact is a stepping stone; every Intent is a step into the unknown.
+## 关键机制
 
-Agent Workers run an OODA loop — Observe the full graph, Orient to the current state, Decide on next intents, Act to explore — and write their findings back as new Facts. Workers have no fixed roles. Tasks are generated at runtime from the graph's current state, not from predefined job descriptions.
+### 星尘记忆（Stardust Memory）—— 上下文管理
 
-Agents coordinate exclusively through the shared board (Stigmergy). No direct communication. No information silos.
+传统智能体把整张图的历史无差别地塞进每次推理。ASTRA 对上下文做三层治理：
 
-## Cairn in Action
+- **焦点子图（Focus）**：每次任务只内联与当前航向、目标最相关的星记与航向（相关度 + 时间近度 + 引用链），并受 `context_budget` 硬上限约束；完整星图仅作文件引用保留
+- **摘要记忆（Epitome）**：超出预算的旧星记由轻量模型压缩为摘要星记，prompt 只呈现摘要
+- **零膨胀**：内联量有硬上限，不再随图线性增长
 
-https://github.com/user-attachments/assets/e557b1ac-dda4-41cb-87dd-9d56dbf05133
+### 双星决策（Dual-star Decision）—— 批判性独立审查
 
+单一智能体的自问自答容易方向漂移。ASTRA 对关键决策引入对抗式双星机制：
 
-## How It Works
+- **质询（Challenge）**：独立星探对定航提案（宣布完成、新航向）与低置信巡猎产出做批判性审查，输出反驳意见与置信度评估
+- **裁决（Verdict）**：综合提案与质询做最终决策，内置目标对齐评估，通过才写入星图
 
-Three task types, all executed by the same Worker:
+质询与裁决使用轻量模型，只对关键节点触发，成本可控。
 
-| Task | What it does | Output |
-|------|-------------|--------|
-| **Bootstrap** | At project start, attempts to solve the problem directly | Fact + possible Complete |
-| **Reason** | Reads the full graph: is the goal met? What should be explored next? | Complete / new Intents / no-op |
-| **Explore** | Claims one Intent, executes the exploration, reports findings | One Fact |
+## 任务类型
 
-System architecture:
+| 任务 | 做什么 | 产出 |
+|------|--------|------|
+| **首探（Probe）** | 项目启动时直接尝试解题 | 星记 + 可能的归航 |
+| **定航（Navigate）** | 读整张星图：目标达成了吗？下一步探索什么？ | 归航 / 新航向 / 无操作 |
+| **巡猎（Patrol）** | 认领一个航向，执行探索，报告发现 | 一条星记 |
+| **质询（Challenge）** | 对关键提案做批判审查 | 反驳 + 置信度 |
+| **裁决（Verdict）** | 综合提案与质询，判定是否写回星图 | 终裁 |
 
-```
-          ┌──────────────────────────────────┐
-          │           Cairn Server           │
-          │    Facts + Intents + Hints       │
-          └─────────────────┬────────────────┘
-                            │
-                     Read / Write API
-                            │
-          ┌─────────────────┴────────────────┐
-          │             Dispatcher           │
-          │   Schedules tasks, manages       │
-          │   containers, writes protocol    │
-          └──────────┬───────────────┬───────┘
-                     │               │
-     ┌───────────────┴──┐     ┌──────┴──────────────┐
-     │  Worker Container│     │  Worker Container   │
-     │   (Project A)    │     │   (Project B)       │
-     │  ┌────┐  ┌────┐  │     │  ┌────┐  ┌────┐     │
-     │  │ W. │  │ W. │  │     │  │ W. │  │ W. │     │
-     │  └────┘  └────┘  │     │  └────┘  └────┘     │
-     └──────────────────┘     └─────────────────────┘
-```
+## 快速开始
 
-**Cairn Server** maintains graph consistency only.
-
-**Cairn Dispatcher** reads the graph, schedules tasks, spins up and tears down worker containers, and is the sole writer to the protocol. Each project gets its own Worker Container; multiple Agent Workers run concurrently inside it. Agent Workers only receive a prompt and return structured output.
-
-Supported worker backends: **Claude Code**, **Codex**, and **Pi**.
-
-## Results
-
-**Tencent Cloud Hackathon · AI Penetration Testing Challenge · 2nd Edition**
-
-610 teams · 1,345 participants · top universities and security firms across China
-
-| Metric | Value |
-|--------|-------|
-| Problems solved | **54 / 54 — only team to AK** |
-| Final ranking | 3rd |
-
-> The system had never been tested before the competition. The full pipeline came online for the first time at 4 AM on race day. No training, no tuning, no domain-specific tooling. Zero MCP tools, zero RAG, zero predefined agent roles.
-
-## Further Reading
-
-- <a href="https://mp.weixin.qq.com/s/DlpEH7bVr0xi0VawPJs3XA" target="_blank" rel="noopener noreferrer">The Strongest AI Penetration Testing Agent: Postmortem of the Only Team to Achieve AK at the TCH Tencent Cloud Hackathon Intelligent Penetration Testing Challenge (2nd Edition)</a>
-- <a href="https://mp.weixin.qq.com/s/2rEqFLvkxvYWM3gW170C2w" target="_blank" rel="noopener noreferrer">The Pathless Path: Cairn AI from Penetration Testing to General Problem Solving</a>
-
-## Getting Started
-
-**Prerequisites**
- 
-- macOS or Linux
-- Python ≥ 3.12
-- Docker
-
-
-### Pull required images
- 
-Both setup methods require the worker container image:
- 
-```bash
-docker pull --platform=linux/amd64 ghcr.io/oritera/cairn-worker-container:latest
-```
-
-Create your local dispatcher configuration and fill in your LLM endpoints and API keys:
+前置：macOS / Linux / Windows，Python ≥ 3.12，Docker（可选，local 模式不需要）。
 
 ```bash
-cp dispatch.example.yaml dispatch.yaml
-```
- 
-### Docker Compose (recommended)
- 
-Pull the base image used to build Cairn:
- 
-```bash
-docker pull ghcr.io/astral-sh/uv:python3.13-trixie
-```
- 
-```bash
-docker compose up --build
-```
- 
-This starts `cairn-server` on port `8000` and `cairn-dispatcher` once the server passes its health check. The dispatcher mounts `dispatch.yaml` from the project root and connects to Docker via the host socket. Data is persisted to `./datas/cairn/`.
- 
-### Manual
- 
-```bash
-# Start the server
-uv run --project cairn cairn serve
- 
-# Run the dispatcher
-uv run --project cairn cairn dispatch --config dispatch.yaml
- 
-# Run startup health checks only
-uv run --project cairn cairn dispatch --config dispatch.yaml --startup-healthcheck-only
+cp dispatch.example.yaml dispatch.yaml   # 填写模型端点与密钥
+uv run --project astra astra serve
+uv run --project astra astra dispatch --config dispatch.yaml
 ```
 
-### Tests
+### 双执行模式
 
-Run the fast regression suite without Docker or live model endpoints:
+- **Docker 模式**（默认）：`runtime.execution: docker`，领航在每项目容器中 exec 星探 CLI
+- **local 模式**：`runtime.execution: local`，星探 CLI 直接以宿主进程运行，无 Docker 依赖——托管平台与离线环境首选
+
+### 靶场接入（astra-runner）
+
+`container/astra_runner/` 提供评测平台编排器，负责题目容器的启动/关闭、逐题创建 ASTRA 项目、从星图收集 flag 统一提交（幂等）并输出得分报告：
 
 ```bash
-uv run --project cairn --group dev pytest
+# 本地演练（需先连接平台下发的 VPN，并配置凭证）
+BENCHMARK_TOKEN=xxx BENCHMARK_BASE_URL=https://... python3 container/astra_runner/runner.py
+
+# 托管模式：构建镜像后直接运行（ENTRYPOINT 已指向 runner）
+docker build -f container/Dockerfile -t astra-runner .
+docker save astra-runner:latest | gzip > agent.tar.gz   # 按平台规范上传
 ```
 
-## Disclaimer
+镜像内已内置 ASTRA 引擎、模型 CLI 与 Kali 工具链；通过环境变量配置模型（`ANTHROPIC_MODEL/ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN` 等）。
 
-Cairn is a general-purpose problem-solving engine. Although it supports penetration testing, CTF solving, security assessment, and vulnerability research workflows, it is intended to be used only in environments where you have explicit authorization to operate.
+### 测试
 
-You are solely responsible for how you use this project. Do not use Cairn against systems, networks, applications, or data without clear prior permission from the owner or operator. Unauthorized security testing, exploitation, or data access may be illegal and may cause harm.
+```bash
+uv run --project astra --group dev pytest
+```
 
-The developers and contributors of this project do not endorse or accept responsibility for any misuse, abuse, damage, loss, or legal consequences arising from its use. By using this project, you agree to ensure that your activities comply with all applicable laws, regulations, contractual obligations, and professional or organizational policies in your jurisdiction.
+## 安全声明
 
-## Star History
+ASTRA 是通用问题求解引擎。尽管它支持渗透测试、CTF 求解、安全评估与漏洞研究等工作流，仅限在获得明确授权的环境中使用。未经许可的安全测试可能违法并造成损害，使用者须自行承担全部责任。
 
-<a href="https://www.star-history.com/#oritera/Cairn&Date" target="_blank" rel="noopener noreferrer">
-  <img src="https://api.star-history.com/svg?repos=oritera/Cairn&type=Date" alt="Star History Chart" />
-</a>
+## License
 
-## ⚖️ License
-This project is licensed under **GNU AGPLv3** for personal and educational use.
-
-**Commercial Use**: If you wish to use this project in a commercial or proprietary environment without the AGPL-3.0 open-source obligations, **please contact me to obtain a commercial license.**
-
-**Contributions**: By submitting a Pull Request, you agree that your contributions may be used under both the AGPL-3.0 and the project's commercial license.
+GNU AGPLv3

@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>astra · 星图</title>
+<link rel="icon" href="/static/favicon.svg">
+<link rel="stylesheet" href="/static/fonts/fonts.css">
+<link rel="stylesheet" href="/static/app.css">
+<script defer src="/static/app.js"></script>
+<script defer src="/static/vendor/alpine.min.js"></script>
+<script defer src="/static/vendor/cytoscape.min.js"></script>
+<script defer src="/static/vendor/dagre.min.js"></script>
+<script defer src="/static/vendor/cytoscape-dagre.js"></script>
+</head>
+<body>
+
+<!-- 流体背景画布 (装饰) -->
+<canvas id="fluid-bg" aria-hidden="true"></canvas>
+<div id="fluid-veil" aria-hidden="true"></div>
+
+<!-- 图标 sprite -->
+<svg aria-hidden="true" style="position:absolute;width:0;height:0;overflow:hidden">
+  <defs>
+    <symbol id="i-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></symbol>
+    <symbol id="i-sync" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></symbol>
+    <symbol id="i-sliders" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"/><circle cx="9" cy="6" r="2.2" fill="var(--paper)"/><circle cx="15" cy="12" r="2.2" fill="var(--paper)"/><circle cx="7" cy="18" r="2.2" fill="var(--paper)"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0l-4-4m4 4l4-4"/><path d="M4 21h16"/></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5l13 7.5-13 7.5z"/></symbol>
+    <symbol id="i-pause" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M8.5 5v14M15.5 5v14"/></symbol>
+    <symbol id="i-reopen" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 2.64-6.36"/><path d="M3 4v5h5"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9.5 7V5h5v2M6.5 7l1 13.2h9l1-13.2"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></symbol>
+    <symbol id="i-zoom-in" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3M11 8v6M8 11h6"/></symbol>
+    <symbol id="i-zoom-out" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3M8 11h6"/></symbol>
+    <symbol id="i-fit" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></symbol>
+    <symbol id="i-branch" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="6" cy="6" r="2.4"/><circle cx="6" cy="18" r="2.4"/><circle cx="18" cy="8" r="2.4"/><path d="M6 8.4v7.2M18 10.4c0 4.4-6 3.4-9 5.6"/></symbol>
+    <symbol id="i-flag" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 21.5V4"/><path d="M5 5h12.5l-2.8 4 2.8 4H5"/></symbol>
+    <symbol id="i-compass" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M15.5 8.5l-2.2 4.8-4.8 2.2 2.2-4.8z" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-star" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2.8l2.8 5.8 6.4.9-4.6 4.5 1.1 6.3-5.7-3-5.7 3 1.1-6.3L2.8 9.5l6.4-.9z"/></symbol>
+    <symbol id="i-locate" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="6"/><path d="M12 2v3.5M12 18.5V22M2 12h3.5M18.5 12H22"/><circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-doc" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2.5h7.5L18 7v15H6z"/><path d="M9.5 12h5M9.5 15.5h5"/></symbol>
+    <symbol id="i-activity" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2.5 7 4-14 2.5 7H21"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5L22 20H2z"/><path d="M12 10v4.5"/><circle cx="12" cy="17.4" r="0.6" fill="currentColor"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 12.5l5 5L20 6.5"/></symbol>
+    <symbol id="i-send" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13"/><path d="M22 2l-6.5 19.5-4.5-8.5L2.5 8.5z"/></symbol>
+    <symbol id="i-anchor" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="2.4"/><path d="M12 7.4V21.5"/><path d="M5 13a7 7 0 0 0 14 0"/></symbol>
+    <symbol id="i-console" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7.5 9l3 3-3 3M13 15h4"/></symbol>
+    <symbol id="i-burst" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 3v4M12 17v4M3 12h4M17 12h4M5.6 5.6l2.8 2.8M15.6 15.6l2.8 2.8M18.4 5.6l-2.8 2.8M8.4 15.6l-2.8 2.8"/></symbol>
+  </defs>
+</svg>
+
+<div id="app" x-data="astraApp()" @keydown.escape="closeModals">
+
+<header>
+  <svg class="logo" viewBox="0 0 64 64" fill="none" aria-hidden="true">
+    <path d="M32 6 L38.5 25.5 L58 32 L38.5 38.5 L32 58 L25.5 38.5 L6 32 L25.5 25.5 Z" fill="oklch(0.82 0.115 200)"/>
+    <circle cx="50" cy="14" r="3" fill="oklch(0.83 0.12 85)"/>
+    <circle cx="12" cy="20" r="2" fill="oklch(0.82 0.115 200 / 0.7)"/>
+    <circle cx="14" cy="50" r="2.5" fill="oklch(0.93 0.008 220 / 0.6)"/>
+  </svg>
+  <span class="brand">astra<small>星图 · 星尘记忆 · 双星决策</small></span>
+  <div class="spacer"></div>
+  <span class="sync-pill" :class="refreshing && 'busy'"><span class="pulse"></span><span x-text="refreshing ? '同步中' : '已连接 · 5s 轮询'"></span></span>
+  <button class="btn glass-chip refract" @click="refreshAll()" :disabled="refreshing">
+    <svg><use href="#i-sync"/></svg><span>同步</span>
+  </button>
+  <button class="btn glass-chip refract" @click="openSettings()">
+    <svg><use href="#i-sliders"/></svg><span>设置</span>
+  </button>
+  <button class="btn glass-chip refract" @click="consoleOpen=true" title="界面控制台">
+    <svg><use href="#i-console"/></svg><span>控制台</span>
+  </button>
+  <button class="btn btn-accent" @click="openCreate()">
+    <svg><use href="#i-plus"/></svg><span>新建星域</span>
+  </button>
+</header>
+
+<main>
+  <!-- 左栏：星域列表 -->
+  <aside id="left" class="glass">
+    <div class="rail-head">
+      <span class="sec-label">星域</span>
+      <button class="icon-btn" title="新建星域" @click="openCreate()"><svg><use href="#i-plus"/></svg></button>
+    </div>
+    <div class="search-wrap" x-show="projects.length > 4">
+      <svg><use href="#i-search"/></svg>
+      <input class="search" type="text" x-model="filterText" placeholder="筛选星域…">
+    </div>
+    <ul>
+      <template x-for="p in filteredProjects()" :key="p.id">
+        <li><button class="proj-card" :class="p.id===selectedId && 'active'"
+          @click="selectProject(p.id)">
+          <div class="t">
+            <span class="dot" :style="statusColor(p)"></span>
+            <span class="name" x-text="p.title"></span>
+          </div>
+          <div class="s">
+            <span x-text="p.id + ' · ' + statusText(p.status)"></span>
+            <span x-text="p.fact_count + ' 星记 / ' + p.hint_count + ' 指引'"></span>
+          </div>
+        </button></li>
+      </template>
+    </ul>
+    <div class="empty" x-show="projects.length===0">尚无星域<br>点击右上角「新建星域」开始探索</div>
+    <div class="empty" x-show="projects.length>0 && filteredProjects().length===0">没有匹配「<span x-text="filterText"></span>」的星域</div>
+  </aside>
+
+  <!-- 中栏：星图画布 -->
+  <section id="center">
+    <div class="stage-title" x-show="current">
+      <span class="pt" x-text="current ? current.project.title : ''"></span>
+      <span class="ps" x-text="current ? `${current.facts.length} 星记 · ${current.intents.length} 航向 · ${statusText(current.project.status)}` : ''"></span>
+    </div>
+    <div class="graph-search glass-chip" x-show="current">
+      <svg><use href="#i-search"/></svg>
+      <input type="text" x-model="graphQuery" placeholder="搜索星图…"
+        @input="applyGraphSearch()" @keydown.enter.stop="locateHit()" @keydown.escape.stop="clearGraphSearch()">
+      <span class="gs-count" x-show="graphQuery.trim()" x-text="_hits.length + ' 命中'"></span>
+    </div>
+    <div class="graph-tools glass-chip refract" x-show="current">
+      <button class="icon-btn" title="放大" @click="graphZoom(1.25)"><svg><use href="#i-zoom-in"/></svg></button>
+      <button class="icon-btn" title="缩小" @click="graphZoom(0.8)"><svg><use href="#i-zoom-out"/></svg></button>
+      <button class="icon-btn" title="适应画布" @click="graphFit()"><svg><use href="#i-fit"/></svg></button>
+      <button class="icon-btn" title="重新布局" @click="graphRelayout()"><svg><use href="#i-branch"/></svg></button>
+    </div>
+    <div id="graph"></div>
+    <div class="legend glass-chip refract">
+      <span class="lg"><span class="sw" style="background:oklch(0.62 0.018 220)"></span>起点</span>
+      <span class="lg"><span class="sw" style="background:var(--goal)"></span>目标</span>
+      <span class="lg"><span class="sw" style="background:var(--accent)"></span>星记</span>
+      <span class="lg"><span class="sw ring" style="border-color:var(--accent)"></span>航向</span>
+      <span class="lg"><span class="sw ring" style="border-color:var(--ok)"></span>高置信</span>
+      <span class="lg"><span class="sw ring" style="border-color:var(--warn)"></span>中置信</span>
+      <span class="lg"><span class="sw ring" style="border-color:var(--bad)"></span>低置信</span>
+    </div>
+    <div class="stage-empty" x-show="!current">
+      <svg class="glyph" viewBox="0 0 120 120" fill="none" aria-hidden="true">
+        <g stroke="oklch(0.82 0.115 200 / 0.5)" stroke-width="1">
+          <path d="M30 78 L58 44 L90 58"/><path d="M58 44 L64 20" stroke-dasharray="3 4"/>
+        </g>
+        <circle cx="30" cy="78" r="4" fill="oklch(0.62 0.018 220)"/>
+        <circle cx="58" cy="44" r="5" fill="oklch(0.82 0.115 200)"/>
+        <circle cx="90" cy="58" r="4" fill="oklch(0.83 0.12 85)"/>
+        <circle cx="64" cy="20" r="2.5" fill="oklch(0.93 0.008 220 / 0.7)"/>
+        <circle cx="98" cy="88" r="1.8" fill="oklch(0.82 0.115 200 / 0.6)"/>
+        <circle cx="22" cy="34" r="1.6" fill="oklch(0.82 0.115 200 / 0.5)"/>
+      </svg>
+      <div class="et">选择一片星域，点亮星图</div>
+      <div class="es">星图呈现从起点到目标的全部星记与航向；探索过程中的发现会实时汇聚于此。</div>
+      <button class="btn btn-accent" @click="openCreate()" x-show="projects.length===0">
+        <svg><use href="#i-plus"/></svg><span>新建星域</span>
+      </button>
+    </div>
+  </section>
+
+  <!-- 右栏：详情 -->
+  <aside id="right" class="glass">
+    <div class="tabs">
+      <button :class="tab==='detail' && 'on'" @click="tab='detail'"><svg><use href="#i-doc"/></svg>详情</button>
+      <button :class="tab==='trace' && 'on'" @click="tab='trace'"><svg><use href="#i-activity"/></svg>审查轨迹</button>
+      <button :class="tab==='guide' && 'on'" @click="tab='guide'"><svg><use href="#i-compass"/></svg>指引</button>
+    </div>
+    <div class="body">
+      <!-- 详情 -->
+      <div x-show="tab==='detail'">
+        <template x-if="selectedNode">
+          <div>
+            <div class="kv"><span class="k">类型</span><span class="v">
+              <span class="badge" :class="nodeBadgeClass(selectedNode)" x-text="nodeTypeLabel(selectedNode)"></span>
+              <span class="badge summary" x-show="selectedNode.data.kind==='summary'">摘要</span>
+              <span class="badge challenged" x-show="selectedNode.data.challenged">被质询</span>
+            </span></div>
+            <div class="kv" x-show="selectedNode.data.nodeId && selectedNode.data.nodeId!=='goal' && selectedNode.data.nodeId!=='origin'"><span class="k">编号</span><span class="v mono" x-text="selectedNode.data.nodeId"></span></div>
+            <div class="kv" x-show="selectedNode.data.confidence"><span class="k">置信度</span><span class="v"><span class="badge" :class="selectedNode.data.confidence" x-text="confidenceText(selectedNode.data.confidence)"></span></span></div>
+            <div class="kv" x-show="selectedNode.data.worker"><span class="k">执行者</span><span class="v mono" x-text="selectedNode.data.worker"></span></div>
+            <div class="sec-t">内容</div>
+            <div class="kv"><span class="v" x-text="selectedNode.data.description" style="white-space:pre-wrap"></span></div>
+            <template x-if="selectedNode.data.evidence">
+              <div>
+                <div class="sec-t">证据（可重放）</div>
+                <div class="evidence-wrap">
+                  <div class="evidence" x-text="selectedNode.data.evidence"></div>
+                  <button class="copy-btn" title="复制证据" @click="copyEvidence(selectedNode.data.evidence)"><svg><use href="#i-copy"/></svg></button>
+                </div>
+              </div>
+            </template>
+            <div class="action-col">
+              <button class="btn glass-chip" @click="locateNode()"><svg><use href="#i-locate"/></svg>在星图中定位</button>
+              <template x-if="selectedNode.data.nodeType==='intent' && !selectedNode.data.to">
+                <button class="btn btn-accent" @click="openConclude(selectedNode.data)"><svg><use href="#i-anchor"/></svg>归航此航向</button>
+              </template>
+            </div>
+          </div>
+        </template>
+        <template x-if="!selectedNode && current">
+          <div>
+            <div class="sec-t" style="margin-top:0">星域</div>
+            <div class="kv"><span class="k">标题</span><span class="v" x-text="current.project.title"></span></div>
+            <div class="kv"><span class="k">状态</span><span class="v"><span class="badge" :class="statusBadgeClass(current.project.status)" x-text="statusText(current.project.status)"></span></span></div>
+            <div class="kv" x-show="current.project.reason"><span class="k">定航</span><span class="v mono" x-text="current.project.reason ? current.project.reason.worker : ''"></span></div>
+            <div class="action-col">
+              <button class="btn btn-accent" @click="openComplete()"><svg><use href="#i-star"/></svg>归航 · 宣告目标达成</button>
+              <button class="btn glass-chip" @click="openCreateIntent()"><svg><use href="#i-send"/></svg>声明航向</button>
+              <button class="btn glass-chip" @click="openAddHint()"><svg><use href="#i-compass"/></svg>添加指引</button>
+              <div class="action-sep">运维</div>
+              <button class="btn glass-chip" @click="setStatus('active')" x-show="current.project.status!=='active'"><svg><use href="#i-play"/></svg>激活星域</button>
+              <button class="btn glass-chip" @click="setStatus('stopped')" x-show="current.project.status==='active'"><svg><use href="#i-pause"/></svg>停航</button>
+              <button class="btn glass-chip" @click="reopenProject()" x-show="current.project.status==='completed'"><svg><use href="#i-reopen"/></svg>重新开启</button>
+              <button class="btn glass-chip" @click="exportYaml()"><svg><use href="#i-download"/></svg>导出 YAML</button>
+              <button class="btn glass-chip btn-danger" @click="askDelete()"><svg><use href="#i-trash"/></svg>删除星域</button>
+            </div>
+            <div class="sec-t">起点</div>
+            <div class="kv"><span class="v mono" x-text="originDesc()"></span></div>
+            <div class="sec-t">目标</div>
+            <div class="kv"><span class="v" x-text="goalDesc()"></span></div>
+          </div>
+        </template>
+        <div class="empty" x-show="!current">选择左侧星域查看详情</div>
+      </div>
+
+      <!-- 审查轨迹 -->
+      <div x-show="tab==='trace'">
+        <div class="timeline" x-show="traceItems().length">
+          <template x-for="(it,i) in traceItems()" :key="i">
+            <div class="tl-item" :class="it.cls">
+              <div class="tx" x-text="it.text"></div>
+              <div class="tm" x-text="it.time"></div>
+            </div>
+          </template>
+        </div>
+        <div class="empty" x-show="current && traceItems().length===0">暂无审查/学习记录</div>
+        <div class="empty" x-show="!current">选择星域查看审查轨迹</div>
+      </div>
+
+      <!-- 指引 -->
+      <div x-show="tab==='guide'">
+        <div style="margin-bottom:var(--s-sm)"><button class="btn glass-chip" @click="openAddHint()"><svg><use href="#i-plus"/></svg>添加指引</button></div>
+        <template x-if="current">
+          <div>
+            <template x-for="h in current.hints" :key="h.id">
+              <div class="hint-card" :class="hintMeta(h).cls">
+                <div class="hc"><span class="hint-tag" x-show="hintMeta(h).label" x-text="hintMeta(h).label"></span><span x-text="hintMeta(h).text"></span></div>
+                <div class="hm" x-text="h.creator + ' · ' + h.created_at"></div>
+              </div>
+            </template>
+            <div class="empty" x-show="current.hints.length===0">暂无指引<br>指引会注入探索者的上下文，影响航向选择</div>
+          </div>
+        </template>
+      </div>
+    </div>
+  </aside>
+</main>
+
+<!-- 模态：新建星域 -->
+<template x-if="modal==='create'">
+  <div class="modal-mask" @click.self="modal=null">
+    <div class="modal">
+      <h2><svg><use href="#i-plus"/></svg>新建星域</h2>
+      <div class="form-row"><label>标题</label><input type="text" x-model="createForm.title" x-ref="createFirst" x-init="$nextTick(()=>$refs.createFirst.focus())" placeholder="如 astra-challenge-a-01"></div>
+      <div class="form-row"><label>起点（Origin）</label><input type="text" x-model="createForm.origin" placeholder="http://10.0.0.1:8080"></div>
+      <div class="form-row"><label>目标（Goal）</label><textarea x-model="createForm.goal" placeholder="目标描述…"></textarea></div>
+      <div class="form-row"><label>指引（可选）</label><textarea x-model="createForm.hints" placeholder="每行一条"></textarea></div>
+      <div class="form-row"><label class="check-row"><input type="checkbox" x-model="createForm.bootstrap"><span>启用首探</span></label></div>
+      <div class="foot"><button class="btn glass-chip" @click="modal=null">取消</button><button class="btn btn-accent" @click="createProject()">创建</button></div>
+    </div>
+  </div>
+</template>
+
+<!-- 模态：声明航向 -->
+<template x-if="modal==='intent'">
+  <div class="modal-mask" @click.self="modal=null">
+    <div class="modal">
+      <h2><svg><use href="#i-send"/></svg>声明航向</h2>
+      <div class="form-row"><label>源自星记（可多选）</label>
+        <div class="chips">
+          <template x-for="f in selectableFacts()" :key="f.id">
+            <span class="chip" :class="intentFrom.includes(f.id) && 'on'" tabindex="0" @click="toggleIntentFrom(f.id)" @keydown.enter="toggleIntentFrom(f.id)" x-text="f.id"></span>
+          </template>
+        </div>
+      </div>
+      <div class="form-row"><label>航向描述</label><textarea x-model="intentForm.description" placeholder="探索方向…"></textarea></div>
+      <div class="foot"><button class="btn glass-chip" @click="modal=null">取消</button><button class="btn btn-accent" @click="createIntent()">声明</button></div>
+    </div>
+  </div>
+</template>
+
+<!-- 模态：归航此航向 -->
+<template x-if="modal==='conclude'">
+  <div class="modal-mask" @click.self="modal=null">
+    <div class="modal">
+      <h2><svg><use href="#i-anchor"/></svg>归航此航向</h2>
+      <div class="form-row"><label>航向</label><input type="text" disabled :value="concludeForm.intentId"></div>
+      <div class="form-row"><label>结论星记</label><textarea x-model="concludeForm.description" placeholder="确认的发现…（含 flag{...} 时必含完整字符串）"></textarea></div>
+      <div class="foot"><button class="btn glass-chip" @click="modal=null">取消</button><button class="btn btn-accent" @click="concludeIntent()">写回</button></div>
+    </div>
+  </div>
+</template>
+
+<!-- 模态：归航 -->
+<template x-if="modal==='complete'">
+  <div class="modal-mask" @click.self="modal=null">
+    <div class="modal">
+      <h2><svg><use href="#i-star"/></svg>归航（宣告目标达成）</h2>
+      <div class="form-row"><label>证据星记</label>
+        <div class="chips">
+          <template x-for="f in selectableFacts()" :key="f.id">
+            <span class="chip" :class="completeFrom.includes(f.id) && 'on'" tabindex="0" @click="toggleCompleteFrom(f.id)" @keydown.enter="toggleCompleteFrom(f.id)" x-text="f.id"></span>
+          </template>
+        </div>
+      </div>
+      <div class="form-row"><label>完成说明</label><textarea x-model="completeForm.description" placeholder="为什么足以证明目标达成…"></textarea></div>
+      <div class="foot"><button class="btn glass-chip" @click="modal=null">取消</button><button class="btn btn-accent" @click="completeProject()">宣告归航</button></div>
+    </div>
+  </div>
+</template>
+
+<!-- 模态：添加指引 -->
+<template x-if="modal==='hint'">
+  <div class="modal-mask" @click.self="modal=null">
+    <div class="modal">
+      <h2><svg><use href="#i-compass"/></svg>添加指引</h2>
+      <div class="form-row"><label>指引内容</label><textarea x-model="hintForm.content" placeholder="如：目标为 WAF 后的登录业务，尝试 multipart 绕过…"></textarea></div>
+      <div class="foot"><button class="btn glass-chip" @click="modal=null">取消</button><button class="btn btn-accent" @click="addHint()">添加</button></div>
+    </div>
+  </div>
+</template>
+
+<!-- 模态：设置 -->
+<template x-if="modal==='settings'">
+  <div class="modal-mask" @click.self="modal=null">
+    <div class="modal">
+      <h2><svg><use href="#i-sliders"/></svg>设置</h2>
+      <div class="form-row"><label>航向超时（秒）</label><input type="number" x-model.number="settingsForm.intent_timeout"></div>
+      <div class="form-row"><label>定航超时（秒）</label><input type="number" x-model.number="settingsForm.reason_timeout"></div>
+      <div class="foot"><button class="btn glass-chip" @click="modal=null">取消</button><button class="btn btn-accent" @click="saveSettings()">保存</button></div>
+    </div>
+  </div>
+</template>
+
+<!-- 模态：删除确认（不可逆操作才弹确认） -->
+<template x-if="modal==='delete'">
+  <div class="modal-mask" @click.self="modal=null">
+    <div class="modal">
+      <h2 class="warn"><svg><use href="#i-alert"/></svg>删除星域</h2>
+      <div class="sub">将永久删除 <b class="mono" x-text="current ? current.project.title : ''"></b> 及其全部星记、航向与指引，此操作不可恢复。</div>
+      <div class="foot"><button class="btn glass-chip" @click="modal=null">取消</button><button class="btn btn-accent" style="background:var(--bad);box-shadow:none" @click="deleteProject()">确认删除</button></div>
+    </div>
+  </div>
+</template>
+
+<!-- 控制台抽屉 -->
+<template x-if="consoleOpen">
+  <div>
+    <div class="console-mask" @click="consoleOpen=false"></div>
+    <div class="console" @keydown.escape="consoleOpen=false">
+      <div class="c-head">
+        <h2><svg><use href="#i-console"/></svg>界面控制台</h2>
+        <button class="icon-btn" title="关闭" @click="consoleOpen=false"><svg><use href="#i-x"/></svg></button>
+      </div>
+      <div class="c-body">
+        <div class="c-group" style="margin-top:0">
+          <div class="c-title">流体背景</div>
+          <div class="c-row"><span class="c-label">流体模拟</span><button class="c-toggle" :class="ui.fluidOn && 'on'" @click="ui.fluidOn=!ui.fluidOn; applyUI()"></button>
+            <button class="icon-btn" style="margin-left:auto" title="迸发一团流体" @click="burstFluid()"><svg><use href="#i-burst"/></svg></button>
+          </div>
+          <div class="c-row"><span class="c-label">环境流动</span><button class="c-toggle" :class="ui.ambient && 'on'" @click="ui.ambient=!ui.ambient; applyUI()"></button></div>
+          <div class="c-row"><span class="c-label">染料亮度</span><input type="range" class="c-slider" min="0.05" max="0.5" step="0.01" x-model.number="ui.dye" @input="applyUI()"><span class="c-val" x-text="Number(ui.dye).toFixed(2)"></span></div>
+          <div class="c-row"><span class="c-label">消散速度</span><input type="range" class="c-slider" min="0.2" max="2" step="0.05" x-model.number="ui.dissipation" @input="applyUI()"><span class="c-val" x-text="Number(ui.dissipation).toFixed(2)"></span></div>
+          <div class="c-row"><span class="c-label">蒙版效果</span>
+            <div class="c-seg">
+              <button :class="ui.veilMode==='darken' && 'on'" @click="ui.veilMode='darken'; applyUI()">压暗</button>
+              <button :class="ui.veilMode==='frost' && 'on'" @click="ui.veilMode='frost'; applyUI()">柔焦</button>
+              <button :class="ui.veilMode==='vignette' && 'on'" @click="ui.veilMode='vignette'; applyUI()">晕影</button>
+              <button :class="ui.veilMode==='none' && 'on'" @click="ui.veilMode='none'; applyUI()">无</button>
+            </div>
+          </div>
+          <div class="c-row"><span class="c-label">蒙版强度</span><input type="range" class="c-slider" min="0" max="0.85" step="0.01" x-model.number="ui.veil" @input="applyUI()"><span class="c-val" x-text="Number(ui.veil).toFixed(2)"></span></div>
+        </div>
+        <div class="c-group">
+          <div class="c-title">液态玻璃</div>
+          <div class="c-row"><span class="c-label">面板模糊</span><input type="range" class="c-slider" min="0" max="40" step="1" x-model.number="ui.blurPanel" @input="applyUI()"><span class="c-val" x-text="ui.blurPanel+'px'"></span></div>
+          <div class="c-row"><span class="c-label">小件模糊</span><input type="range" class="c-slider" min="0" max="24" step="1" x-model.number="ui.blurChip" @input="applyUI()"><span class="c-val" x-text="ui.blurChip+'px'"></span></div>
+          <div class="c-row"><span class="c-label">色彩饱和</span><input type="range" class="c-slider" min="100" max="200" step="5" x-model.number="ui.sat" @input="applyUI()"><span class="c-val" x-text="ui.sat+'%'"></span></div>
+        </div>
+        <div class="c-group">
+          <div class="c-title">布局</div>
+          <div class="c-row"><span class="c-label">左栏宽度</span><input type="range" class="c-slider" min="200" max="360" step="4" x-model.number="ui.railL" @input="applyUI()"><span class="c-val" x-text="ui.railL+'px'"></span></div>
+          <div class="c-row"><span class="c-label">右栏宽度</span><input type="range" class="c-slider" min="280" max="440" step="4" x-model.number="ui.railR" @input="applyUI()"><span class="c-val" x-text="ui.railR+'px'"></span></div>
+          <div class="c-row"><span class="c-label">界面密度</span>
+            <div class="c-seg">
+              <button :class="ui.density==='cozy' && 'on'" @click="ui.density='cozy'; applyUI()">舒适</button>
+              <button :class="ui.density==='compact' && 'on'" @click="ui.density='compact'; applyUI()">紧凑</button>
+            </div>
+          </div>
+        </div>
+        <div class="c-group">
+          <div class="c-title">星图</div>
+          <div class="c-row"><span class="c-label">布局方向</span>
+            <div class="c-seg">
+              <button :class="ui.graphDir==='LR' && 'on'" @click="ui.graphDir='LR'; applyUI()">横向</button>
+              <button :class="ui.graphDir==='TB' && 'on'" @click="ui.graphDir='TB'; applyUI()">纵向</button>
+            </div>
+          </div>
+          <div class="c-row"><span class="c-label">节点大小</span><input type="range" class="c-slider" min="16" max="36" step="1" x-model.number="ui.nodeSize" @input="applyUI()"><span class="c-val" x-text="ui.nodeSize+'px'"></span></div>
+        </div>
+        <div class="c-group">
+          <div class="c-title">动效</div>
+          <div class="c-row"><span class="c-label">界面动效</span><button class="c-toggle" :class="ui.motion && 'on'" @click="ui.motion=!ui.motion; applyUI()"></button></div>
+        </div>
+      </div>
+      <div class="c-foot">
+        <span class="hint">改动实时生效 · 自动保存于本机</span>
+        <button class="btn glass-chip" style="height:28px;font-size:11.5px" @click="resetUI()">恢复默认</button>
+      </div>
+    </div>
+  </div>
+</template>
+
+<div id="toasts"><template x-for="(t,i) in toasts" :key="i"><div class="toast glass-chip" :class="t.type"><span class="tdot"></span><span x-text="t.text"></span></div></template></div>
+</div>
+
+</body>
+</html>

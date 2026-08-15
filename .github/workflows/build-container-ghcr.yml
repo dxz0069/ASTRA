@@ -7,13 +7,34 @@ on:
       - main
     paths:
       - "container/**"
+      - "astra/**"
 
 permissions:
-  packages: write
+  contents: read
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install pi CLI (env-dependent driver test)
+        run: npm install -g @mariozechner/pi-coding-agent@0.73.0
+
+      - name: Run test suite
+        working-directory: astra
+        run: uv run --group dev pytest -q
+
   docker:
     runs-on: ubuntu-latest
+    needs: [test]
+    permissions:
+      contents: read
+      packages: write
 
     steps:
       - name: Checkout
@@ -32,9 +53,12 @@ jobs:
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
-          context: ./container
+          context: .
+          file: container/Dockerfile
           platforms: linux/amd64
           push: true
-          tags: ghcr.io/${{ github.repository_owner }}/cairn-worker-container:latest
-          cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/cairn-worker-container:buildcache
-          cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/cairn-worker-container:buildcache,mode=max
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/astra-worker-container:latest
+            ghcr.io/${{ github.repository_owner }}/astra-worker-container:${{ github.sha }}
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/astra-worker-container:buildcache
+          cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/astra-worker-container:buildcache,mode=max
