@@ -1,6 +1,7 @@
 // 从各章 narrations.ts 生成 SRT 字幕（时间轴按 中文~4字/秒 估算，剪辑时微调）
-// 用法：node make-srt.mjs [--end=125]  →  astra-narration.srt
-//   --end=<秒>  把最后一条字幕的结束时间等比缩放到该时长（适配实拍视频长度）
+// 用法：node make-srt.mjs [--end=125] [--count=18]  →  astra-narration.srt
+//   --end=<秒>   最后一条字幕的结束时间等比缩放到该时长（适配实拍视频长度）
+//   --count=<n>  只保留前 n 条字幕（视频只录到某一章时截断）
 import { readFileSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -45,7 +46,16 @@ cues.forEach((text, i) => {
   srt.push({ start: ms, end: ms + d, text });
   ms += d + 350;
 });
-const rawTotal = ms - 350; // 最后一条的结束时间
+
+// --count=<n>：只保留前 n 条（视频只录到某一步）
+const countArg = process.argv.find((a) => a.startsWith("--count="));
+if (countArg) {
+  const n = parseInt(countArg.slice(8), 10);
+  if (!(n >= 1) || n > srt.length) throw new Error(`--count 需在 1..${srt.length} 之间`);
+  console.log(`kept first ${n}/${srt.length} cues（截断于：「${srt[n - 1].text.slice(0, 18)}…」）`);
+  srt.length = n;
+}
+const rawTotal = srt.at(-1).end; // 最后一条的结束时间
 
 // --end=<秒>：等比缩放全部时间戳，让最后一条在该秒结束
 const endArg = process.argv.find((a) => a.startsWith("--end="));
@@ -65,4 +75,4 @@ writeFileSync(
   "\ufeff" + srt.map((c, i) => `${i + 1}\n${fmt(c.start)} --> ${fmt(c.end)}\n${splitLines(c.text).join("\n")}\n`).join("\n"),
   "utf-8",
 );
-console.log(`astra-narration.srt: ${cues.length} 条字幕，总时长 ${((srt.at(-1).end) / 1000).toFixed(1)}s`);
+console.log(`astra-narration.srt: ${srt.length} 条字幕，总时长 ${(srt.at(-1).end / 1000).toFixed(1)}s`);
