@@ -21,7 +21,7 @@ RUN sudo apt update && \
     dirsearch yq krb5-user gitleaks naabu nikto netexec adb && \
     sudo apt clean && \
     sudo rm -rf /var/lib/apt/lists/* && \
-    pip3 install pwntools pymongo --break-system-packages && \
+    sudo apt install -y python3-pwntools && pip3 install pymongo --break-system-packages && \
     sudo npm install -g @playwright/cli@latest && \
     cd /tmp && playwright-cli install
 
