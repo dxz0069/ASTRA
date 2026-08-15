@@ -1,0 +1,105 @@
+# ASTRA headless 定制补丁：为 `dsh --profile headless` 增加会话续接与
+# Anthropic 协议模型路由。
+#
+# 用法（dispatch.yaml 的 dsh worker env DSH_PATCH 指向本文件）：
+#   dsh --profile headless --patch <本文件> [--session <id>] "<task>"
+#
+# 本补丁做三件事：
+#   1. 禁掉官方 headless-startup / headless-runner，插入 astra-headless-runner
+#      （有 --session → agents.resume()，等价 claude -r；无 → agents.create()；
+#      resume 不到用同一 id 创建，等价 claude --session-id 的 create-or-resume）
+#   2. 挂载 llm-pi-ai 的 anthropic 路由（仅当 DSH_PROVIDER=anthropic 时被
+#      agent-default-model 选中）——DSH 即可讲 Anthropic Messages 协议，
+#      适配 Kimi / DeepSeek /anthropic 兼容端点 / 任意 claude 兼容网关
+#   3. agent-default-model 按 DSH_PROVIDER 选择 provider：
+#      anthropic → anthropic 路由；deepseek（默认）→ deepseek-official 路由
+#
+# loader 的 patch 语义：name 字段只做目标行匹配校验、不能覆盖，所以这里用
+# disabled + insert 完成 runner 替换；provider 路由属于行 config（支持 !!js
+# env 表达式，启动时求值）。
+
+- id: headless-startup
+  disabled: true
+
+- id: headless-runner
+  disabled: true
+
+- insert:
+    - id: astra-headless-runner
+      name: '@deepseek-ai/dsh/lib/astra-headless-runner.js'
+      inject: [cmdlineArgs, agentDefaultModel, agents, sessions]
+      config: {}
+
+# Anthropic Messages 协议路由（dormant llm-pi-ai 适配器）。deepseek 模式下
+# 不被选中，不产生任何请求；anthropic 模式下由 agent-default-model 路由过去。
+- id: llm-pi-ai
+  config:
+    providers:
+      anthropic:
+        apiKeyEnv: ANTHROPIC_AUTH_TOKEN
+        baseURL: !!js process.env.ANTHROPIC_BASE_URL ?? 'https://api.anthropic.com'
+        streamIdleTimeoutMs: 600000
+        models:
+          - id: !!js process.env.DSH_MODEL ?? 'k3'
+            name: !!js process.env.DSH_MODEL ?? 'k3'
+            contextWindow: !!js Number(process.env.DSH_MODEL_CONTEXT_WINDOW ?? 1000000)
+      # 智谱 GLM 企业版（Coding Plan 订阅 key）：走 coding 专用 Chat Completions
+      # 端点，thinkingFormat=deepseek 即智谱原生参数形态（thinking + reasoning_effort）。
+      # reasoningEfforts 为档位→线上值映射（GLM-5.3 API 仅认 max/high/low，强制思考
+      # 不支持 off 关闭）：xhigh→max（最深，决策/难题）、high→high（溢出探索的速度档）。
+      zhipu:
+        displayName: Zhipu GLM (Coding Plan)
+        apiKeyEnv: ZHIPU_API_KEY
+        api: openai-completions
+        baseURL: !!js process.env.ZHIPU_BASE_URL ?? 'https://open.bigmodel.cn/api/coding/paas/v4'
+        streamIdleTimeoutMs: 600000
+        compat:
+          thinkingFormat: deepseek
+          supportsReasoningEffort: true
+        models:
+          - id: !!js process.env.DSH_MODEL ?? 'glm-5.3'
+            name: GLM 5.3
+            contextWindow: !!js Number(process.env.DSH_MODEL_CONTEXT_WINDOW ?? 1000000)
+            maxTokens: 131072
+            reasoningEfforts:
+              "off":
+              minimal: low
+              low: low
+              medium: high
+              high: high
+              xhigh: max
+
+- id: agent-default-model
+  config:
+    provider: !!js "process.env.DSH_PROVIDER === 'anthropic' ? 'anthropic' : (process.env.DSH_PROVIDER === 'zhipu' ? 'zhipu' : 'deepseek-official')"
+    model: !!js process.env.DSH_MODEL ?? 'deepseek-v4-flash'
+    # 推理强度：默认 high（GLM-5.3 深度思考场景）。可用 DSH_REASONING_EFFORT 覆盖
+    # （off/low/medium/high/xhigh，按模型支持度取）。zhipu 路由下任意档位的
+    # 线上值均为 max（GLM-5.3 最高推理强度）。
+    reasoningEffort: !!js "process.env.DSH_REASONING_EFFORT ?? (process.env.DSH_PROVIDER === 'zhipu' ? 'xhigh' : 'high')"
+
+# 时间上下文：模型每步感知当前时间与已耗时（配合 ASTRA 超时自律；容器 TZ=Asia/Shanghai）
+- id: time-context
+  name: '@deepseek-ai/dsh-time-context'
+  config:
+    timeZone: Asia/Shanghai
+    refreshIntervalMs: 300000
+
+# web_search 只在 deepseek 模式可用（web-search-deepseek 依赖 DEEPSEEK_API_KEY）；
+# anthropic/zhipu 模式下禁用，避免模型误用 MISSING_CREDENTIAL（靶场内网题也用不到外网搜索）。
+- id: tool-web
+  disabled: !!js "['anthropic', 'zhipu'].includes(process.env.DSH_PROVIDER ?? 'deepseek')"
+
+# Playwright MCP：Web 类题目可用真实浏览器（Cookie/JS 渲染/登录流）。
+# failOnStartupError=false：MCP server 拉起失败不阻塞任务（模型走 curl/nuclei 兜底）。
+# 镜像需预装 @playwright/mcp（Dockerfile 已装 playwright CLI 与 chromium）。
+- id: mcp-playwright
+  name: '@deepseek-ai/dsh-mcp-client'
+  config:
+    serverName: playwright
+    transport: stdio
+    command: npx
+    args: ['-y', '@playwright/mcp@latest']
+    env:
+      PLAYWRIGHT_MCP_BROWSER: !!js process.env.PLAYWRIGHT_MCP_BROWSER ?? 'chromium'
+    failOnStartupError: false

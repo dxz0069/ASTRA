@@ -1,5 +1,5 @@
-# Cairn server API endpoint.
-server: "http://cairn-server:8000"
+# ASTRA server API endpoint.
+server: "http://astra-server:8000"
 
 # Shared environment variables merged into every worker.
 common_env:
@@ -20,7 +20,7 @@ runtime:
   # "startup_and_task" checks at dispatcher startup and before every task.
   # "startup_only" checks only at startup. "disabled" skips automatic worker checks.
   worker_healthcheck: "startup_only"
-  # Prompt set loaded from cairn/src/cairn/dispatcher/prompts/.
+  # Prompt set loaded from astra/src/astra/dispatcher/prompts/.
   prompt_group: "default"
 
 tasks:
@@ -42,7 +42,7 @@ tasks:
 
 container:
   # Base worker container. The dispatcher execs agent commands inside one container per project.
-  image: "ghcr.io/oritera/cairn-worker-container:latest"
+  image: "ghcr.io/astra-project/astra-worker-container:latest"
   network_mode: "host"
   # "stop" keeps finished containers for inspection; "remove" is cleaner but loses post-run state.
   completed_action: "stop"
@@ -71,8 +71,8 @@ workers:
     max_running: 2
     priority: 0
     env:
-      CODEX_MODEL: "qwen3.6-plus"
-      CODEX_BASE_URL: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+      CODEX_MODEL: "deepseek-v4-pro"
+      CODEX_BASE_URL: "https://api.deepseek.com/v1"
       OPENAI_API_KEY: "sk-xxx"
 
   - name: "pi_qwen3.6-plus"
@@ -81,8 +81,72 @@ workers:
     max_running: 2
     priority: 0
     env:
-      PI_MODEL: "qwen3.6-plus"
-      PI_BASE_URL: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+      PI_MODEL: "deepseek-v4-pro"
+      PI_BASE_URL: "https://api.deepseek.com/v1"
       PI_API_KEY: "sk-xxx"
       PI_PROVIDER_API: "openai-completions"
       PI_MODEL_CONTEXT_WINDOW: "262144"
+
+  # ---- DeepSeek Harness（dsh）worker ----
+  # 无头模式：dsh --profile headless "<task>"，等价 claude -p。
+  # 前提：容器内已安装 @deepseek-ai/dsh，且 DSH_PATCH 指向本仓库自带的
+  # astra headless 扩展（container/dsh/astra-headless.patch.yml，提供
+  # --session 会话续接 = 等价 claude 的 --session-id / -r）。
+  # DSH_PERMISSION_MODE=danger-full-access 等价 claude 的 --dangerously-skip-permissions。
+  # DSH_HOME 指向每 worker 独立目录，避免会话/凭据跨项目污染（等价 CLAUDE_CONFIG_DIR）。
+  # DSH_PROVIDER 选择模型路由（默认 deepseek → DEEPSEEK_API_KEY 官方 chat-completions；
+  # anthropic → ANTHROPIC_AUTH_TOKEN/ANTHROPIC_BASE_URL，适配 Kimi / DeepSeek /anthropic 兼容端点）。
+  - name: "dsh_deepseek-v4-pro"
+    type: "dsh"
+    task_types: [bootstrap, reason, explore]
+    max_running: 2
+    priority: 0
+    env:
+      DSH_MODEL: "deepseek-v4-pro"
+      DSH_PROVIDER: "deepseek"
+      DEEPSEEK_API_KEY: "sk-xxx"
+      # DEEPSEEK_BASE_URL: "https://api.deepseek.com"   # 可选，默认官方地址
+      DSH_PATCH: "/opt/astra/dsh/astra-headless.patch.yml"  # 可选；未配置时设 DSH_RESUME=0 走无状态模式
+      DSH_PERMISSION_MODE: "danger-full-access"
+      # DSH_HOME: "/tmp/astra-dsh/dsh_deepseek-v4-pro"   # 可选数据隔离目录
+
+  # dsh worker 的 anthropic 模式示例（用 Anthropic 兼容端点，如 Kimi）：
+  # - name: "dsh_kimi-k3"
+  #   type: "dsh"
+  #   task_types: [bootstrap, reason, explore]
+  #   max_running: 2
+  #   priority: 0
+  #   env:
+  #     DSH_MODEL: "k3"
+  #     DSH_PROVIDER: "anthropic"
+  #     ANTHROPIC_AUTH_TOKEN: "sk-xxx"
+  #     ANTHROPIC_BASE_URL: "https://api.kimi.com/coding/"
+  #     DSH_PATCH: "/opt/astra/dsh/astra-headless.patch.yml"
+  #     DSH_PERMISSION_MODE: "danger-full-access"
+
+  # ---- 混合模型示例（降本：决策用便宜模型、探索用强模型，技术方案 §3.2）----
+  # dispatch.yaml 已支持按 task_types 路由 worker：reason/consolidate/审查用便宜
+  # 模型（priority 0 优先），bootstrap/explore 用强模型。每个 dsh worker 独立
+  # DSH_HOME（会话隔离，explore 的 execute→conclude 走同一 worker 不串）。
+  # - name: "dsh_reason_cheap"
+  #   type: "dsh"
+  #   task_types: [reason, consolidate]
+  #   max_running: 2
+  #   priority: 0
+  #   env:
+  #     DSH_MODEL: "deepseek-v4-flash"
+  #     DSH_PROVIDER: "deepseek"
+  #     DEEPSEEK_API_KEY: "sk-xxx"
+  #     DSH_PATCH: "/opt/astra/dsh/astra-headless.patch.yml"
+  #     DSH_PERMISSION_MODE: "danger-full-access"
+  # - name: "dsh_explore_strong"
+  #   type: "dsh"
+  #   task_types: [bootstrap, explore]
+  #   max_running: 2
+  #   priority: 0
+  #   env:
+  #     DSH_MODEL: "deepseek-v4-pro"
+  #     DSH_PROVIDER: "deepseek"
+  #     DEEPSEEK_API_KEY: "sk-xxx"
+  #     DSH_PATCH: "/opt/astra/dsh/astra-headless.patch.yml"
+  #     DSH_PERMISSION_MODE: "danger-full-access"

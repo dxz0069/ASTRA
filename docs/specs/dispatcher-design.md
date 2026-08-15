@@ -4,20 +4,20 @@
 
 ## 本质
 
-Dispatcher 是 Cairn 的客户端执行器。它负责：
+Dispatcher 是 ASTRA 的客户端执行器。它负责：
 
 1. 协调项目容器生命周期
 2. 给 Agent 下发明确任务
-3. 代 Agent 调用 Cairn API 写回图
+3. 代 Agent 调用 ASTRA API 写回图
 
-Agent 不直接认领 Intent，不直接 heartbeat，不直接调用 Cairn API。Agent 只接收 Dispatcher 下发的任务，返回结构化结果；Dispatcher 再决定如何请求 Server。
+Agent 不直接认领 Intent，不直接 heartbeat，不直接调用 ASTRA API。Agent 只接收 Dispatcher 下发的任务，返回结构化结果；Dispatcher 再决定如何请求 Server。
 
 ---
 
 ## 设计要点
 
 1. Agent 的输出任务收敛成三类：`bootstrap`、`reason` 和 `explore`；`bootstrap` 只在项目初始态运行，让 Agent 直接尝试解决整个问题；主阶段只有在已解决时才返回，且必须同时给出关键 Fact 和 `complete`；若主阶段超时，再由 `bootstrap_conclude` 收尾产出 Fact；`reason` 负责读图判断是否完成或是否需要提出一个新 intent；`explore` 只负责执行一个已认领 intent 并产出一个 Fact 结论。
-2. Dispatcher 是唯一的协议写入者和控制面；Agent 不 claim、不 heartbeat、不直接调用 Cairn API。
+2. Dispatcher 是唯一的协议写入者和控制面；Agent 不 claim、不 heartbeat、不直接调用 ASTRA API。
 3. 超时策略按任务类型定义；`bootstrap` 和 `explore` 都支持“第一阶段执行 + timeout / parse-fail 后用同一 session 进入 conclude 收尾”的双阶段模式。
 4. Prompt 以 markdown 文件形式随代码分发；支持按 prompt 组切换；Worker 行为由 `claudecode`、`codex`、`mock` 等 driver 实现；`dispatch.yaml` 只描述运行期参数。
 5. 调度上，项目初始态按 `project.bootstrap_enabled` 和 Worker 能力决定优先 `bootstrap` 或直接 `reason`；非初始态出现新 Fact / Hint 等新态势时优先 `reason`，否则优先消费可认领的 `explore` intent；`reason` 的并发约束通过服务端的项目级 `project.reason` lease 表达为“单项目最多一个”，`bootstrap` 的并发约束是“单项目最多一个保留 bootstrap intent 且最多一个 bootstrap 任务”，跨项目允许并行；`runtime.interval` 被刻意复用为主循环节拍和带 claim 任务的 heartbeat 周期。
@@ -39,12 +39,12 @@ Agent 不直接认领 Intent，不直接 heartbeat，不直接调用 Cairn API�
 
 这个项目在架构上可以分成 4 个部分：
 
-1. Cairn Server
+1. ASTRA Server
 2. Dispatcher
 3. 项目容器
 4. Worker / Agent CLI
 
-### 1. Cairn Server
+### 1. ASTRA Server
 
 Server 是协议真相源。
 
@@ -66,7 +66,7 @@ Dispatcher 是这个工程要实现的核心。
 - 选择哪个 Worker 来执行
 - 管理项目容器和 Worker 进程
 - 维护 session、超时、健康检查、收尾
-- 把结果写回 Cairn Server
+- 把结果写回 ASTRA Server
 
 ### 3. 项目容器
 
@@ -97,7 +97,7 @@ Worker 不是协议参与者本身，而是 Dispatcher 管理下的执行单元�
 
 ```text
                          +----------------------+
-                         |     Cairn Server     |
+                         |     ASTRA Server     |
                          |----------------------|
                          | Projects / Facts     |
                          | Intents / Hints      |
@@ -741,12 +741,12 @@ curl -sS --fail -o /dev/null \
 
 ```bash
 codex exec --dangerously-bypass-approvals-and-sandbox --model "{env.CODEX_MODEL}" \
-  -c 'model_provider="cairn"' \
-  -c 'model_providers.cairn.name="cairn"' \
-  -c 'model_providers.cairn.wire_api="responses"' \
+  -c 'model_provider="astra"' \
+  -c 'model_providers.astra.name="astra"' \
+  -c 'model_providers.astra.wire_api="responses"' \
   -c 'model_reasoning_effort="high"' \
-  -c 'model_providers.cairn.base_url="{env.CODEX_BASE_URL}"' \
-  -c 'model_providers.cairn.env_key="OPENAI_API_KEY"' \
+  -c 'model_providers.astra.base_url="{env.CODEX_BASE_URL}"' \
+  -c 'model_providers.astra.env_key="OPENAI_API_KEY"' \
   -- "{prompt}"
 ```
 
@@ -754,12 +754,12 @@ codex exec --dangerously-bypass-approvals-and-sandbox --model "{env.CODEX_MODEL}
 
 ```bash
 codex exec resume "{session}" --dangerously-bypass-approvals-and-sandbox --model "{env.CODEX_MODEL}" \
-  -c 'model_provider="cairn"' \
-  -c 'model_providers.cairn.name="cairn"' \
-  -c 'model_providers.cairn.wire_api="responses"' \
+  -c 'model_provider="astra"' \
+  -c 'model_providers.astra.name="astra"' \
+  -c 'model_providers.astra.wire_api="responses"' \
   -c 'model_reasoning_effort="high"' \
-  -c 'model_providers.cairn.base_url="{env.CODEX_BASE_URL}"' \
-  -c 'model_providers.cairn.env_key="OPENAI_API_KEY"' \
+  -c 'model_providers.astra.base_url="{env.CODEX_BASE_URL}"' \
+  -c 'model_providers.astra.env_key="OPENAI_API_KEY"' \
   -- "{prompt}"
 ```
 
@@ -862,7 +862,7 @@ codex exec resume "{session}" --dangerously-bypass-approvals-and-sandbox --model
 
 | 字段 | 必填 | 含义 |
 | --- | --- | --- |
-| `server` | 是 | Cairn Server 的 base URL |
+| `server` | 是 | ASTRA Server 的 base URL |
 
 ### `runtime.*`
 
@@ -892,7 +892,7 @@ codex exec resume "{session}" --dangerously-bypass-approvals-and-sandbox --model
 实现约定：
 
 - completed project 的容器 cleanup 可以异步并行进行，不要求阻塞主调度循环
-- 如果项目已从 Server 删除，Dispatcher 会把找不到对应项目的 `cairn-dispatch-*` 容器视为 orphan，并执行 stop 清理
+- 如果项目已从 Server 删除，Dispatcher 会把找不到对应项目的 `astra-dispatch-*` 容器视为 orphan，并执行 stop 清理
 
 ### `tasks.*`
 
