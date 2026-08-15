@@ -27,3 +27,4 @@ htmlcov/
 .reasonix/
 dist/
 demo-video/rec/
+astra/.venv_pydash512/
