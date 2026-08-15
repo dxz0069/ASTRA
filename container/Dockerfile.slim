@@ -21,8 +21,11 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get update && \
     rm -rf /var/lib/apt/lists/*
 USER kali
 
-RUN ok=0; for i in 1 2 3 4; do sudo apt update && ok=1 && break || sleep 8; done && \
-    [ "$ok" = 1 ] || { echo 'deb http://mirrors.ustc.edu.cn/kali kali-rolling main non-free contrib' | sudo tee /etc/apt/sources.list >/dev/null && sudo apt update; } && \
+# 本层固定 USTC 源（tuna 主索引间歇性失败且 apt update 退出码骗人）；
+# 以 apt-cache 实际可见性验证索引完整，而非信任 update 退出码
+RUN echo 'deb http://mirrors.ustc.edu.cn/kali kali-rolling main non-free contrib' | sudo tee /etc/apt/sources.list >/dev/null && \
+    for i in 1 2 3 4 5; do sudo apt update >/dev/null 2>&1; apt-cache show netexec >/dev/null 2>&1 && break || sleep 8; done && \
+    apt-cache show netexec >/dev/null 2>&1 || { echo 'APT INDEX INCOMPLETE'; exit 1; } && \
     sudo apt install -y bsdextrautils npm jq iputils-ping sshpass ncat rlwrap \
     bloodyad coercer enum4linux-ng pwncat chisel-common-binaries \
     dirsearch yq krb5-user gitleaks naabu nikto netexec adb python3-pwntools && \
