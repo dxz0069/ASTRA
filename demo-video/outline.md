@@ -1,8 +1,24 @@
 # Video Outline
 
 > **主题**：`neon-cyber`（Checkpoint Plan 选定）—— 深海军蓝 + 电光青/品红霓虹，赛博朋克未来感，与 ASTRA 星图界面同源
-> **总时长**：约 2 分 50 秒（口播 ~690 字 ÷ 4 字/秒；不含战绩数字）
-> **章节数**：5 章 / 24 步
+> **总时长**：约 3 分钟（口播 ~710 字 ÷ 4 字/秒；不含战绩数字）
+> **章节数**：6 章 / 25 步
+
+---
+
+## 0. cover — 封面（1 step · ~4s）
+
+**信息池**：
+- 品牌：ASTRA / 星辰 · AI 攻防全链路引擎 —— 来源 article §项目定位
+- 战队：S10WD0WN —— 团队定名（2026-08-15）
+- 院校：National University of Defense Technology —— 来源 article §团队
+
+**开发计划**：
+
+- step 1 (~4s) — 星座徽记 Logo + ASTRA 字标 + [S10WD0WN] 战队名 + 院校
+
+口播节选：
+> ASTRA，星辰——AI 攻防全链路引擎，来自 S10WD0WN。
 
 ---
 
