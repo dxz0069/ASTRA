@@ -26,3 +26,4 @@ node_modules/
 htmlcov/
 .reasonix/
 dist/
+demo-video/rec/
