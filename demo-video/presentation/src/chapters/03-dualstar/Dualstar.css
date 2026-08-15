@@ -1,0 +1,196 @@
+/* dualstar 前缀 .ds- */
+
+.ds-scene {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 80px;
+  padding: var(--stage-pad-y) var(--stage-pad-x);
+}
+
+.ds-center { flex-direction: column; gap: 44px; }
+
+.ds-kicker { color: var(--accent); font-size: 18px; letter-spacing: 0.22em; }
+
+.ds-h1 { font-size: 54px; font-weight: 700; line-height: 1.4; color: var(--text); text-align: center; }
+.ds-h1-center { font-size: 54px; font-weight: 700; color: var(--text); text-align: center; }
+.ds-h1-sm { font-size: 44px; font-weight: 700; line-height: 1.4; color: var(--text); }
+
+.ds-good { color: var(--accent); text-shadow: 0 0 24px var(--accent-soft); }
+.ds-bad { color: var(--accent-glow); text-shadow: 0 0 24px var(--accent-glow); }
+.ds-70 { font-family: var(--font-display-en); }
+
+.ds-p { font-size: 24px; color: var(--text-mute); text-align: center; }
+
+.ds-copy { max-width: 620px; display: flex; flex-direction: column; gap: 24px; }
+
+.ds-demo { width: 720px; height: 460px; padding: 40px; position: relative; display: flex; align-items: center; justify-content: center; }
+
+/* 问题回路 */
+.ds-loop { display: flex; align-items: center; gap: 24px; padding: 34px 44px; }
+
+.ds-loop-node {
+  padding: 16px 26px;
+  font-size: 24px;
+  color: var(--text-2);
+  border: 1px solid var(--rule);
+  animation: ds-rise 500ms ease-out both;
+}
+
+.ds-loop-node:nth-child(3) { animation-delay: 150ms; }
+.ds-loop-node:nth-child(5) { animation-delay: 300ms; }
+
+.ds-loop-arrow { font-size: 30px; color: var(--text-faint); }
+.ds-loop-back { animation: ds-spin 2.2s linear infinite; }
+
+.ds-loop-drift { position: relative; color: var(--accent-glow); border-color: var(--accent-glow); }
+.ds-x {
+  position: absolute;
+  top: -14px;
+  right: -14px;
+  width: 32px;
+  height: 32px;
+  border: 2px solid var(--accent-glow);
+  border-radius: 50%;
+  color: var(--accent-glow);
+  font-size: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface);
+  animation: ds-pop 400ms cubic-bezier(0.2, 1.4, 0.4, 1) 600ms both;
+}
+
+/* 流程导轨 */
+.ds-rail { display: flex; gap: 14px; }
+
+.ds-rail-node {
+  flex: 1;
+  padding: 14px 16px;
+  border: 1px solid var(--rule);
+  opacity: 0.35;
+  transition: none;
+  animation: ds-fade 400ms ease-out both;
+}
+
+.ds-rail-on { opacity: 1; border-color: var(--accent); box-shadow: 0 0 18px var(--accent-soft); }
+.ds-rail-k { color: var(--text-faint); font-size: 14px; }
+.ds-rail-t { font-size: 22px; font-weight: 700; color: var(--text); }
+.ds-rail-e { color: var(--accent); font-size: 12px; letter-spacing: 0.18em; }
+
+/* checklist */
+.ds-checklist { display: flex; flex-direction: column; gap: 22px; width: 100%; }
+
+.ds-check {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  animation: ds-rise 450ms cubic-bezier(0.2, 0.9, 0.25, 1) both;
+}
+
+.ds-check-box {
+  width: 40px;
+  height: 40px;
+  border: 2px solid var(--text-faint);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: transparent;
+}
+
+.ds-check-ok { border-color: var(--accent); color: var(--accent); box-shadow: 0 0 14px var(--accent-soft); }
+
+.ds-check-svg { width: 20px; height: 20px; }
+
+.ds-check-t { font-size: 26px; color: var(--text); flex: 1; }
+
+.ds-check-tag { color: var(--accent); font-size: 15px; }
+
+.ds-demo-foot { position: absolute; bottom: 22px; left: 40px; color: var(--text-faint); }
+
+/* 质询对话 */
+.ds-chat-wrap { align-items: flex-start; }
+
+.ds-chat { display: flex; flex-direction: column; gap: 26px; width: 100%; }
+
+.ds-msg { max-width: 86%; padding: 22px 26px; animation: ds-rise 550ms cubic-bezier(0.2, 0.9, 0.25, 1) both; }
+
+.ds-msg-who { font-size: 13px; letter-spacing: 0.2em; margin-bottom: 10px; }
+
+.ds-msg-prop { border-left: 3px solid var(--text-faint); }
+.ds-msg-prop .ds-msg-who { color: var(--text-mute); }
+.ds-msg-prop .ds-msg-body { font-size: 24px; color: var(--text-2); }
+
+.ds-msg-obj { border-left: 3px solid var(--accent-glow); margin-left: auto; background: var(--accent-soft); }
+.ds-msg-obj .ds-msg-who { color: var(--accent-glow); }
+.ds-msg-obj .ds-msg-body { font-size: 24px; color: var(--text); line-height: 1.7; }
+
+.ds-conf {
+  display: inline-block;
+  margin-left: 14px;
+  color: var(--accent-glow);
+  font-size: 14px;
+}
+
+/* 裁决 */
+.ds-verdict { width: 100%; display: flex; flex-direction: column; gap: 44px; align-items: center; }
+
+.ds-stamp {
+  padding: 18px 46px;
+  font-size: 40px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  animation: ds-stamp 500ms cubic-bezier(0.2, 1.6, 0.4, 1) 300ms both;
+}
+
+.ds-stamp-ok { color: var(--accent); border: 3px solid var(--accent); box-shadow: 0 0 30px var(--accent-soft), inset 0 0 20px var(--accent-soft); }
+
+.ds-verdict-bars { width: 100%; display: flex; flex-direction: column; gap: 20px; }
+
+.ds-vbar-row { display: flex; align-items: center; gap: 18px; }
+.ds-vbar-label { width: 110px; color: var(--text-mute); font-size: 15px; }
+.ds-vbar { flex: 1; height: 26px; background: var(--surface-3); }
+
+.ds-vbar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent-soft), var(--accent));
+  box-shadow: 0 0 12px var(--accent-soft);
+  animation: ds-grow 900ms cubic-bezier(0.2, 0.8, 0.3, 1) both;
+}
+
+.ds-vbar-num { width: 70px; color: var(--accent); font-size: 17px; }
+
+/* 否决回路 */
+.ds-loopback { padding: 44px 56px; }
+
+.ds-lb-flow { display: flex; align-items: center; gap: 18px; }
+
+.ds-lb-node { width: 320px; padding: 26px; text-align: center; animation: ds-rise 550ms cubic-bezier(0.2, 0.9, 0.25, 1) both; }
+.ds-lb-node:nth-child(3) { animation-delay: 250ms; }
+.ds-lb-node:nth-child(5) { animation-delay: 500ms; }
+
+.ds-lb-reject { border: 1px solid var(--accent-glow); }
+.ds-lb-reject .ds-lb-t { color: var(--accent-glow); }
+
+.ds-lb-guide { border: 1px solid var(--text-faint); }
+.ds-lb-guide .ds-lb-t { color: var(--text-2); }
+
+.ds-lb-block { border: 1px solid var(--accent); box-shadow: 0 0 22px var(--accent-soft); }
+.ds-lb-block .ds-lb-t { color: var(--accent); }
+
+.ds-lb-t { font-size: 27px; font-weight: 700; }
+.ds-lb-s { margin-top: 10px; color: var(--text-faint); font-size: 13px; }
+
+.ds-lb-arrow { width: 120px; flex: none; }
+
+.ds-draw { stroke-dasharray: 120; stroke-dashoffset: 120; animation: ds-drawline 800ms ease-out 200ms both; }
+
+@keyframes ds-rise { from { opacity: 0; transform: translateY(22px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes ds-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes ds-pop { from { opacity: 0; transform: scale(0.3); } to { opacity: 1; transform: scale(1); } }
+@keyframes ds-stamp { from { opacity: 0; transform: scale(1.8) rotate(-6deg); } to { opacity: 1; transform: scale(1) rotate(0); } }
+@keyframes ds-grow { from { width: 0; } }
+@keyframes ds-spin { to { transform: rotate(360deg); } }
+@keyframes ds-drawline { to { stroke-dashoffset: 0; } }
