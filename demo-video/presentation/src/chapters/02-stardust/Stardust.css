@@ -1,0 +1,207 @@
+/* stardust 前缀 .sd- */
+
+.sd-scene {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 80px;
+  padding: var(--stage-pad-y) var(--stage-pad-x);
+}
+
+.sd-center { flex-direction: column; gap: 56px; }
+
+.sd-copy { max-width: 640px; display: flex; flex-direction: column; gap: 22px; }
+
+.sd-kicker { color: var(--accent); font-size: 18px; letter-spacing: 0.22em; }
+
+.sd-h1 { font-size: 52px; font-weight: 700; line-height: 1.35; color: var(--text); }
+
+.sd-h1-center { font-size: 56px; font-weight: 700; color: var(--text); text-align: center; }
+
+.sd-h1-sm { font-size: 36px; font-weight: 600; color: var(--text-2); }
+
+.sd-p { font-size: 24px; color: var(--text-mute); line-height: 1.7; }
+
+.sd-good { color: var(--accent); text-shadow: 0 0 26px var(--accent-soft); }
+.sd-bad { color: var(--accent-glow); text-shadow: 0 0 26px var(--accent-glow); }
+
+.sd-demo {
+  width: 720px;
+  height: 480px;
+  padding: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+}
+
+.sd-chart, .sd-graph { width: 100%; height: 100%; }
+
+.sd-chart-label, .sd-chart-warn { font-family: var(--font-mono); font-size: 16px; }
+
+.sd-curve {
+  stroke-dasharray: 900;
+  stroke-dashoffset: 900;
+  animation: sd-draw 1600ms ease-out 200ms both;
+}
+
+@keyframes sd-draw { to { stroke-dashoffset: 0; } }
+
+/* 聚光灯 */
+.sd-spot-wrap { overflow: hidden; }
+
+.sd-spotlight {
+  position: absolute;
+  width: 360px;
+  height: 360px;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  background: radial-gradient(circle, var(--accent-soft) 0%, transparent 68%);
+  animation: sd-spot 2.4s ease-in-out 300ms both;
+}
+
+@keyframes sd-spot {
+  from { opacity: 0; transform: translate(-50%, -50%) scale(0.3); }
+  to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+}
+
+.sd-node { animation: sd-fade 600ms ease-out both; }
+.sd-node-hot { animation: sd-pop 600ms cubic-bezier(0.2, 1.4, 0.4, 1) both; filter: drop-shadow(0 0 8px var(--accent)); }
+.sd-link { animation: sd-fade 500ms ease-out both; }
+
+.sd-legend {
+  position: absolute;
+  bottom: 22px;
+  left: 28px;
+  display: flex;
+  gap: 26px;
+  color: var(--text-mute);
+  font-size: 15px;
+}
+
+.sd-lg { display: flex; align-items: center; gap: 8px; }
+.sd-lg-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--surface-3); border: 1px solid var(--text-faint); }
+.sd-lg-on { background: var(--accent); border-color: var(--accent); }
+
+/* 压缩动画 */
+.sd-collapse { display: flex; align-items: center; gap: 60px; }
+
+.sd-old { display: grid; grid-template-columns: repeat(2, 240px); gap: 14px; }
+
+.sd-oldnode {
+  padding: 14px 18px;
+  font-size: 18px;
+  color: var(--text-2);
+  animation: sd-shrink 900ms ease-in 500ms both;
+}
+
+@keyframes sd-shrink {
+  0% { opacity: 1; transform: scale(1); }
+  100% { opacity: 0.25; transform: scale(0.86); filter: blur(0.6px); }
+}
+
+.sd-collapse-arrow { width: 110px; flex: none; }
+
+.sd-sumnode {
+  width: 340px;
+  padding: 30px;
+  border-color: var(--accent);
+  animation: sd-pop 700ms cubic-bezier(0.2, 1.4, 0.4, 1) 700ms both;
+}
+
+.sd-sum-tag { color: var(--accent); margin-bottom: 12px; }
+.sd-sum-txt { font-size: 22px; color: var(--text); line-height: 1.7; }
+
+/* 预算卡 */
+.sd-budgets { display: flex; gap: 40px; }
+
+.sd-budget {
+  position: relative;
+  width: 300px;
+  padding: 40px 34px;
+  text-align: center;
+  animation: sd-rise 600ms cubic-bezier(0.2, 0.9, 0.25, 1) both;
+}
+
+.sd-bn { font-size: 120px; color: var(--text); line-height: 1; }
+
+.sd-bt { font-size: 28px; font-weight: 700; color: var(--text-2); margin-top: 6px; }
+
+.sd-bs { color: var(--text-faint); margin-top: 10px; }
+
+.sd-cap {
+  position: absolute;
+  top: 18px;
+  right: 18px;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  padding: 3px 10px;
+  font-size: 13px;
+}
+
+.sd-note { color: var(--text-mute); font-size: 18px; }
+
+/* 环形 */
+.sd-mega { font-size: 150px; color: var(--text); text-shadow: 0 0 50px var(--accent-soft); }
+.sd-mega-unit { font-size: 60px; color: var(--accent); }
+
+.sd-ring-wrap { flex-direction: column; gap: 8px; width: 460px; height: 460px; }
+.sd-ring { width: 320px; height: 320px; }
+.sd-ring-fill {
+  filter: drop-shadow(0 0 12px var(--accent));
+  animation: sd-ring 1400ms cubic-bezier(0.3, 0.8, 0.3, 1) 300ms both;
+}
+
+@keyframes sd-ring { to { stroke-dashoffset: 68; } }
+
+.sd-ring-num {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -58%);
+  font-size: 96px;
+  color: var(--text);
+}
+
+.sd-ring-pct { font-size: 40px; color: var(--accent); }
+.sd-ring-label { color: var(--text-mute); margin-top: -6px; }
+
+/* 收束 */
+.sd-final-pair { display: flex; align-items: center; gap: 44px; }
+
+.sd-final { width: 420px; padding: 40px; animation: sd-rise 600ms cubic-bezier(0.2, 0.9, 0.25, 1) both; }
+
+.sd-final-t { font-size: 22px; color: var(--text-mute); }
+.sd-final-v { font-size: 52px; font-weight: 700; margin: 12px 0; }
+.sd-final-s { color: var(--text-faint); }
+
+.sd-final-plus { font-size: 60px; color: var(--accent-glow); text-shadow: 0 0 20px var(--accent-glow); }
+
+.sd-mt { margin-top: 0; }
+
+@keyframes sd-fade { from { opacity: 0; } to { opacity: 1; } }
+
+@keyframes sd-pop {
+  from { opacity: 0; transform: scale(0.3); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+@keyframes sd-rise {
+  from { opacity: 0; transform: translateY(26px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* step 4 对比条（去战绩版） */
+.sd-bar-wrap { flex-direction: column; gap: 40px; }
+.sd-barrow { display: flex; align-items: center; gap: 18px; width: 100%; }
+.sd-bar-label { width: 120px; color: var(--text-mute); font-size: 16px; }
+.sd-bar { flex: 1; height: 44px; background: var(--surface-3); }
+.sd-bar-fill { height: 100%; animation: sd-grow 1s cubic-bezier(0.2, 0.8, 0.3, 1) both; }
+.sd-bar-bad { width: 100%; background: linear-gradient(90deg, var(--surface-3), var(--accent-glow)); opacity: 0.75; }
+.sd-bar-good { width: 34%; background: linear-gradient(90deg, var(--accent-soft), var(--accent)); box-shadow: 0 0 14px var(--accent-soft); animation-delay: 300ms; }
+.sd-bar-tag { width: 110px; color: var(--text-faint); font-size: 14px; }
+.sd-bar-note { color: var(--text-faint); font-size: 14px; }

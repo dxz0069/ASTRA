@@ -1,0 +1,213 @@
+/* coldopen 前缀 .co- */
+
+.co-scene {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: 48px;
+  padding: var(--stage-pad-y) var(--stage-pad-x);
+}
+
+.co-scanline {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  opacity: 0.35;
+  animation: co-scan 7s linear infinite;
+}
+
+@keyframes co-scan {
+  0% { top: 8%; }
+  50% { top: 92%; }
+  100% { top: 8%; }
+}
+
+.co-head { position: absolute; top: 90px; left: var(--stage-pad-x); color: var(--text-mute); }
+
+/* step 0 — 输入输出双卡 */
+.co-io {
+  display: flex;
+  align-items: center;
+  gap: 36px;
+}
+
+.co-card {
+  width: 380px;
+  padding: 28px 32px;
+  animation: co-rise 700ms cubic-bezier(0.2, 0.9, 0.25, 1) both;
+}
+
+.co-card-goal { animation-delay: 180ms; }
+
+.co-card-label { color: var(--text-mute); margin-bottom: 12px; }
+
+.co-card-val {
+  font-family: var(--font-mono);
+  font-size: 34px;
+  color: var(--text);
+  letter-spacing: 0.02em;
+}
+
+.co-card-goal .co-card-val {
+  color: var(--accent-glow);
+  text-shadow: 0 0 24px var(--accent-glow);
+}
+
+.co-card-sub { margin-top: 10px; color: var(--text-mute); font-size: 18px; }
+
+.co-arrow { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+.co-arrow-svg { width: 120px; }
+.co-arrow-mid {
+  color: var(--accent-glow);
+  font-size: 26px;
+  text-shadow: 0 0 16px var(--accent-glow);
+  animation: co-pulse 1.6s ease-in-out infinite;
+}
+
+.co-slogan {
+  font-size: 72px;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: 0.01em;
+}
+
+.co-em {
+  color: var(--accent);
+  text-shadow: 0 0 28px var(--accent-soft);
+}
+
+/* step 1 — 38 flag */
+.co-flags {
+  display: grid;
+  grid-template-columns: repeat(19, 1fr);
+  gap: 14px;
+  width: 920px;
+}
+
+.co-flagdot {
+  width: 14px;
+  height: 20px;
+  background: var(--accent);
+  box-shadow: 0 0 10px var(--accent);
+  clip-path: polygon(0 0, 100% 0, 100% 65%, 50% 100%, 0 65%);
+  animation: co-plant 500ms cubic-bezier(0.2, 1.4, 0.4, 1) both;
+}
+
+.co-hero-wrap { display: flex; flex-direction: column; align-items: center; gap: 20px; }
+
+.co-hero {
+  font-size: 180px;
+  line-height: 1;
+  color: var(--text);
+  text-shadow: 0 0 60px var(--accent-soft);
+}
+
+.co-hero-dim { font-size: 64px; color: var(--text-faint); margin-left: 16px; }
+
+.co-title { font-size: 44px; font-weight: 600; color: var(--text-2); text-align: center; }
+
+.co-brand { display: flex; align-items: baseline; gap: 20px; margin-top: 10px; }
+
+.co-brand-name {
+  font-family: var(--font-display-en);
+  font-size: 30px;
+  letter-spacing: 0.35em;
+  color: var(--accent);
+}
+
+.co-brand-cn { color: var(--text-mute); font-size: 18px; }
+
+/* step 2 — 三原语 */
+.co-h2 { font-size: 54px; font-weight: 700; text-align: center; color: var(--text); }
+
+.co-prims { display: flex; align-items: center; gap: 20px; }
+
+.co-prim {
+  width: 300px;
+  padding: 34px 30px;
+  text-align: center;
+  animation: co-rise 600ms cubic-bezier(0.2, 0.9, 0.25, 1) both;
+}
+
+.co-prim:nth-child(3) { animation-delay: 240ms; }
+.co-prim:nth-child(5) { animation-delay: 480ms; }
+
+.co-prim-icon { width: 84px; height: 84px; }
+
+.co-prim-name { font-size: 34px; font-weight: 700; color: var(--accent); margin: 14px 0 8px; }
+
+.co-prim-desc { color: var(--text-mute); font-size: 19px; line-height: 1.6; }
+
+.co-prim-link { width: 110px; flex: none; }
+
+.co-draw {
+  stroke-dasharray: 110;
+  stroke-dashoffset: 110;
+  animation: co-drawline 900ms ease-out 300ms both;
+}
+
+.co-draw-slow { animation-delay: 640ms; }
+
+/* step 3 — 管线 */
+.co-pipeline { display: flex; align-items: stretch; gap: 28px; }
+
+.co-pipe {
+  position: relative;
+  width: 240px;
+  padding: 26px 24px;
+  animation: co-pipe-in 600ms cubic-bezier(0.2, 0.9, 0.25, 1) both;
+}
+
+.co-pipe-k { color: var(--text-faint); font-size: 18px; }
+
+.co-pipe-t { font-size: 28px; font-weight: 700; color: var(--text); margin: 10px 0 8px; }
+
+.co-pipe-s { color: var(--accent); opacity: 0.8; font-size: 15px; }
+
+.co-pipe-line {
+  position: absolute;
+  right: -24px;
+  top: 50%;
+  width: 20px;
+  height: 2px;
+  background: var(--accent);
+  box-shadow: 0 0 8px var(--accent);
+  animation: co-fade-in 300ms ease-out both;
+}
+
+.co-foot { color: var(--text-mute); font-size: 20px; }
+
+@keyframes co-rise {
+  from { opacity: 0; transform: translateY(28px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes co-plant {
+  from { opacity: 0; transform: translateY(-18px) scale(0.4); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes co-drawline {
+  to { stroke-dashoffset: 0; }
+}
+
+@keyframes co-pipe-in {
+  from { opacity: 0; transform: translateY(20px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes co-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes co-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}

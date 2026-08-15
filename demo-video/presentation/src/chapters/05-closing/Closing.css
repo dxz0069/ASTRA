@@ -1,0 +1,85 @@
+/* closing 前缀 .cl- */
+
+.cl-scene {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 48px;
+  padding: var(--stage-pad-y) var(--stage-pad-x);
+}
+
+/* 三元组 */
+.cl-pillars { display: flex; gap: 44px; }
+
+.cl-pillar {
+  position: relative;
+  width: 360px;
+  padding: 44px 36px 36px;
+  text-align: center;
+  animation: cl-rise 650ms cubic-bezier(0.2, 0.9, 0.25, 1) both;
+}
+
+.cl-beam {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  width: 3px;
+  height: 100%;
+  transform: translateX(-50%);
+  background: linear-gradient(180deg, var(--accent), transparent);
+  opacity: 0.5;
+  animation: cl-beam 2.2s ease-in-out infinite;
+}
+
+@keyframes cl-beam {
+  0%, 100% { opacity: 0.25; }
+  50% { opacity: 0.75; }
+}
+
+.cl-pillar-t { font-size: 36px; font-weight: 700; color: var(--accent); }
+.cl-pillar-s { color: var(--text-faint); margin: 10px 0 14px; }
+.cl-pillar-d { font-size: 24px; color: var(--text-2); }
+
+/* 金句 */
+.cl-quote { font-size: 64px; font-weight: 700; color: var(--text); }
+
+.cl-zero { display: flex; flex-direction: column; align-items: center; gap: 18px; }
+.cl-zero-label { color: var(--text-mute); letter-spacing: 0.2em; }
+.cl-zero-n { font-size: 130px; color: var(--accent); text-shadow: 0 0 50px var(--accent-soft); }
+
+/* 谢幕 */
+.cl-mark {
+  font-family: var(--font-display-en);
+  font-size: 110px;
+  font-weight: 700;
+  letter-spacing: 0.4em;
+  color: var(--text);
+  text-shadow:
+    0 0 40px var(--accent-soft),
+    0 0 90px var(--accent-glow);
+  animation: cl-glow 3s ease-in-out infinite;
+}
+
+@keyframes cl-glow {
+  0%, 100% { text-shadow: 0 0 40px var(--accent-soft), 0 0 80px var(--accent-glow); }
+  50% { text-shadow: 0 0 60px var(--accent-soft), 0 0 130px var(--accent-glow); }
+}
+
+.cl-final { font-size: 72px; font-weight: 700; color: var(--text-2); display: flex; align-items: center; gap: 28px; }
+.cl-arrow { color: var(--accent-glow); font-size: 56px; }
+.cl-good { color: var(--accent); }
+
+.cl-team { display: flex; gap: 36px; color: var(--text-mute); }
+
+.cl-thanks {
+  font-size: 30px;
+  color: var(--text-2);
+  letter-spacing: 0.3em;
+  animation: cl-fade 900ms ease-out 800ms both;
+}
+
+@keyframes cl-rise { from { opacity: 0; transform: translateY(26px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes cl-fade { from { opacity: 0; } to { opacity: 1; } }
