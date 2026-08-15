@@ -1,0 +1,143 @@
+/* cover 前缀 .cv- */
+
+.cv-scene {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 26px;
+  padding: var(--stage-pad-y) var(--stage-pad-x);
+}
+
+/* 徽记 */
+.cv-mark { width: 340px; height: 340px; }
+
+.cv-rays line { animation: cv-fade 800ms ease-out both; }
+.cv-rays line:nth-child(1) { animation-delay: 300ms; }
+.cv-rays line:nth-child(4) { animation-delay: 380ms; }
+
+.cv-orbit { animation: cv-spin 26s linear infinite; transform-origin: 160px 160px; }
+
+.cv-orbit-path {
+  stroke-dasharray: 600;
+  stroke-dashoffset: 600;
+  animation: cv-draw 1200ms ease-out 150ms both;
+}
+
+.cv-inner-ring {
+  stroke-dasharray: 540;
+  stroke-dashoffset: 540;
+  animation: cv-draw 1000ms ease-out 300ms both, cv-spin 40s linear infinite reverse;
+  transform-origin: 160px 160px;
+}
+
+.cv-sat { animation: cv-twinkle 2.2s ease-in-out infinite; }
+.cv-sat-1 { animation-delay: 0s; }
+.cv-sat-2 { animation-delay: 0.7s; }
+.cv-sat-3 { animation-delay: 1.4s; }
+
+.cv-star { animation: cv-star-in 900ms cubic-bezier(0.2, 1.5, 0.4, 1) 450ms both; }
+
+.cv-halo { animation: cv-halo 3s ease-in-out 900ms infinite; }
+
+/* 标题 */
+.cv-title { margin-top: 6px; }
+
+.cv-word {
+  font-family: var(--font-display-en);
+  font-size: 128px;
+  font-weight: 700;
+  letter-spacing: 0.42em;
+  margin-right: -0.42em; /* 抵消末字符字距，保证视觉居中 */
+  color: var(--text);
+  text-shadow: 0 0 40px var(--accent-soft), 0 0 90px var(--accent-glow);
+  animation: cv-word-glow 3.4s ease-in-out infinite;
+}
+
+.cv-sub {
+  font-size: 26px;
+  color: var(--text-2);
+  letter-spacing: 0.34em;
+  margin-right: -0.34em;
+  animation: cv-fade 700ms ease-out 700ms both;
+}
+
+/* 战队名 */
+.cv-team {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 18px;
+  animation: cv-rise 700ms cubic-bezier(0.2, 0.9, 0.25, 1) 950ms both;
+}
+
+.cv-team-bracket {
+  font-family: var(--font-mono);
+  font-size: 34px;
+  color: var(--accent-glow);
+  text-shadow: 0 0 16px var(--accent-glow);
+}
+
+.cv-team-name {
+  font-family: var(--font-mono);
+  font-size: 40px;
+  font-weight: 700;
+  letter-spacing: 0.3em;
+  margin-right: -0.1em;
+  color: var(--accent);
+  text-shadow: 0 0 22px var(--accent-soft);
+}
+
+.cv-cursor {
+  width: 22px;
+  height: 40px;
+  background: var(--accent);
+  box-shadow: 0 0 12px var(--accent);
+  animation: cv-blink 1s steps(1) infinite;
+}
+
+.cv-org {
+  color: var(--text-faint);
+  font-size: 15px;
+  letter-spacing: 0.24em;
+  margin-top: 4px;
+  animation: cv-fade 700ms ease-out 1250ms both;
+}
+
+@keyframes cv-spin { to { transform: rotate(360deg); } }
+
+@keyframes cv-draw { to { stroke-dashoffset: 0; } }
+
+@keyframes cv-fade { from { opacity: 0; } to { opacity: 1; } }
+
+@keyframes cv-rise {
+  from { opacity: 0; transform: translateY(18px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes cv-star-in {
+  from { opacity: 0; transform: scale(0.2) rotate(-45deg); }
+  to { opacity: 1; transform: scale(1) rotate(0deg); }
+}
+
+@keyframes cv-halo {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
+
+@keyframes cv-twinkle {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+@keyframes cv-blink {
+  0%, 55% { opacity: 1; }
+  56%, 100% { opacity: 0; }
+}
+
+@keyframes cv-word-glow {
+  0%, 100% { text-shadow: 0 0 40px var(--accent-soft), 0 0 90px var(--accent-glow); }
+  50% { text-shadow: 0 0 60px var(--accent-soft), 0 0 140px var(--accent-glow); }
+}

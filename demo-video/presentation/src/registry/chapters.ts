@@ -1,4 +1,6 @@
 import type { ChapterDef } from "./types";
+import CoverChapter from "../chapters/00-cover/Cover";
+import { narrations as coverNarrations } from "../chapters/00-cover/narrations";
 import ColdopenChapter from "../chapters/01-coldopen/Coldopen";
 import { narrations as coldopenNarrations } from "../chapters/01-coldopen/narrations";
 import StardustChapter from "../chapters/02-stardust/Stardust";
@@ -11,6 +13,12 @@ import ClosingChapter from "../chapters/05-closing/Closing";
 import { narrations as closingNarrations } from "../chapters/05-closing/narrations";
 
 export const CHAPTERS: ChapterDef[] = [
+  {
+    id: "cover",
+    title: "封面",
+    narrations: coverNarrations,
+    Component: CoverChapter,
+  },
   {
     id: "coldopen",
     title: "开场 · ASTRA 是什么",
