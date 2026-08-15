@@ -2,7 +2,7 @@
 // 产出 1920x1080 webm，随后由 ffmpeg 烧录字幕。
 // 用法：node record.mjs            （18 步版，与 2:05 字幕对应）
 import { chromium } from '../astra/node_modules/playwright-core/index.mjs';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -19,6 +19,7 @@ const cues = [...srt.matchAll(/(\d{2}:\d{2}:\d{2},\d{3}) --> (\d{2}:\d{2}:\d{2},
 console.log(`cues: ${cues.length}, last end: ${(cues.at(-1).end / 1000).toFixed(1)}s`);
 
 const browser = await chromium.launch({ channel: 'msedge', headless: true });
+const tCreate = Date.now(); // 视频录制起点（context 创建后近似 t=0）
 const context = await browser.newContext({
   viewport: { width: 2080, height: 1280 },
   recordVideo: { dir: join(here, 'rec'), size: { width: 2080, height: 1280 } },
@@ -40,4 +41,5 @@ if (tail > 0) await page.waitForTimeout(tail);
 
 await context.close(); // 落盘视频
 await browser.close();
-console.log('recording done');
+writeFileSync(join(here, 'rec', 'timeline.json'), JSON.stringify({ preroll: t0 - tCreate, cues }));
+console.log(`recording done (preroll=${t0 - tCreate}ms)`);
