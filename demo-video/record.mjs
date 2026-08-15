@@ -20,8 +20,8 @@ console.log(`cues: ${cues.length}, last end: ${(cues.at(-1).end / 1000).toFixed(
 
 const browser = await chromium.launch({ channel: 'msedge', headless: true });
 const context = await browser.newContext({
-  viewport: { width: 1920, height: 1080 },
-  recordVideo: { dir: join(here, 'rec'), size: { width: 1920, height: 1080 } },
+  viewport: { width: 2080, height: 1280 },
+  recordVideo: { dir: join(here, 'rec'), size: { width: 2080, height: 1280 } },
 });
 const page = await context.newPage();
 await page.goto('http://localhost:5173', { waitUntil: 'domcontentloaded' });
