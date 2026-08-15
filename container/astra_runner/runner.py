@@ -25,6 +25,7 @@ import sys
 import threading
 import time
 from collections import deque
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -91,6 +92,8 @@ class AstraEngine(Protocol):
     def create_hint(self, project_id: str, content: str) -> None: ...
     def wait_project(self, project_id: str, timeout_seconds: float) -> bool: ...
     def list_fact_descriptions(self, project_id: str) -> list[str]: ...
+    def stop_project(self, project_id: str) -> None: ...
+    def reactivate_project(self, project_id: str) -> None: ...
     def stop(self) -> None: ...
 
 
@@ -335,6 +338,16 @@ def run_benchmark(
                             progress.mark(result.unique_code, "done")
                         return
                     LOG.info("challenge deferred code=%s（%s 分钟无结果，保留进度放回队尾）", result.unique_code, defer_after_seconds / 60)
+                    # 僵尸项目修复（R5 实测）：defer 即停项目——平台容器已关，继续调度
+                    # 只会攻击死靶机并占用 max_running_projects 预算饿死新题；
+                    # 服务端 stop 清 worker 租约+reason，scheduler 停止派发并取消在途任务，
+                    # 星图数据保留，回队复用时 reactivate 恢复。
+                    try:
+                        stop_fn = getattr(engine_factory(), "stop_project", None)
+                        if callable(stop_fn) and result.project_id:
+                            stop_fn(result.project_id)
+                    except Exception:  # noqa: BLE001
+                        pass
                     queue.append((ch, result))
                 return
             except TaskFinishedError as exc:
@@ -379,6 +392,52 @@ def run_benchmark(
             LOG.info("并行窗口收缩并锁定 slots=%s（名额上限已探明）", slots)
 
     _fill()
+    # 对账扫描（R5 修复清单 1b，兜底所有泄漏路径的孤儿项目）：
+    # 引擎侧 active 但不在当前运行窗口、且创建超过宽限期（60s）的项目 → stopped。
+    reconcile_interval = float(os.environ.get("ASTRA_RECONCILE_INTERVAL", "300"))
+    reconcile_grace = float(os.environ.get("ASTRA_RECONCILE_GRACE", "60"))
+    last_reconcile = 0.0
+
+    def _reconcile_orphans() -> None:
+        nonlocal last_reconcile
+        if reconcile_interval <= 0:
+            return
+        now_mono = time.monotonic()
+        if now_mono - last_reconcile < reconcile_interval:
+            return
+        last_reconcile = now_mono
+        try:
+            engine = engine_factory()
+            list_fn = getattr(engine, "list_active_projects", None)
+            if not callable(list_fn):
+                return
+            window_ids = {
+                results[code].project_id
+                for code in active
+                if code in results and results[code].project_id
+            }
+            now_wall = datetime.now(timezone.utc).timestamp()
+            for proj in list_fn():
+                pid = proj.get("id")
+                if not pid or pid in window_ids:
+                    continue
+                try:
+                    created_ts = datetime.strptime(
+                        proj.get("created_at", ""), "%Y-%m-%dT%H:%M:%SZ"
+                    ).replace(tzinfo=timezone.utc).timestamp()
+                except ValueError:
+                    created_ts = 0.0
+                if now_wall - created_ts < reconcile_grace:
+                    continue
+                LOG.warning(
+                    "reconcile: orphan active project stopped project=%s", pid,
+                )
+                stop_fn = getattr(engine, "stop_project", None)
+                if callable(stop_fn):
+                    stop_fn(pid)
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("reconcile scan failed error=%s", exc)
+
     while active and not stop_event.is_set():
         finished = [code for code, t in list(active.items()) if not t.is_alive()]
         for code in finished:
@@ -386,6 +445,7 @@ def run_benchmark(
             thread.join(timeout=5)
             LOG.info("并行窗口完成题目 code=%s active=%s/%s", code, len(active), slots)
         _fill()
+        _reconcile_orphans()
         if active:
             time.sleep(2)
 
@@ -455,6 +515,13 @@ def _run_single_challenge(
         if result.project_id:
             project_id = result.project_id
             LOG.info("challenge resumed code=%s reuse project=%s（defer 续跑）", code, project_id)
+            # 僵尸项目修复配套：defer 时项目已置 stopped，复用前置回 active 恢复调度
+            try:
+                reactivate_fn = getattr(engine, "reactivate_project", None)
+                if callable(reactivate_fn):
+                    reactivate_fn(project_id)
+            except Exception:  # noqa: BLE001
+                pass
         else:
             project_id = engine.create_project(
                 title=f"{DEFAULT_PROJECT_TITLE_PREFIX}-{code}",
@@ -508,6 +575,15 @@ def _run_single_challenge(
                                 _submit_flag_safely(client, code, flag, result, started_at)
                         except Exception:  # noqa: BLE001
                             pass
+                        # R5 修复（关题竞态 404 级联）：先 stop 让 scheduler 取消在途
+                        # 任务并停止派发，等一个调度周期再删，避免在途 reason 写结果撞 404
+                        stop_fn = getattr(engine, "stop_project", None)
+                        if callable(stop_fn):
+                            try:
+                                stop_fn(project_id)
+                                time.sleep(4)  # 一个调度周期让取消生效
+                            except Exception:  # noqa: BLE001
+                                pass
                         delete_fn = getattr(engine, "delete_project", None)
                         if callable(delete_fn):
                             try:

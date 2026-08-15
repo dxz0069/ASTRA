@@ -382,7 +382,7 @@ workers:
         return "/opt/astra/dsh/astra-headless.patch.yml"
 
     @staticmethod
-    def _cleanup_dsh_home(keep: int = 50) -> None:
+    def _cleanup_dsh_home(keep: int = 200, max_age_hours: float = 72.0) -> None:
         """清理 dsh worker 的旧会话目录（DSH 持久化后端不自动删除，长跑会累积）。
 
         只在**新一轮引擎启动**时执行（上一轮会话已无价值）：扫描所有 worker 的
@@ -405,7 +405,11 @@ workers:
             )
         except OSError:
             return
-        stale = dirs[keep:]
+        # R5 修复（会话丢失税 13+ 次）：按时间删除而非数量——近期会话绝不清理，
+        # defer 续跑/conclude 依赖的会话跨引擎重启存活
+        import time as _time
+        cutoff = _time.time() - max_age_hours * 3600
+        stale = [d for d in dirs[keep:] if d.stat().st_mtime < cutoff]
         if not stale:
             return
         for old in stale:
@@ -515,6 +519,45 @@ class LocalAstraEngine:
             requests.delete(f"{ASTRA_SERVER_URL}/projects/{project_id}", timeout=10)
         except requests.RequestException:
             pass
+
+    def stop_project(self, project_id: str) -> None:
+        """defer 时停项目：服务端清 worker 租约与 reason（scheduler 停止派发并取消在途
+        任务），星图数据保留——修复 R5 实测的僵尸项目饿死新题问题。"""
+        try:
+            response = requests.put(
+                f"{ASTRA_SERVER_URL}/projects/{project_id}/status",
+                json={"status": "stopped"},
+                timeout=15,
+            )
+            response.raise_for_status()
+            LOG.info("project stopped (defer) project=%s", project_id)
+        except requests.RequestException as exc:
+            LOG.warning("stop_project failed project=%s error=%s", project_id, exc)
+
+    def reactivate_project(self, project_id: str) -> None:
+        """defer 回队复用：项目置回 active，恢复调度（星图进度无损）。"""
+        try:
+            response = requests.put(
+                f"{ASTRA_SERVER_URL}/projects/{project_id}/status",
+                json={"status": "active"},
+                timeout=15,
+            )
+            response.raise_for_status()
+            LOG.info("project reactivated (defer resume) project=%s", project_id)
+        except requests.RequestException as exc:
+            LOG.warning("reactivate_project failed project=%s error=%s", project_id, exc)
+
+    def list_active_projects(self) -> list[dict]:
+        """对账扫描（R5 修复清单 1b）：引擎侧 active 项目 [{id, created_at}]。"""
+        response = requests.get(f"{ASTRA_SERVER_URL}/projects", timeout=15)
+        response.raise_for_status()
+        payload = response.json()
+        items = payload if isinstance(payload, list) else payload.get("projects", [])
+        return [
+            {"id": p["id"], "created_at": p["created_at"]}
+            for p in items
+            if isinstance(p, dict) and p.get("status") == "active"
+        ]
 
     def stats(self, project_id: str) -> dict[str, int]:
         """每题统计（评审量化口径）：星记数/指引数/驳回指引数。"""

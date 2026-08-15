@@ -38,8 +38,18 @@ def extract_json_object(text: str) -> dict[str, Any]:
 
 
 def _candidate_segments(text: str) -> list[str]:
-    segments = [text.strip()]
-    segments.extend(match.group(1).strip() for match in FENCED_BLOCK_RE.finditer(text))
+    """候选段：原文、各闭合围栏内容，以及未闭合围栏的尾部（模型截断时 ```json 后
+    再无闭合符——R5 实测场景），并剥离杂散空白/BOM。"""
+    cleaned = text.strip().lstrip("\ufeff").strip()
+    segments = [cleaned]
+    for match in FENCED_BLOCK_RE.finditer(cleaned):
+        segments.append(match.group(1).strip())
+    # 未闭合围栏：```json 开头但无 ``` 结尾——取围栏标记后的全部内容
+    for match in re.finditer(r"```(?:json)?[ \t]*\r?\n(.*)$", cleaned, re.IGNORECASE | re.DOTALL):
+        tail = match.group(1).strip()
+        # 排除已被闭合围栏正则覆盖的情形（尾部含闭合符时闭合正则已处理）
+        if "```" not in tail:
+            segments.append(tail)
     return segments
 
 

@@ -367,7 +367,7 @@ def write_conclude_result_with_fact_id(
                 total_ms,
             )
         return ConcludeWriteResult(status="success", fact_id=fact_id)
-    if response.status_code == 403:
+    if response.status_code in (403, 404):
         LOG.info(
             "project became inactive during conclude project=%s intent=%s worker=%s",
             project_id,
