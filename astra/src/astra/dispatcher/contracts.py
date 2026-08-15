@@ -6,11 +6,33 @@ from astra.dispatcher.output_parser import extract_json_object
 
 
 def parse_json_output(stdout: str) -> dict[str, Any]:
-    return extract_json_object(stdout)
+    try:
+        return extract_json_object(stdout)
+    except ValueError as exc:
+        # 降级可观测性（R5 实测）：解析失败附带原始输出前 500 字，定位模型格式漂移
+        snippet = stdout.strip()[:500]
+        raise ValueError(f"{exc}; raw_output[:500]={snippet}") from exc
+
+
+def _coerce_accepted(value: Any) -> bool | None:
+    """模型偶发把 accepted 写成字符串（"true"/"True"/"yes"）——统一收敛为布尔。"""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in ("true", "yes", "1"):
+            return True
+        if lowered in ("false", "no", "0"):
+            return False
+    if value == 1:
+        return True
+    if value == 0:
+        return False
+    return None
 
 
 def _unwrap_wrapped_payload(payload: dict[str, Any]) -> tuple[bool | None, dict[str, Any] | None]:
-    accepted = payload.get("accepted")
+    accepted = _coerce_accepted(payload.get("accepted"))
     if accepted is False:
         return False, None
     if accepted is True:

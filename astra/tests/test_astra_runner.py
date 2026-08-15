@@ -87,6 +87,18 @@ class FakeEngine:
         self.deleted: list[str] = []
         self.started = 0
         self.stopped = 0
+        self.stop_calls: list[str] = []
+        self.reactivate_calls: list[str] = []
+        self.active_projects: list[dict] = []
+
+    def stop_project(self, project_id: str) -> None:
+        self.stop_calls.append(project_id)
+
+    def reactivate_project(self, project_id: str) -> None:
+        self.reactivate_calls.append(project_id)
+
+    def list_active_projects(self) -> list[dict]:
+        return list(self.active_projects)
 
     def start(self) -> None:
         self.started += 1
@@ -761,3 +773,63 @@ def test_render_dispatch_config_defaults_to_dsh(monkeypatch) -> None:
     assert 'type: "dsh"' in yaml
     assert 'DEEPSEEK_API_KEY: "sk-test"' in yaml
     assert "claudecode" not in yaml
+
+def test_defer_stops_and_resume_reactivates_project() -> None:
+    """R5 修复清单 P0-1 验收：defer→stop_project；requeue→reactivate_project；上限→delete 不变。"""
+    challenges = [FakeChallenge("d001", total_score=500)]
+    client = FakeClient(challenges)
+
+    class DeferEngine(FakeEngine):
+        def wait_project(self, project_id: str, timeout_seconds: float) -> bool:
+            return False  # 永不归航：走 defer 路径
+
+    # 共享单例：runner 的 defer 分支通过 engine_factory() 再取引擎，生产环境
+    # LocalAstraEngine 是 daemon 单例；测试用同一实例才能观测生命周期调用
+    shared = DeferEngine({})
+
+    def factory():
+        return shared
+
+    results = run_benchmark(
+        client, factory,
+        challenge_timeout_seconds=0.2, flag_poll_seconds=0.05,
+        defer_after_seconds=0.2,
+    )
+    assert results[0].defer_count == 2
+    # defer 时项目被停（防僵尸），resume 时被激活，达上限后被删除
+    assert len(shared.stop_calls) >= 1
+    assert len(shared.reactivate_calls) >= 1
+    assert len(shared.deleted) == 1
+
+
+def test_reconcile_stops_orphan_active_project(monkeypatch) -> None:
+    """R5 修复清单 1b 验收：引擎侧 active 孤儿项目（不在窗口）被对账停掉。"""
+    from datetime import datetime, timedelta, timezone
+
+    challenge = FakeChallenge("r001")
+    client = FakeClient([challenge], flags={"r001": ["flag{reconcile_ok}"]})
+    stale_time = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    fresh_time = (datetime.now(timezone.utc) - timedelta(seconds=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    shared = FakeEngine({"proj-0": ["flag{reconcile_ok}"]})
+
+    class OrphanEngine(FakeEngine):
+        def list_active_projects(self) -> list[dict]:
+            return [
+                {"id": "orphan-1", "created_at": stale_time},   # 老孤儿：应被停
+                {"id": "proj-0", "created_at": fresh_time},     # 窗口内新项目：宽限保护
+            ]
+
+    shared.__class__ = OrphanEngine  # 共享实例叠加孤儿视图（生产引擎是单例）
+
+    monkeypatch.setenv("ASTRA_RECONCILE_INTERVAL", "0.001")  # 每轮都扫（0 是禁用）
+    monkeypatch.setenv("ASTRA_RECONCILE_GRACE", "60")
+
+    def factory():
+        return shared
+
+    results = run_benchmark(client, factory, challenge_timeout_seconds=2, flag_poll_seconds=0.05)
+    assert results[0].flags_correct == 1
+    assert "orphan-1" in shared.stop_calls    # 孤儿被停
+    assert "proj-0" not in shared.stop_calls  # 窗口内项目不动
+

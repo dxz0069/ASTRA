@@ -499,7 +499,7 @@ def run_reason_task(
                     return "failed"
                 return "success"
             response = client.complete(project.project.id, data["from"], data["description"], worker.name)
-            if response.status_code == 403:
+            if response.status_code in (403, 404):
                 LOG.info("project became inactive during reason complete project=%s worker=%s", project.project.id, worker.name)
                 return "success"
             if not response.ok:
@@ -564,7 +564,7 @@ def run_reason_task(
                     )
                     continue
                 response = client.create_intent(project.project.id, intent_data["from"], intent_data["description"], worker.name)
-                if response.status_code == 403:
+                if response.status_code in (403, 404):
                     LOG.info("project became inactive during reason intent create project=%s worker=%s created=%s", project.project.id, worker.name, created)
                     return "success"
                 if response.status_code == 409:

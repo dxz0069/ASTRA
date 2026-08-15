@@ -20,7 +20,7 @@ import urllib.error
 
 ALERT_FILE = os.path.join(os.environ.get("TEMP", "."), "astra-model-alert.txt")
 CHECK_INTERVAL = 60
-FAIL_THRESHOLD = 2  # 连续失败次数
+FAIL_THRESHOLD = 3  # 连续失败次数（R5：智谱端点整点抖动 2-5 分钟自愈，2 次误报）
 
 
 def _probe_chat(url: str, headers: dict[str, str], model: str) -> tuple[bool, str]:
@@ -137,6 +137,13 @@ def scan_recent_sessions_403() -> int:
 
 
 def main() -> int:
+    # R5 修复：启动即清上轮残留告警文件（07:23 的旧告警差点误判新一轮）
+    try:
+        if os.path.exists(ALERT_FILE):
+            os.remove(ALERT_FILE)
+            print("stale alert file removed", flush=True)
+    except OSError:
+        pass
     fails = 0
     last_alert = 0.0
     while True:
@@ -147,6 +154,9 @@ def main() -> int:
             fails = 0
         else:
             fails += 1
+            # 探针超时单独记日志（端点抖动常见且短时自愈）；真实会话 403 才立即升级
+            if not ok and sess403 == 0:
+                print(f"[{now}] probe-only failure（端点抖动，观察中）", flush=True)
             msg = f"[{now}] 模型异常 probe={'OK' if ok else 'FAIL ' + detail} 最近会话403数={sess403} fails={fails}/{FAIL_THRESHOLD}"
             print(msg, flush=True)
             if fails >= FAIL_THRESHOLD and time.monotonic() - last_alert > 300:
