@@ -28,9 +28,13 @@ RUN (sudo apt update || (sleep 5 && sudo apt update)) && \
     dirsearch yq krb5-user gitleaks naabu nikto netexec adb python3-pwntools && \
     sudo apt clean && \
     sudo rm -rf /var/lib/apt/lists/* && \
-    pip3 install pymongo --break-system-packages && \
-    sudo npm install -g @playwright/cli@latest && \
-    cd /tmp && playwright-cli install
+    pip3 install -i http://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn pymongo --break-system-packages
+
+# playwright CLI（独立层：npm 用国内源直连 + 三次重试，失败不拖垮 apt 层）
+RUN for i in 1 2 3; do \
+      sudo npm install -g --registry=https://registry.npmmirror.com @playwright/cli@latest && break || sleep 8; \
+    done && \
+    (cd /tmp && for i in 1 2 3; do playwright-cli install && break || sleep 8; done)
 
 # 第三方二进制固定版本 + sha256 校验（供应链防护）。
 # 代理不稳定（GnuTLS 长流断），wget 加 3 次退避重试；参考性内容（nuclei-templates）尽力而为。
