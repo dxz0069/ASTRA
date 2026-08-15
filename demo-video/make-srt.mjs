@@ -1,5 +1,6 @@
 // 从各章 narrations.ts 生成 SRT 字幕（时间轴按 中文~4字/秒 估算，剪辑时微调）
-// 用法：node make-srt.mjs  →  astra-narration.srt
+// 用法：node make-srt.mjs [--end=125]  →  astra-narration.srt
+//   --end=<秒>  把最后一条字幕的结束时间等比缩放到该时长（适配实拍视频长度）
 import { readFileSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -41,8 +42,27 @@ let ms = 800; // 开场留 0.8s
 const srt = [];
 cues.forEach((text, i) => {
   const d = dur(text);
-  srt.push(`${i + 1}\n${fmt(ms)} --> ${fmt(ms + d)}\n${splitLines(text).join("\n")}\n`);
+  srt.push({ start: ms, end: ms + d, text });
   ms += d + 350;
 });
-writeFileSync(join(dirname(fileURLToPath(import.meta.url)), "astra-narration.srt"), "\ufeff" + srt.join("\n"), "utf-8");
-console.log(`astra-narration.srt: ${cues.length} 条字幕，总时长 ${(ms / 1000).toFixed(1)}s`);
+const rawTotal = ms - 350; // 最后一条的结束时间
+
+// --end=<秒>：等比缩放全部时间戳，让最后一条在该秒结束
+const endArg = process.argv.find((a) => a.startsWith("--end="));
+if (endArg) {
+  const target = parseFloat(endArg.slice(6)) * 1000;
+  if (!(target > 0) || target >= rawTotal) throw new Error("--end 需小于原始总时长 " + (rawTotal / 1000).toFixed(1) + "s");
+  const k = target / rawTotal;
+  for (const c of srt) {
+    c.start = Math.round(c.start * k);
+    c.end = Math.round(c.end * k);
+  }
+  console.log(`scaled ${(rawTotal / 1000).toFixed(1)}s → ${(target / 1000).toFixed(1)}s (×${k.toFixed(3)})`);
+}
+
+writeFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), "astra-narration.srt"),
+  "\ufeff" + srt.map((c, i) => `${i + 1}\n${fmt(c.start)} --> ${fmt(c.end)}\n${splitLines(c.text).join("\n")}\n`).join("\n"),
+  "utf-8",
+);
+console.log(`astra-narration.srt: ${cues.length} 条字幕，总时长 ${((srt.at(-1).end) / 1000).toFixed(1)}s`);
