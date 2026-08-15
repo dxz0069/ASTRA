@@ -38,7 +38,7 @@ RUN for i in 1 2 3; do \
 
 # 第三方二进制固定版本 + sha256 校验（供应链防护）。
 # 代理不稳定（GnuTLS 长流断），wget 加 3 次退避重试；参考性内容（nuclei-templates）尽力而为。
-RUN fetch() { for i in 1 2 3; do wget -q --timeout=30 "$1" -O "$2" && return 0 || sleep $((i*5)); done; return 1; } && \
+RUN fetch() { for i in 1 2 3 4 5 6; do wget -q --timeout=40 "$1" -O "$2" && return 0 || sleep $((i*6)); done; return 1; } && \
     cd /tmp && \
     fetch "https://github.com/projectdiscovery/katana/releases/download/v1.5.0/katana_1.5.0_linux_amd64.zip" katana.zip && \
     fetch "https://github.com/projectdiscovery/nuclei/releases/download/v3.7.1/nuclei_3.7.1_linux_amd64.zip" nuclei.zip && \
