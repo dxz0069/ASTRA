@@ -2,31 +2,31 @@
  "bctf-03": {
   "name": "bctf-03",
   "hits": 0,
-  "misses": 3,
-  "last_used": "2026-08-24T02:08:59"
+  "misses": 4,
+  "last_used": "2026-08-24T02:32:08"
  },
  "bctf-02": {
   "name": "bctf-02",
   "hits": 0,
-  "misses": 2,
-  "last_used": "2026-08-24T02:10:29"
+  "misses": 3,
+  "last_used": "2026-08-24T02:33:38"
  },
  "bctf-04": {
   "name": "bctf-04",
   "hits": 0,
-  "misses": 2,
-  "last_used": "2026-08-24T02:10:30"
+  "misses": 3,
+  "last_used": "2026-08-24T02:33:38"
  },
  "kb-01": {
   "name": "kb-01",
   "hits": 0,
-  "misses": 4,
-  "last_used": "2026-08-24T02:10:42"
+  "misses": 6,
+  "last_used": "2026-08-24T02:33:50"
  },
  "p001": {
   "name": "p001",
-  "hits": 1,
+  "hits": 2,
   "misses": 0,
-  "last_used": "2026-08-24T02:06:59"
+  "last_used": "2026-08-24T02:30:11"
  }
 }

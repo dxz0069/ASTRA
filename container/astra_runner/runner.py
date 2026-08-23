@@ -78,6 +78,7 @@ class ChallengeResult:
     kb_entry_text: str | None = None  # V2-6：知识库思路条目（开局注入参考 fact）
     kb_approach_draft: str | None = None  # V2-6：末段星记浓缩（解出后沉淀知识库用）
     kb_neighbor_texts: list[str] = field(default_factory=list)  # V4：同题型邻居经验（举一反三注入）
+    kb_deadend_texts: list[str] = field(default_factory=list)  # V5：同题型避坑提示（失败经验库注入）
 
 
 class TaskFinishedError(Exception):
@@ -373,6 +374,16 @@ def run_benchmark(
                             "challenge give up code=%s defer=%s（达到上限，删除项目放弃）",
                             result.unique_code, result.defer_count,
                         )
+                        # V5 失败经验库：删项目前抢救末段星记——死路与打法同样是资产
+                        if result.project_id and not result.kb_approach_draft:
+                            try:
+                                list_fn = getattr(engine_factory(), "list_fact_descriptions", None)
+                                if callable(list_fn):
+                                    _dd = list_fn(result.project_id)
+                                    if _dd:
+                                        result.kb_approach_draft = "；".join(_dd[-3:])[:800]
+                            except Exception:  # noqa: BLE001
+                                pass
                         try:
                             delete_fn = getattr(engine_factory(), "delete_project", None)
                             if callable(delete_fn):
@@ -580,6 +591,12 @@ def run_benchmark(
                     _record_memory_stats(r)
                 except Exception:  # noqa: BLE001
                     pass
+            # V5：失败经验库——未解出的题把走过的死路沉淀成负记忆
+            if r is not None and r.flags_correct == 0 and getattr(r, "kb_approach_draft", None):
+                try:
+                    _append_deadend_entry(r)
+                except Exception:  # noqa: BLE001
+                    pass
             # V4：赛中实时记忆复用——本轮解出的题立即成为未开题者的参考（越打越强）
             try:
                 fresh_kb = _load_runtime_knowledge()
@@ -727,6 +744,20 @@ def _run_single_challenge(
                         LOG.info("neighbor experience injected code=%s n=%s", code, len(result.kb_neighbor_texts))
                 except Exception as exc:  # noqa: BLE001
                     LOG.warning("neighbor inject failed code=%s error=%s（继续）", code, exc)
+            # V5：失败经验库注入——同题型死路避坑提示（负记忆）
+            if result.kb_deadend_texts:
+                try:
+                    create_fact_fn = getattr(engine, "create_fact", None)
+                    if callable(create_fact_fn):
+                        create_fact_fn(
+                            project_id,
+                            "[同题型避坑提示·失败经验库] 以下为同题型历史死路（含本轮实时沉淀），"
+                            "开局即知前车之鉴、避免重蹈："
+                            + "\n".join(result.kb_deadend_texts),
+                        )
+                        LOG.info("deadend warnings injected code=%s n=%s", code, len(result.kb_deadend_texts))
+                except Exception as exc:  # noqa: BLE001
+                    LOG.warning("deadend inject failed code=%s error=%s（继续）", code, exc)
             result.project_id = project_id
         LOG.info("challenge started code=%s project=%s addr=%s", code, project_id, origin)
 
@@ -1170,6 +1201,7 @@ def _load_runtime_knowledge() -> dict[str, dict]:
 def _attach_knowledge(queue: list, knowledge: dict) -> int:
     """V4：把知识库条目/邻居经验挂到队列中未开题的 result 上（初始挂载与赛中热加载共用）。"""
     attached = 0
+    deadends = _load_deadends()
     for ch_item, res in queue:
         if res.started:
             continue  # 已开题不回填——注入 fact 只在项目创建时做
@@ -1182,7 +1214,108 @@ def _attach_knowledge(queue: list, knowledge: dict) -> int:
                 attached += 1
         if not res.kb_entry_text and not res.kb_neighbor_texts:
             res.kb_neighbor_texts = _pick_neighbor_entries(knowledge, code, res.description)
+        if not res.kb_deadend_texts:
+            res.kb_deadend_texts = _pick_deadend_warnings(deadends, code, res.description)
     return attached
+
+
+# ---------------- V5 失败经验库：死路沉淀 + 同题型避坑注入 ----------------
+
+DEADENDS_FILE = (
+    Path(os.environ.get("ASTRA_DEADENDS_FILE"))
+    if os.environ.get("ASTRA_DEADENDS_FILE")
+    else KNOWLEDGE_FILE.parent / "dead-ends.md"
+)
+
+
+def _append_deadend_entry(result: ChallengeResult) -> None:
+    """V5：未解出题收尾时沉淀死路（末段星记=走过的弯路浓缩），双层脱敏后写 /tmp JSON。
+
+    别人只记住成功，我们把失败变成资产：死路记忆按题型注入后来的题（避坑提示）。
+    """
+    draft = getattr(result, "kb_approach_draft", None)
+    if not draft:
+        return
+    try:
+        import tempfile as _tempfile
+
+        out = Path(_tempfile.gettempdir()) / "astra-deadends-append.json"
+        reason = "defer-giveup" if result.defer_count > 0 else ("wrong-submits" if result.wrong_count > 0 else "unsolved")
+        entry = {
+            result.unique_code: {
+                "name": result.unique_code,
+                "elapsed_seconds": round(result.elapsed_seconds),
+                "reason": reason,
+                "deadend": _sanitize_kb_text(draft)[:400],
+            }
+        }
+        existing: dict = {}
+        try:
+            existing = json.loads(out.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            pass
+        existing.update(entry)
+        out.write_text(json.dumps(existing, ensure_ascii=False, indent=1), encoding="utf-8")
+    except OSError:
+        pass  # 沉淀失败不影响跑分
+
+
+def _load_deadends() -> dict[str, dict]:
+    """解析死路库（仓库 dead-ends.md + 本轮 /tmp 沉淀实时合并）。格式与知识库一致。"""
+    entries: dict[str, dict] = {}
+    try:
+        raw = DEADENDS_FILE.read_text(encoding="utf-8")
+    except OSError:
+        raw = ""
+    for i, m in enumerate(_KB_ENTRY_RE.finditer(raw)):
+        name, code = m.group(1), m.group(2)
+        chunk_end = len(raw)
+        for m2 in list(_KB_ENTRY_RE.finditer(raw))[i + 1:]:
+            chunk_end = m2.start()
+            break
+        chunk = raw[m.end():chunk_end]
+        approach = _KB_HINT_RE.search(chunk)
+        entries[code.lower()] = {
+            "name": name,
+            "approach": _sanitize_kb_text(approach.group(1)) if approach else None,
+        }
+    # 本轮赛中死路热合并
+    try:
+        import tempfile as _tempfile
+
+        pending = json.loads(
+            (Path(_tempfile.gettempdir()) / "astra-deadends-append.json").read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError):
+        pending = {}
+    for code, data in pending.items():
+        if code.lower() not in entries and data.get("deadend"):
+            entries[code.lower()] = {"name": data.get("name") or code, "approach": data["deadend"]}
+    return entries
+
+
+def _pick_deadend_warnings(
+    deadends: dict[str, dict],
+    code: str,
+    description: str,
+    limit: int = 2,
+) -> list[str]:
+    """V5：同题型死路避坑提示（含赛中实时沉淀的死路），每条截 300 字。"""
+    my_category = _categorize(description, code)
+    if my_category is None:
+        return []
+    label = _CATEGORY_NAMES.get(my_category, my_category)
+    out: list[str] = []
+    for c, e in deadends.items():
+        if c == code.lower():
+            continue
+        text = (e.get("approach") or "").strip()
+        if not text or _categorize(e.get("name", ""), text) != my_category:
+            continue
+        out.append(f"[{label}·{e.get('name', c)} 前车之鉴] {text[:300]}")
+        if len(out) >= limit:
+            break
+    return out
 
 
 def _try_platform_hint(
