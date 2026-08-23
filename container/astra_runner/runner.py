@@ -77,6 +77,7 @@ class ChallengeResult:
     kb_seconds: float | None = None  # V2-5/V2-7：知识库历史首解耗时（期望预算依据）
     kb_entry_text: str | None = None  # V2-6：知识库思路条目（开局注入参考 fact）
     kb_approach_draft: str | None = None  # V2-6：末段星记浓缩（解出后沉淀知识库用）
+    kb_neighbor_texts: list[str] = field(default_factory=list)  # V4：同题型邻居经验（举一反三注入）
 
 
 class TaskFinishedError(Exception):
@@ -297,16 +298,10 @@ def run_benchmark(
         queue.append((ch, result))
         results[code] = result
 
-    # V2-6/V2-5：知识库挂载（期望预算 + 思路条目），在排序前统一附加到 result
-    knowledge = _load_knowledge_base()
+    # V2-6/V2-5/V4：知识库挂载（期望预算 + 思路条目 + 同题型邻居），在排序前统一附加到 result
+    knowledge = _load_runtime_knowledge()
     if knowledge:
-        attached = 0
-        for ch_item, res in queue:
-            entry = knowledge.get(res.unique_code.lower())
-            if entry:
-                res.kb_seconds = entry["seconds"]
-                res.kb_entry_text = entry["approach"] or None
-                attached += 1
+        attached = _attach_knowledge(queue, knowledge)
         LOG.info("knowledge base loaded entries=%s attached=%s file=%s", len(knowledge), attached, KNOWLEDGE_FILE)
 
     def _code_of(item) -> str:
@@ -585,6 +580,14 @@ def run_benchmark(
                     _record_memory_stats(r)
                 except Exception:  # noqa: BLE001
                     pass
+            # V4：赛中实时记忆复用——本轮解出的题立即成为未开题者的参考（越打越强）
+            try:
+                fresh_kb = _load_runtime_knowledge()
+                fresh_attached = _attach_knowledge(queue, fresh_kb)
+                if fresh_attached:
+                    LOG.info("live memory reload：新增 %s 条思路挂到未开题队列", fresh_attached)
+            except Exception as exc:  # noqa: BLE001
+                LOG.warning("live memory reload failed error=%s（继续）", exc)
         _fill()
         _reconcile_orphans()
         if active:
@@ -709,6 +712,21 @@ def _run_single_challenge(
                         LOG.info("knowledge base entry injected code=%s", code)
                 except Exception as exc:  # noqa: BLE001
                     LOG.warning("kb inject failed code=%s error=%s（继续）", code, exc)
+            # V4：同题型邻居经验注入（举一反三）——无精确条目的题也能吃到同类打法参考
+            if result.kb_neighbor_texts:
+                try:
+                    create_fact_fn = getattr(engine, "create_fact", None)
+                    if callable(create_fact_fn):
+                        create_fact_fn(
+                            project_id,
+                            "[同题型经验·举一反三] 以下为知识库中同题型（按实战战绩加权）历史打法，"
+                            "仅作方向启发：当前题目与它们不同，禁止照搬步骤，"
+                            "每一步仍须针对当前实例验证。"
+                            + "\n".join(result.kb_neighbor_texts),
+                        )
+                        LOG.info("neighbor experience injected code=%s n=%s", code, len(result.kb_neighbor_texts))
+                except Exception as exc:  # noqa: BLE001
+                    LOG.warning("neighbor inject failed code=%s error=%s（继续）", code, exc)
             result.project_id = project_id
         LOG.info("challenge started code=%s project=%s addr=%s", code, project_id, origin)
 
@@ -1061,6 +1079,110 @@ def _memory_reinforcement_text(code: str) -> str:
         return ""
     hits, misses = int(entry.get("hits", 0)), int(entry.get("misses", 0))
     return f"（该思路历史战绩：{hits} 次命中/{misses} 次未命中）"
+
+
+# ---------------- V4 举一反三：题型分类 + 同题型邻居经验注入 + 赛中实时复用 ----------------
+
+# 关键词→题型映射（顺序即优先级：先匹配更specific的类别）
+_CATEGORY_RULES: list[tuple[str, tuple[str, ...]]] = [
+    ("cloud", ("云", "oss", "cos", "s3", "桶", "bucket", "iam", "ak/sk", "元数据", "k8s", "容器逃逸", "docker", "redis", "kafka")),
+    ("mobile", ("apk", "android", "dex", "ios", "ipa", "app.asar", "electron", "逆向app", "安卓")),
+    ("crypto", ("密码", "加密", "cipher", "rsa", "aes", "椭圆", "ecc", "哈希", "hash", "随机数", "prng", "签名")),
+    ("blockchain", ("合约", "solidity", "eth", "区块链", "web3", "bet", "withdraw", "chainid")),
+    ("pwn", ("溢出", "pwn", "堆", "栈", "rop", "shellcode", "格式化字符串", "uaf", "glibc", "seccomp")),
+    ("reverse", ("反汇编", "逆向", "ida", "ghidra", "upx", "脱壳", "vm保护", "混淆还原")),
+    ("web", ("sql", "注入", "xss", "ssrf", "rce", "上传", "webshell", "jwt", "反序列化", "xxe", "csrf", "ssti", "逻辑", "admin", "登录", "越权")),
+]
+_CATEGORY_NAMES = {code: name for code, name in [
+    ("cloud", "云安全"), ("mobile", "移动安全"), ("crypto", "密码学"),
+    ("blockchain", "区块链"), ("pwn", "二进制利用"), ("reverse", "逆向工程"), ("web", "Web安全"),
+]}
+
+
+def _categorize(*texts: str) -> str | None:
+    """V4：按关键词给题/条目归类，无命中返回 None（misc 不参与邻居注入）。"""
+    blob = " ".join(t for t in texts if t).lower()
+    if not blob:
+        return None
+    for category, keywords in _CATEGORY_RULES:
+        if any(kw in blob for kw in keywords):
+            return category
+    return None
+
+
+def _pick_neighbor_entries(
+    knowledge: dict[str, dict],
+    code: str,
+    description: str,
+    limit: int = 2,
+) -> list[str]:
+    """V4：同题型邻居经验选择——优先级：同题型 + 命中战绩 > 同题型 + 高分值。
+
+    只给"知识库无精确条目"的题补充邻居参考（举一反三），每条截 400 字防预算膨胀。
+    """
+    my_category = _categorize(description, code)
+    if my_category is None:
+        return []
+    stats = _load_memory_stats()
+
+    def _score(entry_code: str, entry: dict) -> tuple[int, int]:
+        st = stats.get(entry_code, {})
+        hits, misses = int(st.get("hits", 0)), int(st.get("misses", 0))
+        return (hits - misses, int(entry.get("awarded") or 0))
+
+    candidates = [
+        (c, e) for c, e in knowledge.items()
+        if c != code.lower() and _categorize(e.get("name", ""), e.get("approach") or "") == my_category
+    ]
+    candidates.sort(key=lambda kv: _score(kv[0], kv[1]), reverse=True)
+    label = _CATEGORY_NAMES.get(my_category, my_category)
+    out: list[str] = []
+    for c, e in candidates[:limit]:
+        approach = (e.get("approach") or "").strip()[:400]
+        if not approach:
+            continue
+        reinforcement = _memory_reinforcement_text(c)
+        out.append(f"[{label}·{e.get('name', c)}]{reinforcement} {approach}")
+    return out
+
+
+def _load_runtime_knowledge() -> dict[str, dict]:
+    """V4：仓库知识库 + 本轮赛中沉淀（/tmp JSON）实时合并——"同一场比赛越打越强"的来源。"""
+    knowledge = _load_knowledge_base()
+    try:
+        import tempfile as _tempfile
+
+        pending_path = Path(_tempfile.gettempdir()) / "astra-knowledge-append.json"
+        pending = json.loads(pending_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return knowledge
+    for code, data in pending.items():
+        if code.lower() in knowledge:
+            continue  # 仓库条目优先（已人工审核），赛中沉淀只补缺
+        knowledge[code.lower()] = {
+            "name": data.get("name") or code,
+            "seconds": data.get("first_flag_seconds") or data.get("elapsed_seconds"),
+            "approach": data.get("approach"),
+        }
+    return knowledge
+
+
+def _attach_knowledge(queue: list, knowledge: dict) -> int:
+    """V4：把知识库条目/邻居经验挂到队列中未开题的 result 上（初始挂载与赛中热加载共用）。"""
+    attached = 0
+    for ch_item, res in queue:
+        if res.started:
+            continue  # 已开题不回填——注入 fact 只在项目创建时做
+        code = res.unique_code.lower()
+        entry = knowledge.get(code)
+        if entry:
+            res.kb_seconds = entry["seconds"]
+            if entry["approach"] and not res.kb_entry_text:
+                res.kb_entry_text = entry["approach"]
+                attached += 1
+        if not res.kb_entry_text and not res.kb_neighbor_texts:
+            res.kb_neighbor_texts = _pick_neighbor_entries(knowledge, code, res.description)
+    return attached
 
 
 def _try_platform_hint(
