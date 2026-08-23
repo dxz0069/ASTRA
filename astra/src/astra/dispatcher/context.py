@@ -15,6 +15,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from astra.dispatcher import embeddings
 from astra.server.models import ProjectDetail
 
 
@@ -48,8 +49,11 @@ def goal_text_of(project: ProjectDetail) -> str:
 def build_focus_fact_ids(project: ProjectDetail, budget: int) -> list[str]:
     """选出焦点星记 id 子集，输出保持星图原始顺序（时间线可读）。
 
-    评分 = 相关度（与未完成航向/目标的描述词重叠）× 2 + 时间近度（列表越靠后越新）。
+    评分 = 相关度（与未完成航向/目标的描述词重叠）× 2 + 时间近度（列表越靠后越新）
+    [+ 语义相关度 × 2，嵌入层可用时]。
     数量不超过 budget 时原样返回；超过时截取高分集合。
+    语义召回（embeddings.py 开启时）：token 重叠召不回的同义表述（如
+    “SQL 注入教训” vs "MySQL 注入"）由向量余弦补足；嵌入不可用则静默降级为纯 token 打分。
     """
     allowed = [fact for fact in project.facts if fact.id != "goal"]
     if len(allowed) <= budget:
@@ -60,12 +64,33 @@ def build_focus_fact_ids(project: ProjectDetail, budget: int) -> list[str]:
     if goal:
         focus_texts.append(goal)
 
+    # 语义召回：focus 与全部候选星记一次性批量嵌入，失败即降级（对分）
+    focus_vectors: list[list[float]] = []
+    fact_vectors: dict[str, list[float]] = {}
+    if focus_texts:
+        vectors = embeddings.embed_texts(
+            focus_texts + [fact.description for fact in allowed]
+        )
+        if vectors is not None:
+            focus_vectors = vectors[: len(focus_texts)]
+            fact_vectors = {
+                fact.id: vec
+                for fact, vec in zip(allowed, vectors[len(focus_texts):])
+            }
+
+    def _semantic_score(fact_id: str, description: str) -> float:
+        vec = fact_vectors.get(fact_id)
+        if vec is None or not focus_vectors:
+            return 0.0
+        return max(embeddings.cosine_similarity(vec, fv) for fv in focus_vectors)
+
     total = max(len(allowed) - 1, 1)
     scored: list[tuple[float, str]] = []
     for index, fact in enumerate(allowed):
         relevance = _relevance_score(fact.description, focus_texts)
+        semantic = _semantic_score(fact.id, fact.description)
         recency = index / total  # 0..1，越新越高
-        scored.append((relevance * 2.0 + recency, fact.id))
+        scored.append((relevance * 2.0 + semantic * 2.0 + recency, fact.id))
 
     scored.sort(key=lambda item: item[0], reverse=True)
     chosen = {fact_id for _, fact_id in scored[:budget]}

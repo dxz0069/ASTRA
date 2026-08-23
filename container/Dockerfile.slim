@@ -21,11 +21,13 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get update && \
     rm -rf /var/lib/apt/lists/*
 USER kali
 
-# 工具层：保持与早前成功构建完全一致的文本以命中 BuildKit 层缓存（vulhub 已按需裁剪）
+# 工具层（V2 能力层追加 jadx/apktool：Android 静态逆向——run 10089 两题 Android 因无反编译
+# 工具被迫走模拟器死路，FileBox 手写 DEX 解析器 6min；加层缓存失效属预期）
 RUN (sudo apt update || (sleep 5 && sudo apt update)) && \
     sudo apt install -y bsdextrautils npm jq iputils-ping sshpass ncat rlwrap \
     bloodyad coercer enum4linux-ng pwncat chisel-common-binaries \
-    dirsearch yq krb5-user gitleaks naabu nikto netexec adb python3-pwntools && \
+    dirsearch yq krb5-user gitleaks naabu nikto netexec adb python3-pwntools \
+    jadx apktool && \
     sudo apt clean && \
     sudo rm -rf /var/lib/apt/lists/* && \
     pip3 install -i http://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn pymongo --break-system-packages
@@ -102,6 +104,8 @@ COPY ./astra /opt/astra
 RUN cd /opt/astra && pip3 install -i http://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn uv_build --break-system-packages && pip3 install -i http://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn . --break-system-packages
 RUN pip3 install -i http://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn tsec-benchmark --break-system-packages
 COPY ./container/astra_runner /opt/astra-runner
+# V2-6 知识库（runner 按 /opt/knowledge/challenge-approaches.md 读取，ASTRA_KNOWLEDGE_FILE 可覆盖）
+COPY ./container/knowledge /opt/knowledge
 # ASTRA 定制的 dsh headless 扩展（--session 会话续接，见 container/dsh/README.md）
 COPY ./container/dsh /opt/astra/dsh
 
@@ -137,5 +141,6 @@ COPY ./container/.agents /home/kali/workspace/.agents
 COPY ./container/.agents /home/kali/workspace/.claude
 COPY ./container/AGENTS.md /home/kali/workspace/AGENTS.md
 COPY ./container/AGENTS.md /home/kali/workspace/CLAUDE.md
+COPY ./container/knowledge /home/kali/workspace/knowledge
 
 WORKDIR /home/kali/workspace

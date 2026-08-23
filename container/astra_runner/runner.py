@@ -40,6 +40,14 @@ DEFAULT_CHALLENGE_TIMEOUT_SECONDS = 30 * 60
 DEFAULT_FLAG_POLL_SECONDS = 5
 # 每题最多 defer（45 分钟无果放回队尾）次数——超过则关闭放弃，防无限轮转
 MAX_DEFER_PER_CHALLENGE = 2
+# V2-1③：单题 hint 成本上限（每次扣该题 10%，2 次=20%）
+MAX_HINTS_PER_CHALLENGE = 2
+# V2-2：尾段窗口（剩余<2h）优先重攻近失题
+NEAR_MISS_LATE_WINDOW_SECONDS = 2 * 3600
+# V2-7：饥饿回灌门槛——队列空且剩余>15min 时无视 defer 上限重拉已弃题
+STARVATION_MIN_REMAINING_SECONDS = 15 * 60
+# V2-7：期望预算下限（KB 复解题 15 分钟地板）
+EXPECTED_BUDGET_FLOOR_SECONDS = 15 * 60
 # 按难度自适应题目超时（easy/medium/hard）
 DIFFICULTY_TIMEOUTS = {"easy": 20 * 60, "medium": 30 * 60, "hard": 45 * 60}
 # 引擎已完成后等待 flag 落图的窗口（不再空转一个完整超时）
@@ -64,6 +72,11 @@ class ChallengeResult:
     error: str | None = None
     project_id: str | None = None  # defer 续跑：复用引擎项目保留星图进度
     defer_count: int = 0  # 已 defer 次数（达到上限则放弃该题关闭）
+    wrong_count: int = 0  # V2-2：错交次数（近失题——回队插队首+尾段优先重攻）
+    hint_texts: list[str] = field(default_factory=list)  # V2-1④：已购 hint 文本（defer 续跑复用，禁止重购）
+    kb_seconds: float | None = None  # V2-5/V2-7：知识库历史首解耗时（期望预算依据）
+    kb_entry_text: str | None = None  # V2-6：知识库思路条目（开局注入参考 fact）
+    kb_approach_draft: str | None = None  # V2-6：末段星记浓缩（解出后沉淀知识库用）
 
 
 class TaskFinishedError(Exception):
@@ -90,6 +103,7 @@ class AstraEngine(Protocol):
     def start(self) -> None: ...
     def create_project(self, title: str, origin: str, goal: str) -> str: ...
     def create_hint(self, project_id: str, content: str) -> None: ...
+    def create_fact(self, project_id: str, description: str) -> None: ...
     def wait_project(self, project_id: str, timeout_seconds: float) -> bool: ...
     def list_fact_descriptions(self, project_id: str) -> list[str]: ...
     def stop_project(self, project_id: str) -> None: ...
@@ -221,10 +235,11 @@ def run_benchmark(
     task_window_seconds: float | None = None,
     auto_hint: bool = True,
     hint_after_seconds: float = 900.0,
-    hint2_after_seconds: float = 1800.0,
+    hint2_after_seconds: float = 1500.0,
     defer_after_seconds: float = 2700.0,
     hint_min_score: int = 0,
     prefer_easy: bool = True,
+    order_codes: list[str] | None = None,
 ) -> list[ChallengeResult]:
     """五步生命周期主循环（并行窗口模型：同时活跃 N 题，逐题补位）。
 
@@ -282,7 +297,42 @@ def run_benchmark(
         queue.append((ch, result))
         results[code] = result
 
-    if prefer_easy and queue:
+    # V2-6/V2-5：知识库挂载（期望预算 + 思路条目），在排序前统一附加到 result
+    knowledge = _load_knowledge_base()
+    if knowledge:
+        attached = 0
+        for ch_item, res in queue:
+            entry = knowledge.get(res.unique_code.lower())
+            if entry:
+                res.kb_seconds = entry["seconds"]
+                res.kb_entry_text = entry["approach"] or None
+                attached += 1
+        LOG.info("knowledge base loaded entries=%s attached=%s file=%s", len(knowledge), attached, KNOWLEDGE_FILE)
+
+    def _code_of(item) -> str:
+        return str(getattr(item[0], "unique_code", None) or getattr(item[0], "code", "") or "").lower()
+
+    # V2-5：显式做题顺序——列表内的题按给定顺序置顶，未列的按 prefer_easy 规则续队。
+    # 失配码（题集变化/题码漂移）告警并忽略，绝不阻断。
+    if order_codes:
+        rank = {c.strip().lower(): i for i, c in enumerate(order_codes) if c.strip()}
+        head = [item for item in queue if _code_of(item) in rank]
+        rest_items = [item for item in queue if _code_of(item) not in rank]
+        head.sort(key=lambda item: rank[_code_of(item)])
+        if prefer_easy and rest_items:
+            # 未列题目仍按 easy-first 续队（V2-5 规格：显式序只管置顶，不动续队规则）
+            _dr = {"easy": 0, "medium": 1, "hard": 2}
+            rest_items.sort(
+                key=lambda item: _dr.get(str(getattr(item[0], "difficulty", "") or "").lower(), 1.5)
+            )
+        matched = { _code_of(item) for item in head }
+        unmatched = [c for c in rank if c not in matched]
+        if unmatched:
+            LOG.warning("order_codes unmatched/ignored codes=%s（题集可能已变化）", unmatched)
+        LOG.info("queue ordered by explicit list matched=%s rest=%s", len(head), len(rest_items))
+        queue = deque(head + rest_items)
+
+    if prefer_easy and queue and not order_codes:
         # easy→medium→hard 开题（稳定排序：同难度保持平台原始顺序）。
         # 未知难度排在 medium 之后、hard 之前，不置于队首冒进。
         diff_rank = {"easy": 0, "medium": 1, "hard": 2}
@@ -348,7 +398,12 @@ def run_benchmark(
                             stop_fn(result.project_id)
                     except Exception:  # noqa: BLE001
                         pass
-                    queue.append((ch, result))
+                    # V2-2：近失题（错交过 flag=差一步）回队插队首，普通题仍走队尾
+                    if result.wrong_count > 0:
+                        LOG.info("near-miss requeue to head code=%s wrong=%s", result.unique_code, result.wrong_count)
+                        queue.appendleft((ch, result))
+                    else:
+                        queue.append((ch, result))
                 return
             except TaskFinishedError as exc:
                 stop_errors.append(exc)
@@ -361,17 +416,89 @@ def run_benchmark(
                 queue.appendleft((ch, result))
                 return
 
+    # V2-7：预算放不下的题停泊区（时间只减不增，停泊即终局；饥饿回灌走 results 池）
+    parked: list = []
+
+    def _remaining_seconds() -> float:
+        if window_deadline is None:
+            return float("inf")
+        return window_deadline - time.monotonic()
+
+    challenges_by_code = {
+        str(getattr(c, "unique_code", None) or getattr(c, "code", "")): c for c in challenges
+    }
+
+    def _pick_candidate():
+        """V2-2：尾段（剩余<2h）优先选近失题（错交过=差一步），否则队首。"""
+        if not queue:
+            return None
+        items = list(queue)
+        idx = 0
+        late_window = window_deadline is not None and _remaining_seconds() < NEAR_MISS_LATE_WINDOW_SECONDS
+        if late_window:
+            for i, item in enumerate(items):
+                if item[1].wrong_count > 0:
+                    idx = i
+                    break
+        picked = items.pop(idx)
+        queue.clear()
+        queue.extend(items)
+        return picked
+
+    def _starvation_refill() -> bool:
+        """V2-7：队列空且剩余>门槛 → 无视 defer 上限按 EV 重拉已弃题（满窗口利用）。
+
+        EV 序：近失（wrong>0）> 有星图/hint 积累 > 分值高；且只拉期望预算放得下的题。
+        """
+        remaining = _remaining_seconds()
+        if window_deadline is None:
+            return False  # 无窗口模式维持 defer 上限语义，防无限重拉
+        if remaining <= STARVATION_MIN_REMAINING_SECONDS:
+            return False
+
+        def _fits(r: ChallengeResult) -> bool:
+            ch_x = challenges_by_code.get(r.unique_code)
+            diff = str(getattr(ch_x, "difficulty", "") or "").lower()
+            return _expected_budget_seconds(r, diff, challenge_timeout_seconds) <= remaining
+
+        candidates = [
+            r
+            for code, r in results.items()
+            if r.started and r.flags_correct == 0 and code not in active and _fits(r)
+        ]
+        candidates.sort(
+            key=lambda r: (
+                0 if r.wrong_count > 0 else 1,
+                0 if (r.hints_count or 0) > 0 or (r.facts_count or 0) >= 3 else 1,
+                -int(getattr(challenges_by_code.get(r.unique_code), "total_score", 0) or 0),
+            )
+        )
+        if not candidates:
+            return False
+        target = candidates[0]
+        target.defer_count = 0  # 饥饿回灌无视 defer 上限
+        queue.append((challenges_by_code[target.unique_code], target))
+        LOG.warning(
+            "starvation requeue code=%s wrong=%s facts=%s hints=%s（队列空，重拉已弃题续用窗口）",
+            target.unique_code, target.wrong_count, target.facts_count, target.hints_count,
+        )
+        return True
+
     def _fill() -> None:
         nonlocal slots
-        # 任务限时窗口：剩余时间不足以完成最长单题 → 停止开新题（活动题自然跑完）
-        if not window_allows_start(window_deadline, longest_single):
-            if queue:
-                LOG.info(
-                    "task window nearly over（剩余不足最长单题），停止开新题（活动题自然跑完）",
-                )
-                queue.clear()
         while queue and len(active) < slots and not stop_event.is_set():
-            ch, result = queue.popleft()
+            ch, result = _pick_candidate()
+            difficulty = str(getattr(ch, "difficulty", "") or "").lower()
+            budget = _expected_budget_seconds(result, difficulty, challenge_timeout_seconds)
+            remaining = _remaining_seconds()
+            if remaining < budget:
+                # V2-7：该题期望预算放不下 → 停泊，继续尝试队列里更小的题
+                LOG.info(
+                    "park challenge code=%s budget=%.0fs remaining=%.0fs（放不下，试下一题）",
+                    result.unique_code, budget, remaining,
+                )
+                parked.append((ch, result))
+                continue
             thread = threading.Thread(target=_work, args=(ch, result), daemon=True)
             active[result.unique_code] = thread
             thread.start()
@@ -392,6 +519,7 @@ def run_benchmark(
             LOG.info("并行窗口收缩并锁定 slots=%s（名额上限已探明）", slots)
 
     _fill()
+
     # 对账扫描（R5 修复清单 1b，兜底所有泄漏路径的孤儿项目）：
     # 引擎侧 active 但不在当前运行窗口、且创建超过宽限期（60s）的项目 → stopped。
     reconcile_interval = float(os.environ.get("ASTRA_RECONCILE_INTERVAL", "300"))
@@ -438,16 +566,41 @@ def run_benchmark(
         except Exception as exc:  # noqa: BLE001
             LOG.warning("reconcile scan failed error=%s", exc)
 
-    while active and not stop_event.is_set():
+    while not stop_event.is_set():
         finished = [code for code, t in list(active.items()) if not t.is_alive()]
         for code in finished:
             thread = active.pop(code)
             thread.join(timeout=5)
             LOG.info("并行窗口完成题目 code=%s active=%s/%s", code, len(active), slots)
+            r = results.get(code)
+            # V2-6：解出后自动沉淀思路（双层脱敏 → 运行时知识库，赛后人工合并回仓库文件）
+            if r is not None and r.flags_correct > 0 and getattr(r, "kb_approach_draft", None):
+                try:
+                    _append_knowledge_entry(r, [r.kb_approach_draft])
+                except Exception:  # noqa: BLE001
+                    pass
+            # V3：经验复利统计——注入过历史思路的题记命中/未命中
+            if r is not None:
+                try:
+                    _record_memory_stats(r)
+                except Exception:  # noqa: BLE001
+                    pass
         _fill()
         _reconcile_orphans()
         if active:
             time.sleep(2)
+            continue
+        # V2-7：无在跑题——队列非空则等下一轮；队列空做饥饿回灌；仍无事可做才收工
+        if queue:
+            time.sleep(2)
+            continue
+        if _starvation_refill():
+            time.sleep(2)
+            continue
+        LOG.info(
+            "无可开题（窗口剩余 %.0fs 且无期望预算可容之题），自然收尾", _remaining_seconds(),
+        )
+        break
 
     if stop_errors:
         # 任务到期（409 already finished）：返回已收集的 results（含部分完成的题目），
@@ -494,6 +647,10 @@ def _run_single_challenge(
     difficulty = str(getattr(ch, "difficulty", "") or "").lower()
     timeout_seconds = DIFFICULTY_TIMEOUTS.get(difficulty, challenge_timeout_seconds)
     engine = engine_factory()
+    # V2-6 修复：finally 段（星记采集）引用这两个变量——start 阶段即抛 TaskFinishedError
+    # 时它们尚未赋值，UnboundLocalError 会掩盖原异常导致 409 全停信号失效。前置初始化。
+    project_id: str | None = None
+    project_gone = False
     try:
         engine.start()
         try:
@@ -522,12 +679,36 @@ def _run_single_challenge(
                     reactivate_fn(project_id)
             except Exception:  # noqa: BLE001
                 pass
+            # V2-1④：defer 续跑复用已购 hint（平台按次扣分，重购=白烧分）
+            if result.hint_texts:
+                for cached in result.hint_texts:
+                    try:
+                        engine.create_hint(project_id, f"[平台提示·续跑复用] {cached}")
+                    except Exception:  # noqa: BLE001
+                        pass
+                LOG.info("cached hints re-injected code=%s count=%s（不重购）", code, len(result.hint_texts))
         else:
             project_id = engine.create_project(
                 title=f"{DEFAULT_PROJECT_TITLE_PREFIX}-{code}",
                 origin=origin,
                 goal=goal,
             )
+            # V2-6：新题注入知识库思路参考（仅新项目；defer 复用项目已注入过）
+            if result.kb_entry_text:
+                try:
+                    create_fact_fn = getattr(engine, "create_fact", None)
+                    if callable(create_fact_fn):
+                        create_fact_fn(
+                            project_id,
+                            "[历史思路参考·知识库] 方向参考非答案——当前实例可能已变化，"
+                            "所有步骤必须实测验证；行为与参考不符时立即放弃参考回到自主探索；"
+                            "不得据此猜测/构造 flag 值。"
+                            + _memory_reinforcement_text(code)
+                            + "历史攻击链：" + result.kb_entry_text,
+                        )
+                        LOG.info("knowledge base entry injected code=%s", code)
+                except Exception as exc:  # noqa: BLE001
+                    LOG.warning("kb inject failed code=%s error=%s（继续）", code, exc)
             result.project_id = project_id
         LOG.info("challenge started code=%s project=%s addr=%s", code, project_id, origin)
 
@@ -536,6 +717,22 @@ def _run_single_challenge(
         project_gone = False  # 提前收尾删了引擎项目 → 跳过后续取 flag（避免 404）
         # 单题最长连续分析：defer_after_seconds（默认 45 分钟）无结果 → 保留进度放回队尾
         effective_timeout = defer_after_seconds if defer_after_seconds > 0 else timeout_seconds
+        # V2-5 首攻限时（KB 题）：有历史首解耗时的题，首攻 2×（≥15min 地板）仍无果
+        # → 大概率实例已变化，提前 defer 回队（最坏损失 45min→15-20min）；
+        # 第二发起恢复完整 defer 梯子（KB 已证伪，按未知题对待）。
+        if (
+            result.defer_count == 0
+            and result.kb_seconds is not None
+            and defer_after_seconds > 0
+        ):
+            effective_timeout = min(
+                defer_after_seconds,
+                max(2 * result.kb_seconds, EXPECTED_BUDGET_FLOOR_SECONDS),
+            )
+            # 短首攻配套：hint 阶梯按有效窗口比例缩放（40%/70%），否则 15min 窗口里
+            # hint1(15min) 永远赶不上 defer。正常 45min 窗口下 min() 不改变默认值。
+            hint_after_seconds = min(hint_after_seconds, effective_timeout * 0.4)
+            hint2_after_seconds = min(hint2_after_seconds, effective_timeout * 0.7)
         deadline = time.monotonic() + effective_timeout
         scan_round = 0
         # 卡题分级 hint：hint_after_seconds（默认 15 分钟）取第一次，
@@ -545,10 +742,15 @@ def _run_single_challenge(
         hint_trigger_at = started_at + hint_after_seconds
         hint2_trigger_at = started_at + hint2_after_seconds if hint2_after_seconds > 0 else float("inf")
         hint_eligible = auto_hint and challenge_score >= hint_min_score
-        hint_taken = 0  # 0/1/2：已取 hint 次数
+        # V2-1④：hint 次数缓存感知——defer 前已购的 hint 不重购
+        hint_taken = min(len(result.hint_texts), MAX_HINTS_PER_CHALLENGE)
+        facts_at_hint1: int | None = None  # V2-1①：hint1 时的星记数（hint2 前对比是否产生新攻击面）
         while time.monotonic() < deadline:
+            fact_count: int | None = None
             try:
-                flags = collect_flags_from_facts(engine.list_fact_descriptions(project_id))
+                fact_descs = engine.list_fact_descriptions(project_id)
+                fact_count = len(fact_descs)
+                flags = collect_flags_from_facts(fact_descs)
                 pending = [flag for flag in flags if flag not in result.flags_found]
                 for flag in pending:
                     _submit_flag_safely(client, code, flag, result, started_at)
@@ -557,9 +759,19 @@ def _run_single_challenge(
             if hint_eligible and not result.flags_found:
                 now = time.monotonic()
                 if hint_taken < 1 and now >= hint_trigger_at:
-                    hint_taken = 1 if _try_platform_hint(client, engine, code, project_id, result) else hint_taken
+                    if _try_platform_hint(client, engine, code, project_id, result):
+                        hint_taken = 1
+                        facts_at_hint1 = fact_count
                 elif hint_taken < 2 and now >= hint2_trigger_at:
-                    hint_taken = 2 if _try_platform_hint(client, engine, code, project_id, result) else hint_taken
+                    # V2-1①：hint1 注入后星图零新增（无新攻击面）→ hint2 大概率无效，跳过止损。
+                    # 注意：consolidate 压缩会让 fact 数变小（那是进展不是停滞）——只跳过精确相等
+                    if facts_at_hint1 is not None and fact_count is not None and fact_count == facts_at_hint1:
+                        hint_taken = 2
+                        LOG.info(
+                            "hint2 skipped code=%s（hint1 后星图无新增 fact，止损不购）", code,
+                        )
+                    else:
+                        hint_taken = 2 if _try_platform_hint(client, engine, code, project_id, result) else hint_taken
             # 每 6 轮重新拉取题目列表：平台侧已完成（如 flag 已全提交）→ 提前收尾释放名额
             scan_round += 1
             if scan_round % 6 == 0:
@@ -570,9 +782,13 @@ def _run_single_challenge(
                         LOG.info("challenge completed on platform side code=%s 提前收尾并停引擎项目", code)
                         # 先收最后一批 flag（多 flag 题可能还有未提交的），再删引擎项目
                         try:
-                            last_flags = collect_flags_from_facts(engine.list_fact_descriptions(project_id))
+                            last_descs = engine.list_fact_descriptions(project_id)
+                            last_flags = collect_flags_from_facts(last_descs)
                             for flag in [f for f in last_flags if f not in result.flags_found]:
                                 _submit_flag_safely(client, code, flag, result, started_at)
+                            if last_descs:
+                                # V2-6：删项目前留末段星记（解出后沉淀知识库）
+                                result.kb_approach_draft = "；".join(last_descs[-3:])[:800]
                         except Exception:  # noqa: BLE001
                             pass
                         # R5 修复（关题竞态 404 级联）：先 stop 让 scheduler 取消在途
@@ -652,6 +868,14 @@ def _run_single_challenge(
                 result.hints_count = int(stats.get("hints", 0) or 0)
         except Exception:  # noqa: BLE001 —— 统计失败不影响主流程
             pass
+        # V2-6：末段星记浓缩（项目仍在时兜底采集；完成路径删项目前已采）
+        if project_id and not result.kb_approach_draft and not project_gone:
+            try:
+                _descs = engine.list_fact_descriptions(project_id)
+                if _descs:
+                    result.kb_approach_draft = "；".join(_descs[-3:])[:800]
+            except Exception:  # noqa: BLE001
+                pass
         # defer：保留引擎项目进度（不删），仅关平台题释放名额；progress 保持
         # started/不标 done，队列轮转后重新 start 直接续跑同项目
         deferred = status == "deferred"
@@ -682,6 +906,163 @@ def _build_goal(description: str, ch: Any) -> str:
     return goal
 
 
+# ---------------- V2-5/V2-6/V2-7：知识库 + 期望预算 ----------------
+
+KNOWLEDGE_FILE = (
+    Path(os.environ.get("ASTRA_KNOWLEDGE_FILE"))
+    if os.environ.get("ASTRA_KNOWLEDGE_FILE")
+    else Path(__file__).resolve().parent.parent / "knowledge" / "challenge-approaches.md"
+)
+_KB_ENTRY_RE = re.compile(r"^## (.+?)（([a-z0-9-]+)）\s*$", re.MULTILINE)
+_KB_META_RE = re.compile(r"首解耗时：(\d+)min")
+_KB_HINT_RE = re.compile(r"^- 思路\d+：(.+)$", re.MULTILINE)
+# V2-6 双层脱敏：① flag 值；② secret 语境附近的 ≥12 位随机串（flag 组件同罪）
+_FLAG_VALUE_RE = re.compile(r"(flag|FLAG)\{[^}\s]{3,}\}")
+_SECRET_CTX_RE = re.compile(
+    r"(?i)(secret|flag|key|token|password|泄漏|密码|密钥)[^\n]{0,100}?([0-9a-fA-F]{12,})"
+)
+
+
+def _sanitize_kb_text(text: str) -> str:
+    text = _FLAG_VALUE_RE.sub(lambda m: f"{m.group(1)}{{...已脱敏...}}", text)
+    text = _SECRET_CTX_RE.sub(
+        lambda m: m.group(0).replace(m.group(2), "[REDACTED]"), text
+    )
+    return text
+
+
+def _load_knowledge_base() -> dict[str, dict]:
+    """解析已解题思路知识库：{code: {name, seconds, approach}}。文件缺失/损坏返回空。"""
+    try:
+        raw = KNOWLEDGE_FILE.read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    kb: dict[str, dict] = {}
+    for i, m in enumerate(_KB_ENTRY_RE.finditer(raw)):
+        name, code = m.group(1), m.group(2)
+        chunk_end = len(raw)
+        for m2 in list(_KB_ENTRY_RE.finditer(raw))[i + 1:]:
+            chunk_end = m2.start()
+            break
+        chunk = raw[m.end():chunk_end]
+        meta = _KB_META_RE.search(chunk)
+        approaches = _KB_HINT_RE.findall(chunk)
+        kb[code.lower()] = {
+            "name": name,
+            "seconds": float(meta.group(1)) * 60 if meta else None,
+            "approach": _sanitize_kb_text("；".join(a.strip() for a in approaches))[:800],
+        }
+    return kb
+
+
+def _expected_budget_seconds(
+    result: ChallengeResult,
+    difficulty: str,
+    challenge_timeout_seconds: float,
+) -> float:
+    """V2-7：单题期望预算（秒）——开题的剩余时间判据。
+
+    有 KB 历史首解耗时 → max(2×耗时, 15min)；近失题 → 20min；无参考 → 按难度超时。
+    """
+    if result.kb_seconds is not None:  # 0min 首解也走地板预算（bctf-40 实例），falsy 判空会错放到 45min
+        return max(2 * result.kb_seconds, EXPECTED_BUDGET_FLOOR_SECONDS) + DONE_FLAG_WAIT_SECONDS + 30
+    if result.wrong_count > 0:
+        return 20 * 60 + DONE_FLAG_WAIT_SECONDS + 30
+    base = DIFFICULTY_TIMEOUTS.get(difficulty, challenge_timeout_seconds)
+    return base + DONE_FLAG_WAIT_SECONDS + 30
+
+
+def _parse_order_codes(cli_value: str | None, env_value: str | None) -> list[str] | None:
+    """V2-5：合并 CLI 与环境变量的显式顺序参数；都为空返回 None。
+
+    独立成函数是测试需要——曾出过 CLI 值按字符迭代的解析 bug（or 短路绕过了 split）。
+    """
+    raw = cli_value or env_value
+    if not raw:
+        return None
+    return [c for c in (x.strip() for x in raw.split(",")) if c]
+
+
+def _append_knowledge_entry(result: ChallengeResult, fact_descriptions: list[str]) -> None:
+    """V2-6：解出后自动沉淀思路到运行时知识库（progress 同目录，赛后人工合并回仓库文件）。
+
+    攻击链取该题末段星记（含 completion fact，是攻击链的浓缩叙述）；双层脱敏后写入。
+    """
+    try:
+        # 托管镜像 /opt/knowledge 为 root 只读——沉淀文件写到临时目录（赛后人工取回合并）
+        import tempfile as _tempfile
+
+        out = Path(_tempfile.gettempdir()) / "astra-knowledge-append.json"
+        entry = {
+            result.unique_code: {
+                "name": result.unique_code,
+                "first_flag_seconds": result.first_flag_seconds,
+                "elapsed_seconds": round(result.elapsed_seconds),
+                "awarded": result.awarded,
+                "approach": _sanitize_kb_text("；".join(fact_descriptions[-3:]))[:800],
+            }
+        }
+        existing: dict = {}
+        try:
+            existing = json.loads(out.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            pass
+        existing.update(entry)
+        out.write_text(json.dumps(existing, ensure_ascii=False, indent=1), encoding="utf-8")
+    except OSError:
+        pass  # 沉淀失败不影响跑分
+
+
+# ---------------- V3 经验复利：知识条目命中统计（回忆强化 + 遗忘权重的数据源） ----------------
+
+MEMORY_STATS_FILE = (
+    Path(os.environ.get("ASTRA_MEMORY_STATS_FILE"))
+    if os.environ.get("ASTRA_MEMORY_STATS_FILE")
+    else KNOWLEDGE_FILE.parent / "memory-stats.json"
+)
+
+
+def _load_memory_stats() -> dict:
+    try:
+        return json.loads(MEMORY_STATS_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _record_memory_stats(result: ChallengeResult) -> None:
+    """V3：单题收尾时记录知识条目命中情况——注入了历史思路且解出=命中，注入未解出=未命中。
+
+    stats 结构：{code: {name, hits, misses, last_used}}。注入时附上战绩（回忆强化），
+    高频有效打法自动浮上来，长期无效条目自然沉底（艾宾浩斯式遗忘）。
+    """
+    if not getattr(result, "kb_entry_text", None):
+        return
+    try:
+        stats = _load_memory_stats()
+        entry = stats.setdefault(
+            result.unique_code,
+            {"name": result.unique_code, "hits": 0, "misses": 0, "last_used": ""},
+        )
+        solved = result.flags_correct > 0
+        entry["hits" if solved else "misses"] += 1
+        entry["last_used"] = datetime.now().isoformat(timespec="seconds")
+        MEMORY_STATS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        MEMORY_STATS_FILE.write_text(
+            json.dumps(stats, ensure_ascii=False, indent=1), encoding="utf-8"
+        )
+    except (OSError, ValueError):
+        pass  # 统计失败不影响跑分
+
+
+def _memory_reinforcement_text(code: str) -> str:
+    """V3：注入历史思路时附上该条目的实战战绩（命中 n/m）——让 agent 知道参考可信度。"""
+    entry = _load_memory_stats().get(code)
+    if not entry or not (entry.get("hits") or entry.get("misses")):
+        return ""
+    hits, misses = int(entry.get("hits", 0)), int(entry.get("misses", 0))
+    return f"（该思路历史战绩：{hits} 次命中/{misses} 次未命中）"
+
+
 def _try_platform_hint(
     client: BenchmarkClient,
     engine: Any,
@@ -706,6 +1087,7 @@ def _try_platform_hint(
     try:
         engine.create_hint(project_id, f"[平台提示] {hint_text}")
         result.used_hint = True
+        result.hint_texts.append(hint_text)  # V2-1④：缓存已购 hint（defer 续跑复用，禁止重购）
         LOG.info("platform hint injected code=%s hint=%s", code, hint_text[:120])
     except Exception as exc:  # noqa: BLE001
         LOG.warning("platform hint inject failed code=%s error=%s", code, exc)
@@ -719,36 +1101,58 @@ def _submit_flag_safely(
     result: ChallengeResult,
     started_at: float | None = None,
 ) -> None:
-    try:
-        res = call_with_retry(lambda: client.submit_flag(code, flag), f"submit_flag:{code}", retries=2)
-    except Exception as exc:  # noqa: BLE001 —— 按异常名识别 SDK 的 DuplicateSubmit（幂等）
-        if type(exc).__name__ == "DuplicateSubmit":
-            LOG.info("flag duplicate skip code=%s flag=%s", code, flag)
-            result.flags_found.append(flag)
-            return
-        LOG.warning("submit_flag failed code=%s flag=%s error=%s", code, flag, exc)
+    flag = (flag or "").strip()  # V2-3：提交前清洗空白
+    if not flag:
         return
-    result.flags_found.append(flag)
-    correct = bool(getattr(res, "correct", False))
-    if correct:
-        result.flags_correct += 1
-        if result.first_flag_seconds is None and started_at is not None:
-            result.first_flag_seconds = round(time.monotonic() - started_at, 1)
-    awarded = int(getattr(res, "awarded", 0) or 0)
-    cumulative = int(getattr(res, "cumulative_score", 0) or 0)
-    if awarded:
-        result.awarded += awarded
-    if cumulative:
-        result.cumulative_score = cumulative
-    LOG.info(
-        "flag submitted code=%s flag=%s correct=%s awarded=%s progress=%s/%s",
-        code,
-        flag,
-        correct,
-        awarded,
-        getattr(res, "correct_flag_count", None),
-        getattr(res, "total_flag_count", None),
-    )
+
+    def _submit_once(value: str):
+        try:
+            return call_with_retry(lambda: client.submit_flag(code, value), f"submit_flag:{code}", retries=2)
+        except Exception as exc:  # noqa: BLE001 —— 按异常名识别 SDK 的 DuplicateSubmit（幂等）
+            if type(exc).__name__ == "DuplicateSubmit":
+                LOG.info("flag duplicate skip code=%s flag=%s", code, value)
+                result.flags_found.append(value)
+                return "dup"
+            LOG.warning("submit_flag failed code=%s flag=%s error=%s", code, value, exc)
+            return None
+
+    def _record(value: str, res: Any) -> bool:
+        """登记一次提交结果；返回是否正确。"""
+        result.flags_found.append(value)
+        correct = bool(getattr(res, "correct", False))
+        awarded = int(getattr(res, "awarded", 0) or 0)
+        cumulative = int(getattr(res, "cumulative_score", 0) or 0)
+        if correct:
+            result.flags_correct += 1
+            if result.first_flag_seconds is None and started_at is not None:
+                result.first_flag_seconds = round(time.monotonic() - started_at, 1)
+        else:
+            result.wrong_count += 1  # V2-2：近失信号（回队插队首 + 尾段优先重攻）
+        if awarded:
+            result.awarded += awarded
+        if cumulative:
+            result.cumulative_score = cumulative
+        LOG.info(
+            "flag submitted code=%s flag=%s correct=%s awarded=%s progress=%s/%s",
+            code, value, correct, awarded,
+            getattr(res, "correct_flag_count", None), getattr(res, "total_flag_count", None),
+        )
+        return correct
+
+    res = _submit_once(flag)
+    if res is None or res == "dup":
+        return
+    if _record(flag, res):
+        return
+    # V2-3：原样提交判错 → 自动尝试大小写变体（平台大小写敏感时的兜底；最多 2 次）
+    for variant in (flag.lower(), flag.upper()):
+        if variant == flag:
+            continue
+        res2 = _submit_once(variant)
+        if res2 is None or res2 == "dup":
+            return
+        if _record(variant, res2):
+            return
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -769,8 +1173,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--no-auto-hint", action="store_true", help="禁用卡题自动获取平台 hint（hint 会按比例扣该题得分）")
     parser.add_argument("--no-prefer-easy", action="store_true", help="禁用 easy→medium→hard 开题排序（恢复平台原始顺序）")
+    parser.add_argument(
+        "--order-codes",
+        default=None,
+        help="V2-5 显式做题顺序（逗号分隔题码）：列表内按给定顺序置顶，未列题目按 easy-first 续队；"
+        "失配码告警忽略不阻断。托管模式用环境变量 ASTRA_ORDER_CODES。",
+    )
     parser.add_argument("--hint-after-seconds", type=float, default=900.0, help="第一次 hint 触发时间（默认 900s=15 分钟无解即取）")
-    parser.add_argument("--hint2-after-seconds", type=float, default=1800.0, help="第二次 hint 触发时间（默认 1800s=30 分钟无解即取）")
+    parser.add_argument("--hint2-after-seconds", type=float, default=1500.0, help="第二次 hint 触发时间（默认 1500s=25 分钟无解即取；V2-1 给取后利用留足时间）")
     parser.add_argument("--defer-after-seconds", type=float, default=2700.0, help="单题最长连续分析（默认 2700s=45 分钟无果保留进度放回队尾）")
     parser.add_argument("--hint-min-score", type=int, default=0, help="自动 hint 的最低题分值（默认 0=不限制）")
     parser.add_argument("--once", action="store_true", help="跑一轮后退出（默认循环直到任务结束）")
@@ -828,6 +1238,7 @@ def main(argv: list[str] | None = None) -> int:
                 defer_after_seconds=args.defer_after_seconds,
                 hint_min_score=args.hint_min_score,
                 prefer_easy=not args.no_prefer_easy,
+                order_codes=_parse_order_codes(args.order_codes, os.environ.get("ASTRA_ORDER_CODES")),
             )
     except TaskFinishedError:
         LOG.info("任务时限结束，输出已完成的报告")

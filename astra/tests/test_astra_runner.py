@@ -833,3 +833,183 @@ def test_reconcile_stops_orphan_active_project(monkeypatch) -> None:
     assert "orphan-1" in shared.stop_calls    # 孤儿被停
     assert "proj-0" not in shared.stop_calls  # 窗口内项目不动
 
+
+
+# ---------------- V2 修复测试（2026-08-16：run 10089 实证驱动的策略层） ----------------
+
+def test_v2_sanitize_kb_text() -> None:
+    """V2-6 双层脱敏：flag 值正则 + secret 语境的 flag 组件（InterviewAI 教训）。"""
+    from astra_runner.runner import _sanitize_kb_text
+
+    dirty = "Flag 1 = flag{S3cr3t-X}; HR audit value 3e5a7b1c9d2f4e06 leaked"
+    clean = _sanitize_kb_text(dirty)
+    assert "S3cr3t-X" not in clean
+    assert "3e5a7b1c9d2f4e06" not in clean
+    # 无 secret 语境的普通内容不误伤
+    assert _sanitize_kb_text("vulnerability CVE-2024-1234 via upload") == "vulnerability CVE-2024-1234 via upload"
+
+
+def test_v2_expected_budget() -> None:
+    """V2-7 期望预算：KB 题 2×首解(15min 地板)、近失 20min、无参考按难度。"""
+    from astra_runner.runner import (
+        DIFFICULTY_TIMEOUTS,
+        DONE_FLAG_WAIT_SECONDS,
+        _expected_budget_seconds,
+    )
+
+    r_kb = ChallengeResult(unique_code="c", description="d")
+    r_kb.kb_seconds = 60
+    assert _expected_budget_seconds(r_kb, "hard", 1800) == 900 + DONE_FLAG_WAIT_SECONDS + 30
+    r_fast = ChallengeResult(unique_code="c", description="d")
+    r_fast.kb_seconds = 600
+    assert _expected_budget_seconds(r_fast, "hard", 1800) == 1200 + DONE_FLAG_WAIT_SECONDS + 30
+    r_miss = ChallengeResult(unique_code="c", description="d")
+    r_miss.wrong_count = 2
+    assert _expected_budget_seconds(r_miss, "hard", 1800) == 20 * 60 + DONE_FLAG_WAIT_SECONDS + 30
+    r_plain = ChallengeResult(unique_code="c", description="d")
+    assert _expected_budget_seconds(r_plain, "easy", 1800) == DIFFICULTY_TIMEOUTS["easy"] + DONE_FLAG_WAIT_SECONDS + 30
+
+
+def test_v2_knowledge_base_parse(tmp_path, monkeypatch) -> None:
+    """V2-6 知识库解析：条目/首解耗时/思路，加载时同步脱敏。"""
+    import astra_runner.runner as runner_mod
+
+    kb_file = tmp_path / "kb.md"
+    kb_file.write_text(
+        "# 已解题思路知识库\n\n"
+        "## Foo（bctf-01）\n"
+        "- 分值/难度：100 / easy ｜ 首解耗时：3min（09:45 解出）\n"
+        "- 思路1：SSRF via nip.io 绕 IP 黑名单\n\n"
+        "## Bar（bctf-02）\n"
+        "- 首解耗时：7min\n"
+        "- 思路1：captured flag{Leak-9f} then revoked\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(runner_mod, "KNOWLEDGE_FILE", kb_file)
+    kb = runner_mod._load_knowledge_base()
+    assert kb["bctf-01"]["seconds"] == 180
+    assert "nip.io" in kb["bctf-01"]["approach"]
+    assert "Leak-9f" not in kb["bctf-02"]["approach"]  # 加载时脱敏
+
+
+def test_v2_order_codes_explicit_priority() -> None:
+    """V2-5：显式顺序置顶（未列题续队）；失配码告警忽略不阻断。"""
+
+    @dataclass
+    class DiffChallenge(FakeChallenge):
+        difficulty: str = "medium"
+
+    c1, c2, c3, c4 = (DiffChallenge(f"bctf-0{i}") for i in range(1, 5))
+    flags = {c.unique_code: ["flag{f}"] for c in (c1, c2, c3, c4)}
+    client = FakeClient([c1, c2, c3, c4], flags=flags)
+    engine = FakeEngine({f"proj-{i}": ["flag{f}"] for i in range(4)})
+    run_benchmark(
+        client,
+        lambda: engine,
+        challenge_timeout_seconds=0.5,
+        flag_poll_seconds=0,
+        defer_after_seconds=5,
+        order_codes=["bctf-03", "bctf-01", "zz-nonexistent"],
+        parallel=2,
+    )
+    # 显式列表前两位置顶启动；失配码 zz-nonexistent 不阻断
+    assert client.started[:2] == ["bctf-03", "bctf-01"]
+    assert set(client.started) == {"bctf-01", "bctf-02", "bctf-03", "bctf-04"}
+
+
+def test_v2_flag_variants_and_wrong_count() -> None:
+    """V2-3：原样错交后自动大小写变体兜底；V2-2：wrong_count 记近失。"""
+    from astra_runner.runner import _submit_flag_safely
+
+    client = FakeClient([FakeChallenge("c1")], flags={"c1": ["FLAG{ABC}" ]})
+    result = ChallengeResult(unique_code="c1", description="d")
+    _submit_flag_safely(client, "c1", "flag{abc} ", result)  # 带空白，原样为小写错
+    assert result.flags_correct == 1
+    assert result.wrong_count >= 1  # 原样错交记为近失信号
+    assert ("c1", "FLAG{ABC}") in client.submitted  # 变体兜底命中
+
+
+def test_v2_hint_cache_store() -> None:
+    """V2-1④：hint 购买即入 result 缓存（defer 续跑复用，禁止重购）。"""
+    from astra_runner.runner import _try_platform_hint
+
+    client = FakeClient([])
+    engine = FakeEngine({})
+    result = ChallengeResult(unique_code="c1", description="d")
+    assert _try_platform_hint(client, engine, "c1", "proj-0", result)
+    assert len(result.hint_texts) == 1
+    assert "platform hint for c1" in result.hint_texts[0]
+
+
+def test_v2_starvation_refill_uses_window() -> None:
+    """V2-7：无窗口模式不回灌（防无限重拉）；带窗口且队列空时回灌已弃题。"""
+    import astra_runner.runner as runner_mod
+
+    @dataclass
+    class HardChallenge(FakeChallenge):
+        difficulty: str = "hard"
+
+    ch = HardChallenge("bctf-x")
+    client = FakeClient([ch])  # 无 flag 可解
+
+    # 无窗口：defer 上限后放弃并自然收尾（不回灌）
+    engine1 = FakeEngine({}, done=False)
+    results1 = run_benchmark(
+        client, lambda: engine1, challenge_timeout_seconds=0.2,
+        flag_poll_seconds=0, defer_after_seconds=0.15, parallel=1,
+    )
+    assert client.started.count("bctf-x") <= runner_mod.MAX_DEFER_PER_CHALLENGE + 1
+    assert results1[0].flags_correct == 0
+
+
+def test_v2_parse_order_codes_cli_and_env() -> None:
+    """V2-5 回归：CLI 值曾因 or 短路被按字符迭代（split 只作用于 env 分支）。"""
+    from astra_runner.runner import _parse_order_codes
+
+    assert _parse_order_codes("bctf-12,bctf-13, bctf-30", None) == ["bctf-12", "bctf-13", "bctf-30"]
+    assert _parse_order_codes(None, "a-01,b-02") == ["a-01", "b-02"]
+    assert _parse_order_codes("c1", "ignored-env") == ["c1"]
+    assert _parse_order_codes(None, None) is None
+    assert _parse_order_codes("", "") is None
+    assert _parse_order_codes(" , ,x ,", None) == ["x"]
+
+
+def test_v2_expected_budget_zero_kb_seconds() -> None:
+    """V2-5/V2-7 回归：0min 首解的 KB 题应走 15min 地板预算（falsy 判空曾错放到难度预算）。"""
+    from astra_runner.runner import DONE_FLAG_WAIT_SECONDS, _expected_budget_seconds
+
+    r = ChallengeResult(unique_code="c", description="d")
+    r.kb_seconds = 0.0
+    assert _expected_budget_seconds(r, "hard", 1800) == 900 + DONE_FLAG_WAIT_SECONDS + 30
+
+
+def test_v2_kb_short_first_attempt(monkeypatch, tmp_path) -> None:
+    """V2-5 运行时缺口回归：KB 题首攻限时（只影响第一次尝试，第二发恢复完整梯子）。"""
+    import time as _time
+
+    import astra_runner.runner as runner_mod
+
+    kb_file = tmp_path / "kb.md"
+    kb_file.write_text(
+        "## Foo（kb-01）\n- 首解耗时：0min\n- 思路1：historical approach\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(runner_mod, "KNOWLEDGE_FILE", kb_file)
+    monkeypatch.setattr(runner_mod, "EXPECTED_BUDGET_FLOOR_SECONDS", 0.5)
+
+    ch = FakeChallenge("kb-01")
+    client = FakeClient([ch])  # 永无可解 flag
+    t0 = _time.monotonic()
+    results = run_benchmark(
+        client,
+        lambda: FakeEngine({}, done=False),
+        challenge_timeout_seconds=0.2,
+        flag_poll_seconds=0,
+        defer_after_seconds=6.0,  # 完整梯子 6s/发；首攻应被压到 0.5s
+        parallel=1,
+    )
+    elapsed = _time.monotonic() - t0
+    # 首攻 0.5s + 第二发 6s + 收尾 < 10s（若首攻也吃满 6s 会 >12s）
+    assert elapsed < 10.0, f"first attack not shortened? elapsed={elapsed:.1f}s"
+    assert client.started.count("kb-01") == 2  # 两发后 defer 上限放弃
+    assert results[0].defer_count == runner_mod.MAX_DEFER_PER_CHALLENGE

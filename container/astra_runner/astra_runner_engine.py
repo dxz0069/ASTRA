@@ -559,6 +559,18 @@ class LocalAstraEngine:
             if isinstance(p, dict) and p.get("status") == "active"
         ]
 
+    def create_fact(self, project_id: str, description: str) -> None:
+        """V2-6：注入外部 fact（知识库历史思路参考，开局一次性写入）。"""
+        try:
+            response = requests.post(
+                f"{ASTRA_SERVER_URL}/projects/{project_id}/facts",
+                json={"description": description, "kind": "regular", "creator": "astra-runner"},
+                timeout=15,
+            )
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            LOG.warning("create_fact failed project=%s error=%s", project_id, exc)
+
     def stats(self, project_id: str) -> dict[str, int]:
         """每题统计（评审量化口径）：星记数/指引数/驳回指引数。"""
         response = requests.get(f"{ASTRA_SERVER_URL}/projects/{project_id}", timeout=10)
