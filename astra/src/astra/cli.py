@@ -141,3 +141,73 @@ def stats(db_path: str, kb_path: Path):
                 )
     except (OSError, json.JSONDecodeError):
         click.echo("  （暂无统计——首轮复利数据在赛后生成）")
+
+
+@memory.command()
+@click.option(
+    "--db-path",
+    type=click.Path(),
+    default=str(db.DEFAULT_DB),
+    show_default=True,
+    help="SQLite database path",
+)
+@click.argument("project", required=False, default="")
+def trace(db_path: str, project: str):
+    """决策链回放：该项目的航向（决策）与星记（结论）时间线——"AI 为什么走这条路"可审计。"""
+    import sqlite3
+
+    db.configure(Path(db_path))
+    conn = sqlite3.connect(str(Path(db_path)))
+    conn.row_factory = sqlite3.Row
+    try:
+        if project:
+            rows = conn.execute(
+                "SELECT id, title, status, created_at FROM projects "
+                "WHERE id LIKE ? OR title LIKE ? ORDER BY created_at DESC LIMIT 5",
+                (f"%{project}%", f"%{project}%"),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id, title, status, created_at FROM projects "
+                "ORDER BY created_at DESC LIMIT 10"
+            ).fetchall()
+        if not rows:
+            click.echo(f"未匹配到项目：{project or '（最近无项目）'}")
+            return
+        if len(rows) > 1:
+            click.echo("匹配到多个项目（取最新）：")
+            for r in rows:
+                click.echo(f"  {r['id']}  {r['title']}  [{r['status']}]")
+        proj = rows[0]
+        click.echo(f"\n项目：{proj['title']}（{proj['id']}，{proj['status']}，建于 {proj['created_at']}）")
+
+        intents = conn.execute(
+            "SELECT id, description, worker, created_at, concluded_at, to_fact_id, challenged "
+            "FROM intents WHERE project_id = ? ORDER BY created_at",
+            (proj["id"],),
+        ).fetchall()
+        facts = conn.execute(
+            "SELECT id, description, kind, confidence, challenged "
+            "FROM facts WHERE project_id = ? ORDER BY rowid",
+            (proj["id"],),
+        ).fetchall()
+
+        click.echo(f"\n决策链（航向 {len(intents)} 条）——AI 为什么走这条路：")
+        for it in intents:
+            state = "已归航→" + (it["to_fact_id"] or "?") if it["concluded_at"] else "未归航"
+            mark = " 〖被质询〗" if it["challenged"] else ""
+            desc = (it["description"] or "").replace("\n", " ")[:120]
+            click.echo(f"  [{it['created_at']}] {it['worker'] or '?'}: {desc} → {state}{mark}")
+
+        click.echo(f"\n星记序列（事实 {len(facts)} 条，按写入序）：")
+        for f in facts:
+            marks = []
+            if f["kind"] == "summary":
+                marks.append("摘要")
+            if f["challenged"]:
+                marks.append("被质询")
+            tag = f"（{'、'.join(marks)}）" if marks else ""
+            desc = (f["description"] or "").replace("\n", " ")[:120]
+            click.echo(f"  {f['id']} [{f['confidence']}]{tag} {desc}")
+    finally:
+        conn.close()

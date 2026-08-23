@@ -30,6 +30,43 @@ def existing_codes(kb_text: str) -> set[str]:
     return {m.group(2).lower() for m in KB_ENTRY_RE.finditer(kb_text)}
 
 
+def _entry_chunks(kb_text: str) -> dict[str, tuple[int, int]]:
+    """{code: (条目 chunk 起止)}——chunk 为该条目标题行之后到下一条目之前的内容。"""
+    matches = list(KB_ENTRY_RE.finditer(kb_text))
+    chunks: dict[str, tuple[int, int]] = {}
+    for i, m in enumerate(matches):
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(kb_text)
+        chunks[m.group(2).lower()] = (m.end(), end)
+    return chunks
+
+
+def _token_set(text: str) -> set[str]:
+    return set(re.findall(r"[a-zA-Z0-9_\-]{2,}|[\u4e00-\u9fff]{2,}", text.lower()))
+
+
+def _similarity(a: str, b: str) -> float:
+    ta, tb = _token_set(a), _token_set(b)
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / min(len(ta), len(tb))
+
+
+CONFLICT_SIMILARITY_THRESHOLD = 0.35  # 低于此值视为“不同打法”，触发冲突检测
+
+
+def _merge_conflicting_entry(kb_text: str, chunk: tuple[int, int], new_approach: str, tag: str) -> str:
+    """冲突检测：同码新攻击链与旧思路差异大时，追加为“思路N（更新版）”并标注差异。
+
+    保留新旧两版而非覆盖——历史打法可能与当前实例都有效，交由开局注入时的战绩权重裁决。
+    """
+    start, end = chunk
+    body = kb_text[start:end]
+    existing_ideas = re.findall(r"^- 思路(\d+)：", body, re.MULTILINE)
+    next_n = max((int(n) for n in existing_ideas), default=0) + 1
+    line = f"- 思路{next_n}（更新版：与上述思路差异显著，{tag} 检出冲突并双版本保留）：{new_approach.strip()}\n"
+    return kb_text[:end] + line + kb_text[end:]
+
+
 def format_entry(code: str, data: dict, source_tag: str) -> str:
     minutes = round((data.get("elapsed_seconds") or data.get("first_flag_seconds") or 0) / 60)
     awarded = data.get("awarded")
@@ -64,21 +101,39 @@ def main() -> int:
 
     kb_text = args.kb.read_text(encoding="utf-8") if args.kb.exists() else "# 已解题思路知识库（参考用）\n"
     known = existing_codes(kb_text)
+    chunks = _entry_chunks(kb_text)
+    tag = datetime.now().strftime("merge%m%d")
 
-    merged, skipped = [], []
+    merged, skipped, conflicted = [], [], []
     for code, data in pending.items():
-        if code.lower() in known:
-            skipped.append(code)
+        new_approach = (data.get("approach") or "").strip()
+        if code.lower() not in known:
+            kb_text += format_entry(code, data, source_tag=tag)
+            merged.append(code)
             continue
-        kb_text += format_entry(code, data, source_tag=datetime.now().strftime("merge%m%d"))
-        merged.append(code)
+        # 冲突检测：同码条目比对新旧攻击链，相似→重复跳过；差异大→双版本保留
+        start, end = chunks[code.lower()]
+        old_approach = "；".join(
+            re.findall(r"^- 思路\d+：(.+)$", kb_text[start:end], re.MULTILINE)
+        )
+        if _similarity(old_approach, new_approach) < CONFLICT_SIMILARITY_THRESHOLD and new_approach:
+            kb_text = _merge_conflicting_entry(kb_text, chunks[code.lower()], new_approach, tag)
+            chunks = _entry_chunks(kb_text)  # 插入后偏移失效，重算
+            conflicted.append(code)
+        else:
+            skipped.append(code)
 
-    print(f"知识库条目：{len(known)} ｜ 沉淀待合并：{len(pending)} ｜ 新增：{len(merged)} ｜ 已存在跳过：{len(skipped)}")
+    print(
+        f"知识库条目：{len(known)} ｜ 沉淀待合并：{len(pending)} ｜ 新增：{len(merged)}"
+        f" ｜ 重复跳过：{len(skipped)} ｜ 冲突双版本保留：{len(conflicted)}"
+    )
     for code in merged:
         print(f"  + {code}")
+    if conflicted:
+        print(f"  ⚠ 冲突检出（新旧攻击链差异显著，双版本保留待战绩裁决）：{', '.join(conflicted)}")
     if skipped:
-        print(f"  跳过（已存在）：{', '.join(skipped)}")
-    if args.dry_run or not merged:
+        print(f"  跳过（已存在且思路相似）：{', '.join(skipped)}")
+    if args.dry_run or not (merged or conflicted):
         return 0
 
     args.kb.parent.mkdir(parents=True, exist_ok=True)
