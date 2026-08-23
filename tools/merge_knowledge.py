@@ -22,8 +22,21 @@ from pathlib import Path
 DEFAULT_INPUT = Path("/tmp/astra-knowledge-append.json") if sys.platform != "win32" else Path(
     __import__("tempfile").gettempdir()
 ) / "astra-knowledge-append.json"
+DEFAULT_DEADENDS_INPUT = DEFAULT_INPUT.parent / "astra-deadends-append.json"
 DEFAULT_KB = Path(__file__).resolve().parent.parent / "container" / "knowledge" / "challenge-approaches.md"
+DEFAULT_DEADENDS = DEFAULT_KB.parent / "dead-ends.md"
 KB_ENTRY_RE = re.compile(r"^## (.+?)（([a-z0-9-]+)）\s*$", re.MULTILINE)
+
+
+def format_deadend(code: str, data: dict, tag: str) -> str:
+    reason = data.get("reason", "unsolved")
+    minutes = round((data.get("elapsed_seconds") or 0) / 60)
+    deadend = (data.get("deadend") or "").strip() or "（无死路摘要）"
+    return (
+        f"\n## {data.get('name') or code}（{code}）\n"
+        f"- 原因：{reason} ｜ 耗时：{minutes}min ｜ 来源：[{tag}] auto-mined\n"
+        f"- 思路1：{deadend}\n"
+    )
 
 
 def existing_codes(kb_text: str) -> set[str]:
@@ -85,6 +98,7 @@ def main() -> int:
     parser.add_argument("--kb", type=Path, default=DEFAULT_KB, help="目标知识库 markdown")
     parser.add_argument("--dry-run", action="store_true", help="只打印将要合并的条目")
     parser.add_argument("--mark-merged", action="store_true", help="合并后把输入文件改名为 .merged")
+    parser.add_argument("--merge-deadends", action="store_true", help="同时合并死路沉淀到 dead-ends.md")
     args = parser.parse_args()
 
     if not args.input.exists():
@@ -141,6 +155,25 @@ def main() -> int:
     if args.mark_merged:
         args.input.rename(args.input.with_suffix(".merged.json"))
     print(f"[done] 已写入 {args.kb}")
+
+    # V5：失败经验库合并（死路沉淀 → dead-ends.md）
+    if args.merge_deadends and DEFAULT_DEADENDS_INPUT.exists():
+        try:
+            pending_dd = json.loads(DEFAULT_DEADENDS_INPUT.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
+            print(f"[warn] 死路沉淀文件损坏：{exc}")
+            return 0
+        dd_text = DEFAULT_DEADENDS.read_text(encoding="utf-8") if DEFAULT_DEADENDS.exists() else "# 失败经验库·死路集（负记忆）\n"
+        dd_known = existing_codes(dd_text)
+        dd_merged = [c for c in pending_dd if c.lower() not in dd_known]
+        for c in dd_merged:
+            dd_text += format_deadend(c, pending_dd[c], tag)
+        print(f"死路库：新增 {len(dd_merged)} ｜ 跳过 {len(pending_dd) - len(dd_merged)}")
+        if dd_merged and not args.dry_run:
+            DEFAULT_DEADENDS.write_text(dd_text, encoding="utf-8")
+            if args.mark_merged:
+                DEFAULT_DEADENDS_INPUT.rename(DEFAULT_DEADENDS_INPUT.with_suffix(".merged.json"))
+            print(f"[done] 已写入 {DEFAULT_DEADENDS}")
     return 0
 
 

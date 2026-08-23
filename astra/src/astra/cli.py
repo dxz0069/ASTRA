@@ -211,3 +211,102 @@ def trace(db_path: str, project: str):
             click.echo(f"  {f['id']} [{f['confidence']}]{tag} {desc}")
     finally:
         conn.close()
+
+
+@memory.command("map")
+@click.option(
+    "--db-path",
+    type=click.Path(),
+    default=str(db.DEFAULT_DB),
+    show_default=True,
+    help="SQLite database path",
+)
+@click.argument("project", required=False, default="")
+@click.option("--out", type=click.Path(path_type=Path), default=Path("astra-star-map.html"), show_default=True, help="输出 HTML 路径")
+def map_(db_path: str, project: str, out: Path):
+    """星图可视化：生成单文件 HTML（内联 SVG，无外部依赖）——事实为星、航向为轨迹、质询红标。"""
+    import html as _html
+    import sqlite3
+
+    db.configure(Path(db_path))
+    conn = sqlite3.connect(str(Path(db_path)))
+    conn.row_factory = sqlite3.Row
+    try:
+        if project:
+            proj = conn.execute(
+                "SELECT id, title, status, created_at FROM projects WHERE id LIKE ? OR title LIKE ? "
+                "ORDER BY created_at DESC LIMIT 1",
+                (f"%{project}%", f"%{project}%"),
+            ).fetchone()
+        else:
+            proj = conn.execute(
+                "SELECT id, title, status, created_at FROM projects ORDER BY created_at DESC LIMIT 1"
+            ).fetchone()
+        if not proj:
+            click.echo("未匹配到项目")
+            return
+        facts = conn.execute(
+            "SELECT id, description, kind, confidence, challenged FROM facts "
+            "WHERE project_id = ? ORDER BY rowid",
+            (proj["id"],),
+        ).fetchall()
+        intents = conn.execute(
+            "SELECT id, description, worker, to_fact_id, concluded_at, challenged "
+            "FROM intents WHERE project_id = ? ORDER BY created_at",
+            (proj["id"],),
+        ).fetchall()
+
+        # 布局：星记按写入序从左到右蛇形铺开，航向画弧线指向归航星记
+        cols, node_w, node_h, gap_x, gap_y = 6, 150, 70, 40, 30
+        rows = max((len(facts) + cols - 1) // cols, 1)
+        width = cols * (node_w + gap_x) + gap_x
+        height = rows * (node_h + gap_y) + gap_y + 200
+        pos: dict[str, tuple[int, int]] = {}
+        cells = []
+        for i, f in enumerate(facts):
+            r, c = divmod(i, cols)
+            x = gap_x + c * (node_w + gap_x)
+            y = 160 + r * (node_h + gap_y)
+            pos[f["id"]] = (x + node_w // 2, y)
+            color = "#f59e0b" if f["id"] == "goal" else ("#94a3b8" if f["kind"] == "summary" else "#38bdf8")
+            stroke = "#ef4444" if f["challenged"] else "#1e293b"
+            dash = ' stroke-dasharray="4,3"' if f["kind"] == "summary" else ""
+            desc = _html.escape((f["description"] or "")[:80])
+            cells.append(
+                f'<g class="node"><title>{_html.escape(f["description"] or "")}</title>'
+                f'<rect x="{x}" y="{y}" width="{node_w}" height="{node_h}" rx="8" fill="{color}22" '
+                f'stroke="{stroke}" stroke-width="{2 if f["challenged"] else 1}"{dash}/>'
+                f'<text x="{x + 8}" y="{y + 20}" font-size="12" font-weight="bold" fill="#0f172a">{f["id"]}</text>'
+                f'<text x="{x + 8}" y="{y + 38}" font-size="10" fill="#334155">{desc}</text>'
+                f'<text x="{x + 8}" y="{y + 56}" font-size="9" fill="#64748b">{f["kind"]}/{f["confidence"]}'
+                + (' <tspan fill="#ef4444">质询</tspan>' if f["challenged"] else "")
+                + "</text></g>"
+            )
+        links = []
+        for it in intents:
+            if it["to_fact_id"] and it["to_fact_id"] in pos:
+                tx, ty = pos[it["to_fact_id"]]
+                # 从星记上方弧线进入（简化：全部从画布顶部的航向泳道出发）
+                lane_y = 110
+                color = "#ef4444" if it["challenged"] else "#22c55e" if it["concluded_at"] else "#a78bfa"
+                links.append(
+                    f'<path d="M {width // 2} {lane_y} Q {tx} {ty - 80} {tx} {ty}" fill="none" '
+                    f'stroke="{color}" stroke-width="1.5" stroke-opacity="0.6">'
+                    f"<title>{_html.escape(it['description'] or '')}</title></path>"
+                )
+        doc = f"""<!DOCTYPE html><html lang="zh"><head><meta charset="utf-8">
+<title>ASTRA 星图 · {_html.escape(proj['title'])}</title><style>
+body{{font-family:system-ui,sans-serif;background:#0f172a;color:#e2e8f0;margin:20px}}
+h1{{font-size:18px}} .meta{{color:#94a3b8;font-size:13px;margin-bottom:8px}}
+svg{{background:#1e293b;border-radius:12px}} text{{font-family:system-ui}}
+.node:hover rect{{stroke-width:3;cursor:pointer}}
+.legend span{{margin-right:16px;font-size:12px}}</style></head><body>
+<h1>ASTRA 星图 · {_html.escape(proj['title'])}</h1>
+<div class="meta">{proj['id']} ｜ {proj['status']} ｜ 建于 {proj['created_at']} ｜ 星记 {len(facts)} 条 ｜ 航向 {len(intents)} 条</div>
+<div class="legend"><span>🟦 星记</span><span>🟨 目标</span><span>⬜ 摘要(Epitome)</span><span>🟥 边框=被质询</span><span>绿线=已归航航向</span><span>紫线=未归航</span><span>红线=被质询航向</span></div>
+<svg width="{width}" height="{height}">{''.join(links)}{''.join(cells)}</svg>
+</body></html>"""
+        out.write_text(doc, encoding="utf-8")
+        click.echo(f"星图已生成：{out.resolve()}（星记 {len(facts)}，航向 {len(intents)}）")
+    finally:
+        conn.close()
