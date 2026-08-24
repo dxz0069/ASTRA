@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from astra.dispatcher.context import (
+    _open_chain_depths,
     build_focus_fact_ids,
     build_focus_hints,
     build_focus_open_intents,
@@ -107,3 +108,80 @@ def test_focus_hints_caps_count() -> None:
 def test_budget_zero_returns_empty() -> None:
     project = _project([_fact("f1", "port 80 open"), _fact("f2", "login page found")])
     assert build_focus_fact_ids(project, 0) == []
+
+
+# ---------------- V6 焦点检索结构信号：钉住 / 图距 / 预算封顶 ----------------
+
+def test_critical_fact_is_pinned_despite_zero_lexical_relevance() -> None:
+    project = _project(
+        [
+            _fact("f1", "nginx 1.18 header observed"),
+            _fact("f2", "admin password found in config.php"),
+            _fact("f3", "directory listing enabled"),
+            _fact("f4", "robots.txt parsed"),
+            _fact("f5", "gobuster finished"),
+        ],
+        intents=[_intent("i1", "enumerate attack surface", "2026-01-01T00:00:01Z")],
+    )
+    # 预算 1：凭据级发现词面上与航向毫无重叠，仍被钉住保留
+    ids = build_focus_fact_ids(project, 1)
+    assert ids == ["f2"]
+
+
+def test_pinned_capped_at_budget_keeps_most_recent() -> None:
+    project = _project(
+        [
+            _fact("f1", "old password from backup file"),
+            _fact("f2", "nginx banner"),
+            _fact("f3", "new password from config dump"),
+        ]
+    )
+    ids = build_focus_fact_ids(project, 1)
+    # 超额钉住受预算硬上限，保最近的关键事实
+    assert ids == ["f3"]
+
+
+def test_graph_distance_beats_lexical_similarity() -> None:
+    # f1 词面完全不像航向，但它正被未决航向依赖（一跳锚点）
+    linked = Fact(id="f1", description="strange opaque artifact xyzzy")
+    project = _project(
+        [
+            linked,
+            _fact("f2", "enumerate service banner and fingerprint nginx"),
+            _fact("f3", "directory brute force with common wordlist"),
+            _fact("f4", "robots.txt and sitemap parsed"),
+        ],
+        intents=[
+            Intent(
+                id="i1", from_=["f1"], to=None,
+                description="continue exploiting the artifact chain",
+                creator="worker", worker="w", created_at="2026-01-01T00:00:01Z",
+            ),
+        ],
+    )
+    ids = build_focus_fact_ids(project, 2)
+    assert "f1" in ids  # 图距加成让因果链上的事实入选，即便词面零重叠
+
+
+def test_second_hop_via_concluded_intent_gets_lesser_boost() -> None:
+    project = _project(
+        [
+            _fact("f1", "mysql service on 3306 discovered"),
+            _fact("f2", "totally unrelated notes about formatting"),
+            _fact("f3", "downstream finding grew out of f1 conclusion"),
+        ],
+        intents=[
+            Intent(
+                id="i1", from_=["f1"], to="f3",
+                description="verify chain", creator="worker", worker="w",
+                created_at="2026-01-01T00:00:01Z", concluded_at="2026-01-01T00:00:02Z",
+            ),
+            Intent(
+                id="i2", from_=["f1"], to=None,
+                description="keep pushing on f1", creator="worker", worker="w",
+                created_at="2026-01-01T00:00:03Z",
+            ),
+        ],
+    )
+    depths = _open_chain_depths(project)
+    assert depths == {"f1": 1, "f3": 2}
