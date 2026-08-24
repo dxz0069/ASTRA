@@ -45,16 +45,26 @@ LOG = logging.getLogger(__name__)
 
 
 def _resolve_review_worker(config: DispatchConfig, worker: WorkerConfig) -> tuple[WorkerConfig, Any]:
-    """选择审查阶段（challenge/verdict）的执行 worker 与 driver。
+    """选择审查阶段（challenge/verdict）的执行 worker 与 driver——跨模型异构优先。
 
-    审查对输出契约稳定性要求高，且不再硬编码 claude 可执行文件——命令一律由
-    driver 构造。优先使用产生提案的 worker 自身 driver；若该 driver 声明
-    不支持审查（supports_review()=False，如 pi 实测偶发提前退出），则回退到
-    配置中的 claudecode worker（如有，其 driver 输出契约实测稳定）；否则仍用
-    自身驱动（能力降级，由链路的重试 + 降级放行兜底）。
+    多智能体辩论文献的共识：同模型自审误差高度相关（橡皮图章），跨模型评审去相关。
+    优先级：
+      1. 与提案者**不同 type** 且 supports_review 的 worker 中 priority 最小者（异构评审）；
+      2. 提案者自身 driver（若 supports_review）；
+      3. 配置中的 claudecode worker（输出契约实测稳定）；
+      4. 仍用自身（能力降级，由链路重试+降级放行兜底）。
     """
     driver = get_driver(worker.type)
-    if getattr(driver, "supports_review", lambda: True)():
+    review_capable = lambda w: getattr(get_driver(w.type), "supports_review", lambda: True)()  # noqa: E731
+    diverse = [w for w in config.workers if w.type != worker.type and review_capable(w)]
+    if diverse:
+        best = min(diverse, key=lambda w: w.priority)
+        LOG.info(
+            "review uses heterogeneous reviewer worker=%s type=%s (proposer=%s) reason=cross_model_decorrelation",
+            best.name, best.type, worker.type,
+        )
+        return best, get_driver(best.type)
+    if review_capable(worker):
         return worker, driver
     fallback = next((w for w in config.workers if w.type == "claudecode"), None)
     if fallback is not None:
@@ -99,6 +109,39 @@ def dual_star_review(
     # 审查读图提速（候选 20）：文件路径引用 + 紧凑星图摘要
     graph_context = graph_ref + "\n\n" + review_graph_summary(project)
     common = {"graph_yaml": graph_context, "goal": goal, "proposal": format_json_block(proposal)}
+
+    # 机器预审（证据自复验契约·Deterministic Agents 思想）：归航提案引用的
+    # 证据星记必须携带可重放命令（evidence 非空且形如命令）——把"有凭据"从
+    # 正则级升到契约级；缺失即退回补强，防止 LLM 互相背书通过无凭据提案
+    if kind == "complete" and isinstance(data, dict):
+        from_ids = set(data.get("from", []))
+        anchors = [
+            f for f in project.facts
+            if f.id in from_ids and f.kind != "summary" and f.id != "origin"
+        ]
+        # 契约生效条件：图内存在任何带 evidence 的星记（真实跑图 explore 必带）；
+        # 全图无 evidence（bootstrap 种子/纯 mock 图）时豁免，防误杀
+        graph_has_evidence = any(
+            (getattr(f, "evidence", None) or "").strip() for f in project.facts
+        )
+        missing_replay = [
+            f.id for f in anchors
+            if not (getattr(f, "evidence", None) or "").strip()
+        ] if graph_has_evidence and anchors and not any(
+            (getattr(f, "evidence", None) or "").strip() for f in anchors
+        ) else []
+        if missing_replay:
+            LOG.info(
+                "complete rejected by machine precheck project=%s missing_replayable_evidence=%s",
+                project.project.id,
+                missing_replay,
+            )
+            record_failure_hint(
+                client, project.project.id, "review",
+                f"归航提案引用的证据星记缺少可重放命令（{missing_replay}）；完成级证据必须携带 evidence 命令，请补跑后重提",
+                prefix=REVIEW_HINT_PREFIX,
+            )
+            return False
 
     # 机器预审：归航提案引用的证据含低置信星记 → 直接否决（低置信不作完成证据）
     if kind == "complete" and isinstance(data, dict):

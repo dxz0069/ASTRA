@@ -27,6 +27,7 @@ class Intent(BaseModel):
     creator: str
     worker: str | None = None
     last_heartbeat_at: str | None = None
+    dispatch_count: int = 0  # UCB 航向投入卡：被派发探索的次数（跨心跳累计）
     created_at: str
     concluded_at: str | None = None
     challenged: bool = False

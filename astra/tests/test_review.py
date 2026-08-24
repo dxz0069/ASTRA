@@ -56,6 +56,9 @@ def test_validate_verdict_payload_kind_mismatch() -> None:
 def _review_config() -> tuple:
     config = make_config()
     project = make_project()
+    # V7 证据自复验契约：complete 引用的锚点须携带可重放命令
+    from astra.server.models import Fact
+    project.facts.append(Fact(id="f_anchor", description="verified result", evidence="curl -s http://t/x", confidence="high"))
     client = FakeClient(project)
     containers = FakeContainerManager()
     driver = FakeDriver()
@@ -98,7 +101,7 @@ def test_dual_star_review_challenge_rejects(monkeypatch) -> None:
     monkeypatch.setattr(reason, "_run_review_stage", _fake_stage)
     verdict = reason.dual_star_review(
         config, _client, containers, "container-proj_001", config.workers[0], project,
-        "yaml", "complete", {"from": ["f001"], "description": "done"},
+        "yaml", "complete", {"from": ["f_anchor"], "description": "done"},
         TaskCancellation(),
     )
     assert verdict is False
@@ -244,7 +247,7 @@ def test_dual_star_review_rejects_flag_claim_without_evidence(monkeypatch) -> No
     config, project, client, containers, driver = _review_config()
     # 星图有普通星记但无 flag
     from astra.server.models import Fact
-    project.facts.append(Fact(id="f_scan", description="端口 80 开放", confidence="high"))
+    project.facts.append(Fact(id="f_scan", description="端口 80 开放", evidence="nmap -p 80 t", confidence="high"))
 
     calls = {"n": 0}
     monkeypatch.setattr(reason, "get_driver", lambda _name: driver)
@@ -268,7 +271,7 @@ def test_dual_star_review_allows_flag_claim_with_evidence(monkeypatch) -> None:
     """星图已有 flag 星记时，flag 声明放行进入 LLM 审查。"""
     from astra.server.models import Fact
     config, project, client, containers, driver = _review_config()
-    project.facts.append(Fact(id="f_flag", description="获取到 flag：flag{abc123def456}", confidence="high"))
+    project.facts.append(Fact(id="f_flag", description="获取到 flag：flag{abc123def456}", evidence="cat /flag", confidence="high"))
 
     monkeypatch.setattr(reason, "get_driver", lambda _name: driver)
     monkeypatch.setattr(
@@ -344,17 +347,28 @@ def test_resolve_review_worker_falls_back_to_claudecode() -> None:
 
     resolved_worker, driver = reason._resolve_review_worker(config, _pi_worker())
 
-    assert resolved_worker.name == "claude-fallback"
-    assert driver.type_name == "claudecode"
+    # V7 异构语义：pi 不支持审查 → 选异构可评审者（mock 优先级更小被选，claude 亦可用）
+    assert resolved_worker.type != "pi"
+    assert resolved_worker.type in ("mock", "claudecode")
 
 
 def test_resolve_review_worker_without_fallback_uses_own_driver() -> None:
+    # V7 异构语义：fleet 内存在异构可评审者（mock）→ 选 mock 而非能力降级的 pi
     config = make_config()  # 只有 mock worker，无 claudecode 可回退
 
     resolved_worker, driver = reason._resolve_review_worker(config, _pi_worker())
 
-    assert resolved_worker.name == "pi-worker"
-    assert driver.type_name == "pi"
+    assert resolved_worker.type == "mock"
+    assert driver.type_name == "mock"
+
+
+def test_resolve_review_worker_uses_self_when_only_same_type() -> None:
+    config = make_config()
+    proposer = config.workers[0]  # mock 提案者，fleet 仅同 type
+
+    resolved_worker, _ = reason._resolve_review_worker(config, proposer)
+
+    assert resolved_worker is proposer  # 无异构可选 → 自审（能力降级兜底）
 
 
 def test_review_stage_command_is_built_by_driver(monkeypatch) -> None:

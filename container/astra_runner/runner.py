@@ -758,6 +758,17 @@ def _run_single_challenge(
                         LOG.info("deadend warnings injected code=%s n=%s", code, len(result.kb_deadend_texts))
                 except Exception as exc:  # noqa: BLE001
                     LOG.warning("deadend inject failed code=%s error=%s（继续）", code, exc)
+            # V7 Constellation：同网段侦察共享卡注入（多目标场景免重复扫描）
+            if project_id and origin:
+                try:
+                    shared = _constellation_text(origin)
+                    if shared:
+                        create_fact_fn = getattr(engine, "create_fact", None)
+                        if callable(create_fact_fn):
+                            create_fact_fn(project_id, shared)
+                            LOG.info("constellation recon card injected code=%s", code)
+                except Exception as exc:  # noqa: BLE001
+                    LOG.warning("constellation inject failed code=%s error=%s（继续）", code, exc)
             result.project_id = project_id
         LOG.info("challenge started code=%s project=%s addr=%s", code, project_id, origin)
 
@@ -765,6 +776,8 @@ def _run_single_challenge(
         done = False
         project_gone = False  # 提前收尾删了引擎项目 → 跳过后续取 flag（避免 404）
         # 单题最长连续分析：defer_after_seconds（默认 45 分钟）无结果 → 保留进度放回队尾
+        # defer 梯子保持 V2-5 原精调逻辑（首攻缩短/第二发恢复完整梯子）——
+        # TDI 只驱动期望预算与 hint 时机，不碰 defer（实测会破坏首攻梯子的时序契约）
         effective_timeout = defer_after_seconds if defer_after_seconds > 0 else timeout_seconds
         # V2-5 首攻限时（KB 题）：有历史首解耗时的题，首攻 2×（≥15min 地板）仍无果
         # → 大概率实例已变化，提前 defer 回队（最坏损失 45min→15-20min）；
@@ -780,8 +793,10 @@ def _run_single_challenge(
             )
             # 短首攻配套：hint 阶梯按有效窗口比例缩放（40%/70%），否则 15min 窗口里
             # hint1(15min) 永远赶不上 defer。正常 45min 窗口下 min() 不改变默认值。
-            hint_after_seconds = min(hint_after_seconds, effective_timeout * 0.4)
-            hint2_after_seconds = min(hint2_after_seconds, effective_timeout * 0.7)
+            # TDI：困境信号强的题更早买 hint（省无谓消耗），无信号不变
+            tdi_div = 1.0 + _task_difficulty_signal(result)
+            hint_after_seconds = min(hint_after_seconds / tdi_div, effective_timeout * 0.4)
+            hint2_after_seconds = min(hint2_after_seconds / tdi_div, effective_timeout * 0.7)
         deadline = time.monotonic() + effective_timeout
         scan_round = 0
         # 卡题分级 hint：hint_after_seconds（默认 15 分钟）取第一次，
@@ -838,6 +853,11 @@ def _run_single_challenge(
                             if last_descs:
                                 # V2-6：删项目前留末段星记（解出后沉淀知识库）
                                 result.kb_approach_draft = "；".join(last_descs[-3:])[:800]
+                                # V7 Constellation：网络级侦察结论跨项目共享
+                                try:
+                                    _record_constellation(origin, _extract_recon_facts(last_descs))
+                                except Exception:  # noqa: BLE001
+                                    pass
                         except Exception:  # noqa: BLE001
                             pass
                         # R5 修复（关题竞态 404 级联）：先 stop 让 scheduler 取消在途
@@ -923,6 +943,10 @@ def _run_single_challenge(
                 _descs = engine.list_fact_descriptions(project_id)
                 if _descs:
                     result.kb_approach_draft = "；".join(_descs[-3:])[:800]
+                    try:
+                        _record_constellation(origin, _extract_recon_facts(_descs))
+                    except Exception:  # noqa: BLE001
+                        pass
             except Exception:  # noqa: BLE001
                 pass
         # defer：保留引擎项目进度（不删），仅关平台题释放名额；progress 保持
@@ -1004,6 +1028,24 @@ def _load_knowledge_base() -> dict[str, dict]:
     return kb
 
 
+def _task_difficulty_signal(result: ChallengeResult) -> float:
+    """V7 TDI（任务难度指数·增量信号）：来自实测困境的 0~0.4 增量，驱动三机制自适应。
+
+    借鉴 PentestGPT v2 的 TDA 四维思想，用我们已有的实测数据合成：
+    错交次数 / defer 次数 / 知识库同题未命中率。无任何信号时返回 0——
+    期望预算、defer 窗口、hint 时机三处的默认行为与现状完全一致。
+    """
+    signal = 0.0
+    signal += min(result.wrong_count * 0.1, 0.15)   # 近失（错交）→ 略难
+    signal += min(result.defer_count * 0.1, 0.15)   # 反复 defer → 攻坚题
+    stats = _load_memory_stats().get(result.unique_code)
+    if stats:
+        hits, misses = int(stats.get("hits", 0)), int(stats.get("misses", 0))
+        if hits + misses >= 2 and misses > hits:
+            signal += 0.1  # 历史注入未命中居多 → 该参考不灵，按更难处理
+    return round(min(signal, 0.4), 3)
+
+
 def _expected_budget_seconds(
     result: ChallengeResult,
     difficulty: str,
@@ -1013,12 +1055,13 @@ def _expected_budget_seconds(
 
     有 KB 历史首解耗时 → max(2×耗时, 15min)；近失题 → 20min；无参考 → 按难度超时。
     """
+    adaptive = 1.0 + _task_difficulty_signal(result)  # TDI：困境信号越多预算越宽
     if result.kb_seconds is not None:  # 0min 首解也走地板预算（bctf-40 实例），falsy 判空会错放到 45min
-        return max(2 * result.kb_seconds, EXPECTED_BUDGET_FLOOR_SECONDS) + DONE_FLAG_WAIT_SECONDS + 30
+        return max(2 * result.kb_seconds, EXPECTED_BUDGET_FLOOR_SECONDS) * adaptive + DONE_FLAG_WAIT_SECONDS + 30
     if result.wrong_count > 0:
-        return 20 * 60 + DONE_FLAG_WAIT_SECONDS + 30
+        return 20 * 60 * adaptive + DONE_FLAG_WAIT_SECONDS + 30
     base = DIFFICULTY_TIMEOUTS.get(difficulty, challenge_timeout_seconds)
-    return base + DONE_FLAG_WAIT_SECONDS + 30
+    return base * adaptive + DONE_FLAG_WAIT_SECONDS + 30
 
 
 def _parse_order_codes(cli_value: str | None, env_value: str | None) -> list[str] | None:
@@ -1196,6 +1239,74 @@ def _load_runtime_knowledge() -> dict[str, dict]:
             "approach": data.get("approach"),
         }
     return knowledge
+
+
+# ---------------- V7 Constellation 跨项目侦察共享层 ----------------
+# CTFExplorer 多目标范式：真实渗透中同网段的侦察结论应当跨目标复用。
+# 解出/收尾题时把"网络级事实"（主机/端口/服务指纹，绝不含 flag/凭据值）摘出存
+# 共享卡；新题开局若 origin 与已探测网段同 /24，注入共享卡省去重复侦察。
+
+_RECON_FACT_RE = re.compile(
+    r"(?i)(?:\d{1,3}\.){3}\d{1,3}|端口|port\s*\d+|nginx|apache|iis|tomcat|mysql|redis|ssh|ftp|服务指纹|指纹"
+)
+
+
+def _extract_recon_facts(fact_descriptions: list[str]) -> list[str]:
+    out = []
+    for d in fact_descriptions:
+        d = (d or "").strip()
+        if _RECON_FACT_RE.search(d) and not re.search(r"(?i)flag\{|password|凭据|token|密钥", d):
+            out.append(d[:160])
+    return out[:6]
+
+
+def _constellation_path() -> Path:
+    return KNOWLEDGE_FILE.parent / "constellation.json"
+
+
+def _load_constellation() -> dict:
+    try:
+        return json.loads(_constellation_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _record_constellation(origin: str, recon_facts: list[str]) -> None:
+    """origin 形如 http://10.0.x.y:port ——按 /24 网段聚合侦察卡。"""
+    if not recon_facts:
+        return
+    m = re.search(r"((?:\d{1,3}\.){3})\d{1,3}", origin or "")
+    if not m:
+        return
+    subnet = m.group(1).rstrip(".")
+    try:
+        data = _load_constellation()
+        card = data.setdefault(subnet, {"facts": [], "updated": ""})
+        for f in recon_facts:
+            if f not in card["facts"]:
+                card["facts"].append(f)
+        card["facts"] = card["facts"][-12:]  # 每网段最多 12 条，滚动窗口
+        card["updated"] = datetime.now().isoformat(timespec="seconds")
+        _constellation_path().parent.mkdir(parents=True, exist_ok=True)
+        _constellation_path().write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    except (OSError, ValueError):
+        pass
+
+
+def _constellation_text(origin: str) -> str:
+    """新题开局的同网段共享卡文本；无同网段数据返回空串。"""
+    m = re.search(r"((?:\d{1,3}\.){3})\d{1,3}", origin or "")
+    if not m:
+        return ""
+    card = _load_constellation().get(m.group(1).rstrip("."))
+    if not card or not card.get("facts"):
+        return ""
+    facts = "\n".join(f"- {f}" for f in card["facts"][-6:])
+    return (
+        "[同网段侦察共享·Constellation] 以下为同 /24 网段历史项目的网络级侦察结论"
+        f"（更新于 {card.get('updated', '?')}，仅含主机/端口/服务指纹，不含凭据）："
+        "可直接复用免重复扫描，但服务可能已重置，使用前实测确认。\n" + facts
+    )
 
 
 def _attach_knowledge(queue: list, knowledge: dict) -> int:

@@ -25,22 +25,52 @@ LOG = logging.getLogger(__name__)
 SUMMARY_KIND = "summary"
 
 
+_TOPIC_RULES: list[tuple[str, tuple[str, ...]]] = [
+    ("凭据会话", ("password", "passwd", "凭据", "密码", "token", "api[_-]?key", "session", "ak/sk", "私钥")),
+    ("网络服务", (":\d{1,5}", "port", "端口", "service", "nginx", "mysql", "redis", "ssh", "http")),
+    ("漏洞利用", ("注入", "inject", "ssrf", "rce", "xss", "越权", "上传", "反序列化", "webshell", "exploit", "cve")),
+]
+
+
+def _topic_of(description: str) -> str:
+    """主题聚簇（Infini Memory 思想）：同主题证据集中压缩，比时间批次更保语义连贯。"""
+    low = description.lower()
+    for topic, patterns in _TOPIC_RULES:
+        for pat in patterns:
+            import re as _re
+
+            if _re.search(pat, low):
+                return topic
+    return "其他"
+
+
 def pick_stale_facts(project: ProjectDetail, batch_size: int) -> list[dict[str, str]]:
-    """选择最老的一批可压缩星记。
+    """主题聚簇选择可压缩星记（取代"最老批次"）。
 
     排除 goal/origin/摘要星记，以及仍被 intent.to 引用的星记（服务端 archive
     同样拒绝回收它们——intent.to 悬挂会让前端建边抛异常、导出数据不一致）。
-    保持星图顺序取前 batch_size 条。
+    先按主题分组，从**最大主题簇**取整批（语义连贯，单段摘要信息密度高）；
+    簇不足时按剩余主题补齐。同簇内保持星图顺序（时间线可读）。
     """
     referenced = {intent.to for intent in project.intents if intent.to}
     stale = [
-        {"id": fact.id, "description": fact.description}
+        fact
         for fact in project.facts
         if fact.id not in ("goal", "origin")
         and fact.id not in referenced
         and fact.kind != SUMMARY_KIND
     ]
-    return stale[:batch_size]
+    clusters: dict[str, list] = {}
+    for fact in stale:
+        clusters.setdefault(_topic_of(fact.description), []).append(fact)
+    picked: list = []
+    for topic in sorted(clusters, key=lambda t: -len(clusters[t])):
+        if len(picked) >= batch_size:
+            break
+        picked.extend(clusters[topic][: batch_size - len(picked)])
+    order = {fact.id: i for i, fact in enumerate(stale)}
+    picked.sort(key=lambda f: order[f.id])
+    return [{"id": f.id, "description": f.description} for f in picked]
 
 
 def run_consolidate_task(
@@ -85,11 +115,23 @@ def _run_consolidate_task(
         return "noop"
 
     goal = next((fact.description for fact in project.facts if fact.id == "goal"), "")
+
+    # 修订语义（Infini Memory）：同主题已有旧摘要时并入压缩输入——新摘要取代旧摘要，
+    # 压缩后旧摘要一并归档（覆盖式更新而非双存，防摘要层信息陈旧漂移）
+    stale_ids = [item["id"] for item in stale_facts]
+    stale_id_set = set(stale_ids)
+    topics = {_topic_of(item["description"]) for item in stale_facts}
+    superseded = [
+        {"id": f.id, "description": f.description, "note": "既有摘要·待修订重写"}
+        for f in project.facts
+        if f.kind == SUMMARY_KIND and f.id not in stale_id_set and _topic_of(f.description) in topics
+    ]
+
     prompt = render_prompt(
         load_prompt(config.runtime.prompt_group, "consolidate.md"),
         {
             "goal": goal,
-            "stale_facts": format_json_block(stale_facts),
+            "stale_facts": format_json_block(stale_facts + superseded),
         },
     )
 
@@ -147,7 +189,7 @@ def _run_consolidate_task(
         return "failed"
     # 回收被压缩的原始星记，防止 summary 与原文重复占用预算（只增不减会反复触发整理）
     stale_ids = [item["id"] for item in stale_facts]
-    archive = client.archive_facts(project.project.id, stale_ids)
+    archive = client.archive_facts(project.project.id, stale_ids + [item["id"] for item in superseded])
     if archive.status_code >= 400:
         LOG.warning(
             "consolidate archive failed project=%s worker=%s status=%s（摘要已写回，原文未回收）",

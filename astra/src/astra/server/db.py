@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS intents (
     description TEXT NOT NULL,
     creator TEXT NOT NULL,
     worker TEXT,
+    dispatch_count INTEGER NOT NULL DEFAULT 0,
     last_heartbeat_at TEXT,
     created_at TEXT NOT NULL,
     concluded_at TEXT,
@@ -116,6 +117,8 @@ def _ensure_intent_columns(conn: sqlite3.Connection) -> None:
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(intents)")}
     if "challenged" not in columns:
         conn.execute("ALTER TABLE intents ADD COLUMN challenged INTEGER NOT NULL DEFAULT 0")
+    if "dispatch_count" not in columns:
+        conn.execute("ALTER TABLE intents ADD COLUMN dispatch_count INTEGER NOT NULL DEFAULT 0")
 
 
 def _ensure_project_columns(conn: sqlite3.Connection) -> None:
