@@ -46,16 +46,58 @@ def goal_text_of(project: ProjectDetail) -> str:
     return project.project.title or ""
 
 
+# ---------------- 焦点检索的结构信号（区别于逐条独立打分） ----------------
+
+# 关键信息钉住（LOP 深度分级的读侧实现）：凭据/flag/RCE 级发现不参与预算竞争。
+# 深度不靠写入时标注（侵入 schema），而按内容+置信度在读侧判定——挑战中被否决的不算关键。
+_CRITICAL_RE = re.compile(
+    r"(?i)flag\{|凭据|密码|私钥|口令|password|passwd|secret|api[_-]?key|"
+    r"webshell|getshell|反弹|rce|ak/sk|access[_-]?key|session[_-]?id"
+)
+
+
+def _is_critical(fact: Any) -> bool:
+    description = getattr(fact, "description", "") or ""
+    return bool(_CRITICAL_RE.search(description)) and not getattr(fact, "challenged", False)
+
+
+def _open_chain_depths(project: ProjectDetail) -> dict[str, int]:
+    """图邻近检索：以未决航向为锚，返回各事实的图距（1=未决航向直接依赖，2=二跳）。
+
+    词面/语义打分召回的是"描述像不像"，图距召回的是"因果上正在推进的链条"——
+    描述完全改写过的关联发现（先发现服务、后才在它上面打出注入）靠词面永远召不回。
+    """
+    facts_ids = {fact.id for fact in project.facts}
+    open_anchors: set[str] = set()
+    for intent in project.intents:
+        if intent.to is None:
+            open_anchors.update(sid for sid in intent.from_ if sid in facts_ids)
+    if not open_anchors:
+        return {}
+    # 二跳：已归航航向的落点，其来源含一跳锚点（锚点结论催生的下游发现）
+    depth2: set[str] = set()
+    for intent in project.intents:
+        if intent.to is not None and intent.to in facts_ids:
+            if any(sid in open_anchors for sid in intent.from_):
+                depth2.add(intent.to)
+    depth2 -= open_anchors
+    return {**{fid: 1 for fid in open_anchors}, **{fid: 2 for fid in depth2}}
+
+
+_CHAIN_BONUS = {1: 1.2, 2: 0.4}
+
+
 def build_focus_fact_ids(project: ProjectDetail, budget: int) -> list[str]:
     """选出焦点星记 id 子集，输出保持星图原始顺序（时间线可读）。
 
-    评分 = 相关度（与未完成航向/目标的描述词重叠）× 2 + 时间近度（列表越靠后越新）
-    [+ 语义相关度 × 2，嵌入层可用时]。
-    数量不超过 budget 时原样返回；超过时截取高分集合。
+    评分 = 相关度×2 [+ 语义×2] + 时间近度 + 未决链图距加成。
+    关键事实（凭据/flag/RCE 级且未被质询否决）钉住：不参与预算竞争，永远内联。
     语义召回（embeddings.py 开启时）：token 重叠召不回的同义表述（如
-    “SQL 注入教训” vs "MySQL 注入"）由向量余弦补足；嵌入不可用则静默降级为纯 token 打分。
+    "SQL 注入教训" vs "MySQL 注入"）由向量余弦补足；嵌入不可用则静默降级为纯 token 打分。
     """
     allowed = [fact for fact in project.facts if fact.id != "goal"]
+    if budget <= 0:
+        return []
     if len(allowed) <= budget:
         return [fact.id for fact in allowed]
 
@@ -84,16 +126,27 @@ def build_focus_fact_ids(project: ProjectDetail, budget: int) -> list[str]:
             return 0.0
         return max(embeddings.cosine_similarity(vec, fv) for fv in focus_vectors)
 
+    chain_depths = _open_chain_depths(project)
     total = max(len(allowed) - 1, 1)
     scored: list[tuple[float, str]] = []
+    pinned: set[str] = set()
     for index, fact in enumerate(allowed):
         relevance = _relevance_score(fact.description, focus_texts)
         semantic = _semantic_score(fact.id, fact.description)
         recency = index / total  # 0..1，越新越高
-        scored.append((relevance * 2.0 + semantic * 2.0 + recency, fact.id))
+        chain = _CHAIN_BONUS.get(chain_depths.get(fact.id, 0), 0.0)
+        if _is_critical(fact):
+            pinned.add(fact.id)  # 钉住：预算外保底，防关键发现被裁剪丢失
+        scored.append((relevance * 2.0 + semantic * 2.0 + recency + chain, fact.id))
 
     scored.sort(key=lambda item: item[0], reverse=True)
-    chosen = {fact_id for _, fact_id in scored[:budget]}
+    if len(pinned) > budget:
+        # 钉住也受预算硬上限（零膨胀原则）：超额时保最近的（凭据类发现新者覆盖旧者）
+        order_index = {fact.id: i for i, fact in enumerate(allowed)}
+        pinned = set(sorted(pinned, key=lambda fid: order_index[fid])[-budget:])
+    remaining = max(budget - len(pinned), 0)
+    fill = [fact_id for _, fact_id in scored if fact_id not in pinned][:remaining]
+    chosen = pinned | set(fill)
     return [fact.id for fact in allowed if fact.id in chosen]
 
 
