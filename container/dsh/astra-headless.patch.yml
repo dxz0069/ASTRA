@@ -85,6 +85,20 @@
     timeZone: Asia/Shanghai
     refreshIntervalMs: 300000
 
+# DeepSeek Pro 激活开关（DSH_PERSONA 环境变量，默认关闭=标准 persona，行为不变）：
+#   minimal      —— 完整复刻官方极简模式 persona（激活 DeepSeek Pro 思考人格的最强形态）：
+#                   text='You are a helpful software engineer assistant.' + complete=true
+#                   + includeRuntimeContext=false。注意：complete=true 会压制一切附加
+#                   提示词注入（含 AGENTS.md 指导）；ASTRA 任务提示词走 user message 不受影响。
+#   minimal-soft —— 仅替换 persona 文本、保留 AGENTS.md/运行时上下文（先试这档；
+#                   激活与否用 tools/check_pro_activation.py 按 we/let 判据验证）。
+#   未设置       —— 标准 persona（'You are a coding agent powered by ...'），现状默认。
+- id: persona
+  config:
+    text: !!js "process.env.DSH_PERSONA === 'minimal' || process.env.DSH_PERSONA === 'minimal-soft' ? 'You are a helpful software engineer assistant.' : 'You are a coding agent powered by the {{model}} model. Your working directory is {{cwd}}.'"
+    complete: !!js "process.env.DSH_PERSONA === 'minimal'"
+    includeRuntimeContext: !!js "process.env.DSH_PERSONA !== 'minimal'"
+
 # web_search 只在 deepseek 模式可用（web-search-deepseek 依赖 DEEPSEEK_API_KEY）；
 # anthropic/zhipu 模式下禁用，避免模型误用 MISSING_CREDENTIAL（靶场内网题也用不到外网搜索）。
 - id: tool-web
