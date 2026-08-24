@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -16,6 +17,10 @@ from astra_runner.runner import (  # noqa: E402
     extract_flags,
     run_benchmark,
 )
+
+# 测试隔离：fake 跑分会写 memory-stats.json，指到临时目录避免污染真实仓库统计
+import astra_runner.runner as _runner_module  # noqa: E402
+_runner_module.MEMORY_STATS_FILE = Path(tempfile.mkdtemp()) / "memory-stats.json"
 
 
 @dataclass
