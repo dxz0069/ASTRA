@@ -274,6 +274,7 @@ workers:
         glm_model = os.environ.get("ZHIPU_MODEL", "glm-5.3")
         explore_effort = os.environ.get("ZHIPU_EXPLORE_EFFORT", "high")
         reason_effort = os.environ.get("ZHIPU_REASON_EFFORT", "xhigh")
+        pro_model = os.environ.get("DSH_PRO_MODEL", "")
         blocks = [
             self._render_dsh_worker_block(
                 "deepseek-main",
@@ -283,6 +284,26 @@ workers:
                 provider="deepseek",
                 model=ds_model,
             ),
+        ]
+        if pro_model:
+            # V7 Pro 深思档：DSH_PRO_MODEL 显式设置才启用——原极简 persona
+            # （'You are a helpful software engineer assistant.' + complete）激活
+            # DeepSeek Pro 思考人格（we 自称），负责 reason/consolidate 深度决策。
+            # minimal persona 压制该 worker 的 AGENTS.md 注入——reason prompt 自含
+            # 规则与图上下文，可接受；explore 类打法指导由 flash/glm 档承担。
+            blocks.append(
+                self._render_dsh_worker_block(
+                    "deepseek-pro",
+                    ["reason", "consolidate"],
+                    max_running=1,
+                    priority=0,
+                    provider="deepseek",
+                    model=pro_model,
+                    effort=os.environ.get("DSH_PRO_EFFORT", "high"),
+                    persona="minimal",
+                )
+            )
+        blocks += [
             self._render_dsh_worker_block(
                 "glm-main",
                 ["bootstrap", "explore"],
@@ -296,7 +317,7 @@ workers:
                 "glm-reason",
                 ["reason", "consolidate"],
                 max_running=2,
-                priority=1,
+                priority=1 if pro_model else 0,
                 provider="zhipu",
                 model=glm_model,
                 effort=reason_effort,
@@ -322,6 +343,7 @@ workers:
         provider: str,
         model: str,
         effort: str = "",
+        persona: str = "",
     ) -> str:
         """单个 dsh worker 的 YAML 块（混合舰队与单 worker 共用）。
 
@@ -354,6 +376,7 @@ workers:
         else:
             raise RuntimeError(f"不支持的 DSH_PROVIDER: {provider}（可选 deepseek / anthropic / zhipu）")
         reasoning_line = f'      DSH_REASONING_EFFORT: "{effort}"\n' if effort else ""
+        persona_line = f'      DSH_PERSONA: "{persona}"\n' if persona else ""
         types_line = ", ".join(task_types)
         return f"""  - name: "{worker_name}"
     type: "dsh"
@@ -367,7 +390,7 @@ workers:
 {base_url_line}      DSH_PERMISSION_MODE: "danger-full-access"
       DSH_HOME: "{dsh_home_yaml}"
       DSH_PATCH: "{dsh_patch}"
-{reasoning_line}"""
+{persona_line}{reasoning_line}"""
 
     @staticmethod
     def _resolve_dsh_patch() -> str:
