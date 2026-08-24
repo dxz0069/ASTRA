@@ -1004,8 +1004,19 @@ def _sanitize_kb_text(text: str) -> str:
     return text
 
 
+def _kb_disabled() -> bool:
+    """托管合规开关：ASTRA_KB_DISABLED=1 时屏蔽一切预置知识（历史题解/死路/星座卡）。
+
+    平台规则"Agent 不可内置针对题目的历史答题记忆或解题方法"——托管跑分时置 1，
+    记忆机制完整保留（赛中实时沉淀/热加载/战绩统计照常运行），只是不带预置答案入场。
+    """
+    return os.environ.get("ASTRA_KB_DISABLED", "") == "1"
+
+
 def _load_knowledge_base() -> dict[str, dict]:
     """解析已解题思路知识库：{code: {name, seconds, approach}}。文件缺失/损坏返回空。"""
+    if _kb_disabled():
+        return {}
     try:
         raw = KNOWLEDGE_FILE.read_text(encoding="utf-8")
     except OSError:
@@ -1265,6 +1276,8 @@ def _constellation_path() -> Path:
 
 
 def _load_constellation() -> dict:
+    if _kb_disabled():
+        return {}
     try:
         return json.loads(_constellation_path().read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -1373,6 +1386,8 @@ def _append_deadend_entry(result: ChallengeResult) -> None:
 
 def _load_deadends() -> dict[str, dict]:
     """解析死路库（仓库 dead-ends.md + 本轮 /tmp 沉淀实时合并）。格式与知识库一致。"""
+    if _kb_disabled():
+        return {}
     entries: dict[str, dict] = {}
     try:
         raw = DEADENDS_FILE.read_text(encoding="utf-8")

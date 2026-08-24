@@ -148,3 +148,20 @@ def test_record_memory_stats_hit_and_miss(tmp_path, monkeypatch):
     stats = json.loads((tmp_path / "stats.json").read_text(encoding="utf-8"))
     assert stats["old-web1"]["hits"] == 1 and stats["new-x"]["misses"] == 1
     assert "1 次命中" in R._memory_reinforcement_text("old-web1")
+
+
+def test_hosted_kb_disabled_gates_all_preloaded_memory(tmp_path, monkeypatch):
+    """托管合规：ASTRA_KB_DISABLED=1 屏蔽预置知识/死路/星座，赛内实时沉淀不受影响。"""
+    _isolate(tmp_path, monkeypatch)
+    monkeypatch.setenv("ASTRA_KB_DISABLED", "1")
+    assert R._load_knowledge_base() == {}
+    assert R._load_deadends() == {}
+    assert R._load_constellation() == {}
+    # 赛中实时沉淀仍工作（写入 /tmp 的 pending 照常被运行时知识合并读取）
+    import json as _json
+
+    (tmp_path / "astra-knowledge-append.json").write_text(
+        _json.dumps({"live-1": {"name": "赛中题", "approach": "赛中打出的思路"}}), encoding="utf-8"
+    )
+    kb = R._load_runtime_knowledge()
+    assert "live-1" in kb
