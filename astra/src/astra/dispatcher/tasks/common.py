@@ -59,27 +59,61 @@ def find_duplicate_fact(project: ProjectDetail, description: str, *, exclude_ids
 
 
 def review_graph_summary(project: ProjectDetail, *, max_facts: int = 15, max_intents: int = 8) -> str:
-    """双星审查的紧凑星图摘要（重构备忘候选 20：减少模型读大图文件的耗时）。
+    """双星审查的结构化战况卡 + 主题索引（PentestGPT v2 State Store 思想的读侧实现）。
 
-    内联到审查 prompt 的 {graph_yaml} 上下文（文件路径引用之后），模型可先看摘要
-    再按需读完整快照；大图时显著缩短 challenge/verdict 的读图时间。
+    取代按 id 顺序截断的条目清单：主机/端口/凭据/会话正则聚合常驻（渗透 agent
+    丢上下文最常见的具体损失是"忘了那个凭据在哪个 fact 里"），航向按主题一行一条；
+    结构化抽取为空时回退到逐条摘要（新旧图都可用）。
     """
-    lines = ["## 星图摘要（快速参考，完整快照见上方文件路径）"]
+    import re as _re
+
+    lines = ["## 战况卡（结构化，完整快照见上方文件路径）"]
     goal = next((f.description for f in project.facts if f.id == "goal"), "")
     if goal:
         lines.append(f"- Goal: {goal[:200]}")
-    facts = [f for f in project.facts if f.id not in ("origin", "goal")][:max_facts]
-    if facts:
+
+    facts = [f for f in project.facts if f.id not in ("origin", "goal")]
+    blob = "\n".join(f.description for f in facts)
+    hosts = sorted(set(_re.findall(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", blob)))[:12]
+    ports = sorted(
+        set(_re.findall(r"\b(?:\d{1,3}\.){3}\d{1,3}:(\d{1,5})\b", blob))
+        | set(_re.findall(r"端口[：: ]+(\d{1,5})", blob))
+    )[:16]
+    if hosts:
+        lines.append(f"- 主机（{len(hosts)}）: {', '.join(hosts)}")
+    if ports:
+        lines.append(f"- 端口（{len(ports)}）: {', '.join(ports)}")
+    cred_hits = []
+    for f in facts:
+        if _re.search(r"(?i)password|passwd|凭据|密码|私钥|token|api[_-]?key|session[_-]?id|ak/sk", f.description) and not f.challenged:
+            cred_hits.append(f"{f.id}: {' '.join(f.description.split())[:90]}")
+    if cred_hits:
+        lines.append("- 凭据/会话（钉住级，勿丢）:")
+        lines.extend(f"  - {c}" for c in cred_hits[:8])
+
+    intents = [i for i in (getattr(project, "intents", None) or []) if i.to is None]
+    if intents:
+        lines.append(f"- 未决航向主题索引（{len(intents)}，按此索引按需读全文）:")
+        for intent in intents[:max_intents]:
+            desc = " ".join(intent.description.split())[:110]
+            marks = []
+            if getattr(intent, "challenged", False):
+                marks.append("被质询")
+            heartbeat = getattr(intent, "last_heartbeat_at", None)
+            if heartbeat:
+                marks.append(f"心跳 {heartbeat[11:16] if len(heartbeat) > 16 else heartbeat}")
+            suffix = f"（{'，'.join(marks)}）" if marks else ""
+            lines.append(f"  - {intent.id}: {desc}{suffix}")
+    summaries = [f for f in facts if f.kind == "summary"]
+    if summaries:
+        lines.append(f"- 摘要星记: {len(summaries)} 条（{', '.join(f.id for f in summaries[:5])}）")
+
+    # 结构化抽取为空（早期图/纯文本题）→ 回退逐条摘要，保证总有可用上下文
+    if len(lines) <= 2:
         lines.append("- Facts:")
-        for fact in facts:
+        for fact in facts[:max_facts]:
             desc = " ".join(fact.description.split())[:120]
             lines.append(f"  - {fact.id}: {desc}")
-    intents = getattr(project, "intents", None) or []
-    if intents:
-        lines.append("- Open Intents:")
-        for intent in intents[:max_intents]:
-            desc = " ".join(intent.description.split())[:120]
-            lines.append(f"  - {intent.id}: {desc}")
     hints = getattr(project, "hints", None) or []
     if hints:
         previews = ", ".join(" ".join(h.content.split())[:40] for h in hints[:3])

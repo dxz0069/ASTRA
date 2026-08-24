@@ -27,6 +27,14 @@ If Goal has not been satisfied and no new intent should currently be proposed, r
 {"accepted": true, "data": {}}
 ```
 
+## 航向投入权衡（explore/exploit）
+
+每条未决航向附带投入数据：`dispatch_count`（已被派发探索的次数）与心跳时间。
+决策时显式权衡，避免对低产航向过度投入：
+- dispatch_count 高但星图事实增长停滞、心跳陈旧的航向 → 视为低产，优先提出替代方向；
+- 新航向与旧航向并存时，说明为什么值得再投入（而不是继续老方向）；
+- 整体保持"多分支并行、早换向"：宁可多提独立新方向，也不要死磕单链。
+
 ## Rules
 - First determine whether the facts already satisfy Goal. If they do, `data.complete.from` must come from `Valid facts`, and `data.complete.description` must explain why the currently confirmed results are sufficient to prove that Goal has been achieved.
 - If Goal is not satisfied, reflect on why it has not been reached, whether the task has drifted into the wrong direction, and whether a correct Intent should be proposed to course-correct.

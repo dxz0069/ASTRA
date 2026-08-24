@@ -158,6 +158,9 @@ def build_focus_open_intents(project: ProjectDetail, budget: int) -> list[dict[s
             "from": intent.from_,
             "description": intent.description,
             "worker": intent.worker,
+            # UCB 航向投入卡：派发次数（投入）供 reason 显式做 explore/exploit 权衡
+            "dispatch_count": getattr(intent, "dispatch_count", 0) or 0,
+            "heartbeat": intent.last_heartbeat_at,
         }
         for intent in project.intents
         if intent.to is None

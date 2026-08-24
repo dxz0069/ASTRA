@@ -81,9 +81,16 @@ def heartbeat(project_id: str, intent_id: str, body: HeartbeatRequest):
         get_claimable_open_intent_or_404(conn, project_id, intent_id, body.worker)
 
         now = utcnow()
+        prev = conn.execute(
+            "SELECT worker FROM intents WHERE id = ? AND project_id = ?",
+            (intent_id, project_id),
+        ).fetchone()
+        # UCB 航向投入卡：首次认领/换 worker 认领记一次派发（同 worker 心跳续租不计数）
+        claim_dispatch = 1 if prev is None or prev["worker"] is None or prev["worker"] != body.worker else 0
         conn.execute(
-            "UPDATE intents SET worker = ?, last_heartbeat_at = ? WHERE id = ? AND project_id = ?",
-            (body.worker, now, intent_id, project_id),
+            "UPDATE intents SET worker = ?, last_heartbeat_at = ?, dispatch_count = dispatch_count + ? "
+            "WHERE id = ? AND project_id = ?",
+            (body.worker, now, claim_dispatch, intent_id, project_id),
         )
 
         updated = conn.execute(

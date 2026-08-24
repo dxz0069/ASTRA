@@ -854,23 +854,34 @@ def test_v2_sanitize_kb_text() -> None:
     assert _sanitize_kb_text("vulnerability CVE-2024-1234 via upload") == "vulnerability CVE-2024-1234 via upload"
 
 
-def test_v2_expected_budget() -> None:
-    """V2-7 期望预算：KB 题 2×首解(15min 地板)、近失 20min、无参考按难度。"""
+def test_v2_expected_budget(tmp_path, monkeypatch) -> None:
+    """V2-7 期望预算：KB 题 2×首解(15min 地板)、近失 20min、无参考按难度。
+
+    V7 TDI：困境信号（错交/defer/参考失灵）按 (1+signal) 放宽预算；无信号时
+    与 V2-7 原值完全一致。stats 指到用例级空目录，隔离共享 tmp 的跨用例污染。
+    """
+    import astra_runner.runner as _R
+
+    monkeypatch.setattr(_R, "MEMORY_STATS_FILE", tmp_path / "stats.json")
     from astra_runner.runner import (
         DIFFICULTY_TIMEOUTS,
         DONE_FLAG_WAIT_SECONDS,
         _expected_budget_seconds,
+        _task_difficulty_signal,
     )
 
     r_kb = ChallengeResult(unique_code="c", description="d")
     r_kb.kb_seconds = 60
+    assert _task_difficulty_signal(r_kb) == 0.0
     assert _expected_budget_seconds(r_kb, "hard", 1800) == 900 + DONE_FLAG_WAIT_SECONDS + 30
     r_fast = ChallengeResult(unique_code="c", description="d")
     r_fast.kb_seconds = 600
     assert _expected_budget_seconds(r_fast, "hard", 1800) == 1200 + DONE_FLAG_WAIT_SECONDS + 30
     r_miss = ChallengeResult(unique_code="c", description="d")
     r_miss.wrong_count = 2
-    assert _expected_budget_seconds(r_miss, "hard", 1800) == 20 * 60 + DONE_FLAG_WAIT_SECONDS + 30
+    signal = _task_difficulty_signal(r_miss)
+    assert signal == 0.15  # 错交 2 次 → 封顶 0.15
+    assert _expected_budget_seconds(r_miss, "hard", 1800) == 20 * 60 * (1 + signal) + DONE_FLAG_WAIT_SECONDS + 30
     r_plain = ChallengeResult(unique_code="c", description="d")
     assert _expected_budget_seconds(r_plain, "easy", 1800) == DIFFICULTY_TIMEOUTS["easy"] + DONE_FLAG_WAIT_SECONDS + 30
 

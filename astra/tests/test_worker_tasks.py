@@ -512,11 +512,12 @@ def test_review_graph_summary_compact() -> None:
     summary = review_graph_summary(project)
 
     assert "Goal: finish" in summary
-    assert "f001: known fact" in summary
-    assert "f_scan: 端口 8080" in summary
-    assert "i001: investigate" in summary  # intent 摘要
+    # V7 战况卡：结构化抽取（主机/端口/凭据）+ 航向主题索引
+    assert "8080" in summary and "端口" in summary
+    assert "未决航向主题索引" in summary and "investigate" in summary
+    assert "凭据" in summary or "弱口令" in summary or "- Facts:" in summary
     assert "Hints: 2 条" in summary or "Hints: 1 条" in summary
-    # 长描述被截断（不超过 120 字）
+    # 长行仍受限（不超过 140 字）
     for line in summary.splitlines():
         if line.startswith("  - "):
             assert len(line) <= 140
