@@ -28,3 +28,22 @@ htmlcov/
 dist/
 demo-video/rec/
 astra/.venv_pydash512/
+# 仅本地文档（介绍/技术文档外不上云端）：演示材料、答辩材料、内部清单、调研与实测记录
+demo-video/
+docs/ui-rework/
+docs/10089*.md
+docs/DSH-*.md
+docs/R5*.md
+docs/答辩*.md
+docs/四层记忆系统升级方案与调研.md
+docs/前端预览.png
+docs/安全审计报告.md
+docs/技术方案.pdf
+docs/正式跑分检查清单.md
+docs/演示视频脚本.md
+docs/第三轮实测总结.md
+docs/脱敏案例.md
+docs/重构备忘.md
+docs/靶场运行手册.md
+仿生*.pdf
+docs/review-drafts/
