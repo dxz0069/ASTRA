@@ -34,6 +34,8 @@ def _isolate(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(R, "KNOWLEDGE_FILE", tmp_path / "kb.md")
     monkeypatch.setattr(R, "MEMORY_STATS_FILE", tmp_path / "stats.json")
     monkeypatch.setattr(R, "DEADENDS_FILE", tmp_path / "dead-ends.md")
+    monkeypatch.setattr(R, "KNOWLEDGE_APPEND_FILE", tmp_path / "astra-knowledge-append.json")
+    monkeypatch.setattr(R, "DEADENDS_APPEND_FILE", tmp_path / "astra-deadends-append.json")
     monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
 
 

@@ -317,7 +317,7 @@ workers:
                 "glm-reason",
                 ["reason", "consolidate"],
                 max_running=2,
-                priority=1 if pro_model else 0,
+                priority=1,
                 provider="zhipu",
                 model=glm_model,
                 effort=reason_effort,

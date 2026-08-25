@@ -18,9 +18,13 @@ from astra_runner.runner import (  # noqa: E402
     run_benchmark,
 )
 
-# 测试隔离：fake 跑分会写 memory-stats.json，指到临时目录避免污染真实仓库统计
+# 测试隔离：fake 跑分会写 memory-stats/沉淀 JSON，全部指到临时目录避免污染真实文件
 import astra_runner.runner as _runner_module  # noqa: E402
-_runner_module.MEMORY_STATS_FILE = Path(tempfile.mkdtemp()) / "memory-stats.json"
+_test_tmp = Path(tempfile.mkdtemp())
+_runner_module.MEMORY_STATS_FILE = _test_tmp / "memory-stats.json"
+_runner_module.KNOWLEDGE_APPEND_FILE = _test_tmp / "astra-knowledge-append.json"
+_runner_module.DEADENDS_APPEND_FILE = _test_tmp / "astra-deadends-append.json"
+os.environ["ASTRA_SELF_HEAL"] = "0"  # 测试禁用看门狗（os.execv 自重启会炸掉 pytest）
 
 
 @dataclass
@@ -625,7 +629,7 @@ def test_render_dispatch_config_mixed_fleet(monkeypatch) -> None:
     assert set(by_name["deepseek-main"].task_types) == {"bootstrap", "explore"}
     assert set(by_name["glm-main"].task_types) == {"bootstrap", "explore"}
     # 决策走 GLM 深度档，DS 兜底
-    assert by_name["glm-reason"].priority == 1
+    assert by_name["glm-reason"].priority == 1  # DSH_PRO_MODEL 未设时为 0，设了 pro 档让位 1
     assert by_name["glm-reason"].env["DSH_REASONING_EFFORT"] == "xhigh"
     assert set(by_name["glm-reason"].task_types) == {"reason", "consolidate"}
     assert by_name["deepseek-fallback"].priority == 3
