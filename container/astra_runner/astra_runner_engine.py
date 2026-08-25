@@ -567,8 +567,12 @@ class LocalAstraEngine:
             )
             response.raise_for_status()
             LOG.info("project reactivated (defer resume) project=%s", project_id)
+            return True
         except requests.RequestException as exc:
-            LOG.warning("reactivate_project failed project=%s error=%s", project_id, exc)
+            # 终态（completed）/不存在的项目不可复用——返回 False 让调用方新建项目，
+            # 否则题线程会永远轮询一个不会再有产出的星图（resume 死锁，实测 19:02 循环）
+            LOG.warning("reactivate_project failed project=%s error=%s（不可复用，应新建）", project_id, exc)
+            return False
 
     def list_active_projects(self) -> list[dict]:
         """对账扫描（R5 修复清单 1b）：引擎侧 active 项目 [{id, created_at}]。"""
