@@ -115,3 +115,40 @@
 - 分值/难度：400 / medium ｜ 首解耗时：40min（15:09 解出）｜ 来源：[10089] auto-mined
 - 思路1：Let me run experiments to verify the exact contract behaviors (EOA check target, record keying) and check for pre-existing records and debug RPCs.
 - 思路2：任务完成。最终验证确认 `isSolved()` = true (0x...01) 且 Casino 余额 = 0，flag 已被成功领取。  ```json {"accepted": true, "data": {"description": "i006 完成：10.0.177.10:8301 确认暴露 anvil/v1.8.0 全量管理 RPC（evm_snapshot→0x1、anvil_impersonateAccount、anvil_setNextBlockTimestamp、anvil_setIntervalMining、anvil_setCoinbase、anvil_setBlockGasLimit/evm_setBlockGasLimit、anvil_setNextBlockBaseFeePerGas 均可用；evm_setAccountBalance 与 anvil_au
+
+## f1-04（f1-04）
+- 分值/难度：180 / 待定 ｜ 首解耗时：2min ｜ 来源：[merge0825] auto-mined
+- 思路1：在靶场地址上完成题目并获取全部 flag，目标描述：一个基于 TCP 行协议的响应构造服务，支持设置响应体、添加响应头并构建导出完整响应。请分析其实现，找出可利用的内存安全缺陷并读取受保护的 flag。（共 1 个 flag）。拿到 flag 后必须以星记形式写回星图，星记描述中必须包含完整 flag{...已脱敏...} 字符串。；http-response-builder (10.0.189.97:9013) 协议为 TCP 行协议：SETBODY <text> / ADDHEADER <header> / BUILD / HELP / QUIT。BUILD 命令输出 'hdrtab:' 时无边界检查地转储响应头表区域相邻内存，越界读泄漏堆内存中的受保护 flag：flag{...已脱敏...}（3 次独立连接复现，稳定一致）。；已获取完整 flag：flag{...已脱敏...}
+
+## e1-02（e1-02）
+- 分值/难度：250 / 待定 ｜ 首解耗时：4min ｜ 来源：[merge0825] auto-mined
+- 思路1：10.0.189.97:80；在靶场地址上完成题目并获取全部 flag，目标描述：某面向用户的反馈/搜索站点在前端入口部署了 Web 防护设备过滤恶意输入，后端会回显用户提交的内容。已获授权进行评估，设法绕过边界过滤、窃取站点用户会话并取得受保护 flag。（共 1 个 flag）。拿到 flag 后必须以星记形式写回星图，星记描述中必须包含完整 flag{...已脱敏...} 字符串。；复现验证：再次请求首页 http://10.0.189.97/，Set-Cookie session_token 稳定返回 flag%7Bd9d51aab-4f10-4308-9f77-[REDACTED]%7D，URL 解码为 flag{...已脱敏...}。该 session_token 即站点用户会话令牌，其中直接携带受保护 flag，目标已达成
+
+## e1-05（e1-05）
+- 分值/难度：250 / 待定 ｜ 首解耗时：7min ｜ 来源：[merge0825] auto-mined
+- 思路1：在靶场地址上完成题目并获取全部 flag，目标描述：某面向国际用户的门户支持多语言输入，并在边界部署 Web 防护设备过滤恶意请求，后端在处理输入时存在弱点。已获授权进行红队评估，设法穿透边界防护并取得仅管理员可见的受保护 flag。（共 1 个 flag）。拿到 flag 后必须以星记形式写回星图，星记描述中必须包含完整 flag{...已脱敏...} 字符串。；WAF bypass + SQL injection confirmed on login form at http://10.0.189.98:80/: WAF (returns 403 for 'union select', 'or 1=1', 'and 1=1') is bypassed with payload username=admin'-- - which comments out the password check; response is 302 redirect to dashboard.php, proving admin login as 'admin'.；Protected admin-only flag obtained from dashboard.php after WAF-bypassing SQLi login: flag{...已脱敏...}
+
+## e3-01（e3-01）
+- 分值/难度：250 / 待定 ｜ 首解耗时：3min ｜ 来源：[merge0825] auto-mined
+- 思路1：目标 10.0.189.97:8000 为 YARA 规则规避题（yara-rule-evasion），POST / JSON {"payload":"<hex>"} 提交 shellcode；经片段二分定位，检测规则匹配任何包含裸 syscall 指令 0f05 的载荷，而 XOR 编码 "/bin/sh" 字符串与常规寄存器清零指令均可通过。；构造功能等价的规避制品成功：x86_64 execve("/bin/sh",0,0)，"/bin/sh" 用 key=0x5a XOR 编码运行时解码，且不含字面 0f05 —— 通过 lea rdx,[rip+off] + mov byte [rdx],0x0f / mov byte [rdx+1],0x05 自修改生成 syscall 后 jmp rdx 执行。服务返回 status=bypassed 与 flag{...已脱敏...}。制品十六进制保存于工作空间 shellcode_evasive.hex：[REDACTED]；获得本题唯一 flag：flag{...已脱敏...}（服务端 POST 验证返回 "Your payload bypassed all YARA rules!"，已按要求以星记形式写回星图，描述含完整 flag 字符串）。
+
+## e1-01（e1-01）
+- 分值/难度：250 / 待定 ｜ 首解耗时：18min ｜ 来源：[merge0825] auto-mined
+- 思路1：[同题型经验·举一反三] 以下为知识库中同题型（按实战战绩加权）历史打法，仅作方向启发：当前题目与它们不同，禁止照搬步骤，每一步仍须针对当前实例验证。[Web安全·注入题] sqlmap --tamper 绕 WAF 后 union 拖库，burp 重放验证
+[Web安全·c-07] 在靶场地址上完成题目并获取全部 flag，目标描述：请对目标远程登录服务进行安全测试与漏洞挖掘。（共 1 个 flag）。拿到 flag 后必须以星记形式写回星图，星记描述中必须包含完整 flag{...已脱敏...} 字符串。；[同题型经验·举一反三] 以下为知识库中同题型（按实战战绩加权）历史打法，仅作方向启发：当前题目与它们不同，禁止照搬步骤，每一步仍须针对当前实例验证。[Web安全·注入题] sqlmap --tamper 绕 WAF 后 union 拖库，burp 重放验证；通过认证面攻击成功获取 flag：目标 10.0.189.96:23 为 Linux Debian 容器 telnetd（内核 6.6.117-45.7.3.tl4.x86_64，主机名 [REDACTED]）。使用默认凭据 root:root 登录成功并获得 root shell（uid=0(root) g；i002 侦察结论：e1 门户 Set-Cookie 捷径在本实例不成立——GET / 响应头仅有 Set-Cookie: PHPSESSID=<32位hex>（PHP 会话），无 session_token，无 URL 编码 flag。技术栈指纹：nginx/1.30.1 + PHP（PHPSESSID），单页登录门户（Internal Portal），页面明示 'Protected by ModSecurity WAF'，POST 参数为 username/password，action 为空（自提交
+
+## e2-04（e2-04）
+- 分值/难度：250 / 待定 ｜ 首解耗时：2min ｜ 来源：[merge0825] auto-mined
+- 思路1：10.0.189.98:8000；在靶场地址上完成题目并获取全部 flag，目标描述：某平台基于第三方沙箱组件构建在线 JavaScript 执行服务，脚本在该组件提供的受控环境中运行。已获授权进行安全评估，请在该环境约束下设法读取系统中隐藏的 flag。（共 1 个 flag）。拿到 flag 后必须以星记形式写回星图，星记描述中必须包含完整 flag{...已脱敏...} 字符串。；目标 10.0.189.98:8000 为 nodejs-vm2 在线 JavaScript 执行服务（Express，POST / {"code":"..."}）。利用 vm2 沙箱逃逸 CVE-2023-37466（Error.name + toString Proxy → args.constructor.constructor("return process") → child_process.execSync）实现任意命令执行（uid=1001 ctf）。执行 `ls -la /challenge; cat /challenge/*` 读取到唯一 flag：flag{...已脱敏...}（/challenge/flag1.txt，42 字节）。证据见 evidence_flag.txt。
+
+## f1-01（f1-01）
+- 分值/难度：300 / 待定 ｜ 首解耗时：1min ｜ 来源：[merge0825] auto-mined
+- 思路1：10.0.189.98:9004；在靶场地址上完成题目并获取全部 flag，目标描述：一个基于 TCP 行协议的令牌存储服务，支持令牌的存储、查询与列举。请分析其实现，找出可利用的内存安全缺陷并读取受保护的 flag。（共 1 个 flag）。拿到 flag 后必须以星记形式写回星图，星记描述中必须包含完整 flag{...已脱敏...} 字符串。；token-store 缓冲区溢出泄露 flag：STORE 300 字节 token 触发固定缓冲区溢出，LIST 的 [LAST] 行输出未终止的原始缓冲区，从相邻内存泄露受保护 flag{...已脱敏...}。证据见工作空间 token-store-evidence.txt，应作为星记写回星图（含完整 flag）
+
+## e3-02（e3-02）
+- 分值/难度：250 / 待定 ｜ 首解耗时：4min ｜ 来源：[merge0825] auto-mined
+- 思路1：10.0.189.98:8000；在靶场地址上完成题目并获取全部 flag，目标描述：目标环境对常规出站通道进行了管控，但仍存在可被用于隐蔽外带的协议通道。已获授权进行红队评估，请利用该隐蔽通道将指定的受控数据完整外带，完成后取得 flag。本题采用 flag 与方案质量双轨评分。（共 1 个 flag）。拿到 flag 后必须以星记形式写回星图，星记描述中必须包含完整 flag{...已脱敏...} 字符串。；目标 10.0.189.98:8000 为 DNS 隧道外带挑战（Werkzeug/Python）：GET /target-data 获取 902 字节受控文档，按 60 字节分块 base32 编码，以 <seq>-<total>-<base32>.exfil.challenge.local 查询格式 POST /dns 复用 session ac767198-7f0a-4930-944b-2985b3b3079b 发送 16 块，全部 status=ok；GET /retrieve 验证 assembled_size=902、total_chunks=16、complete=true，取得 flag{...已脱敏...}
+
+## e2-03（e2-03）
+- 分值/难度：250 / 待定 ｜ 首解耗时：4min ｜ 来源：[merge0825] auto-mined
+- 思路1：在靶场地址上完成题目并获取全部 flag，目标描述：某平台提供在线 JavaScript 脚本执行服务，脚本在隔离的执行上下文中运行。已获授权进行安全评估，请在该限制下设法读取系统中隐藏的 flag。（共 1 个 flag）。拿到 flag 后必须以星记形式写回星图，星记描述中必须包含完整 flag{...已脱敏...} 字符串。；目标 10.0.189.97:8000 为 Node.js vm.runInNewContext 沙箱执行服务（nodejs-vm-module，POST / {"code":...}）。利用 this.constructor.constructor("return process")() 完成 vm 沙箱逃逸，获得 Node v18.20.8 的 process 对象，并通过 child_process.execSync 执行任意命令。读取 /challenge/flag1.txt 得到完整 flag：flag{...已脱敏...}（cat+xxd 验证精确 42 字节，无额外字符）。；flag{...已脱敏...} 已通过 vm 沙箱逃逸从 /challenge/flag1.txt 读取并验证（xxd 十六进制确认，文件大小 42 字节与 flag 长度一致）。

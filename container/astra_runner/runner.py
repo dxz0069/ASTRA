@@ -22,6 +22,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections import deque
@@ -78,6 +79,7 @@ class ChallengeResult:
     kb_entry_text: str | None = None  # V2-6：知识库思路条目（开局注入参考 fact）
     kb_approach_draft: str | None = None  # V2-6：末段星记浓缩（解出后沉淀知识库用）
     kb_neighbor_texts: list[str] = field(default_factory=list)  # V4：同题型邻居经验（举一反三注入）
+    transient_count: int = 0  # 自愈①：连续网络瞬断计数（超上限判死退出，防误匹配死循环）
     kb_deadend_texts: list[str] = field(default_factory=list)  # V5：同题型避坑提示（失败经验库注入）
 
 
@@ -93,11 +95,13 @@ class TransientNetError(Exception):
     """网络瞬断（平台/LLM 不可达）——题不死，_work 等待后原地重进。"""
 
 
-# 自愈①：网络瞬断特征（平台 request to / DNS getaddrinfo / 连接重置 / 超时等）
+# 自愈①：网络瞬断特征——只认明确的传输层故障词（request to/getaddrinfo/连接类）。
+# 刻意不含裸 "timed out/timeout"：引擎本地超时与测试超时会误匹配成断网死循环
+# （实测挂死整套回归）；真断网时平台报错必含 "request to <url>" 或 unreachable。
 _NET_SIGNATURES = (
     "request to", "unreachable", "getaddrinfo", "connect error", "connectionerror",
-    "timed out", "timeout", "max retries", "temporary failure", "connection reset",
-    "connection refused", "ssl", "eof occurred", "remoteendclosed", "broken pipe",
+    "max retries", "temporary failure", "connection reset",
+    "connection refused", "eof occurred", "remoteendclosed", "broken pipe",
 )
 
 
@@ -392,11 +396,18 @@ def run_benchmark(
                 )
             except TransientNetError as exc:
                 # 自愈①：网络瞬断——题不死，退避等待后原地重进（断网 50 分钟类
-                # 事故只损失等待时间，不再丢题丢线程）
+                # 事故只损失等待时间，不再丢题丢线程）。连续上限 15 次（含误匹配
+                # 兜底：普通超时类异常不会无限循环，累计约 30 分钟后判死退出）
+                result.transient_count += 1
+                if result.transient_count > 15:
+                    LOG.error("network transient 超上限 code=%s（误匹配或长故障）——按普通失败处理",
+                              result.unique_code)
+                    result.error = str(exc)
+                    return
                 wait = min(120.0, 30.0 * max(1, result.defer_count))
                 LOG.warning(
-                    "network transient code=%s error=%.80s（%.0fs 后重进，星图进度保留）",
-                    result.unique_code, str(exc), wait,
+                    "network transient code=%s %s/15 error=%.80s（%.0fs 后重进）",
+                    result.unique_code, result.transient_count, str(exc), wait,
                 )
                 time.sleep(wait)
                 continue
@@ -405,10 +416,19 @@ def run_benchmark(
                 stop_event.set()
                 return
             except SlotBusyError:
+                # 自愈④：busy 指数退避——首次插队首快速重试，反复撞满则指数等待+
+                # 回队尾，杜绝"十几个线程每 30 秒集体空转刷 409"的自旋风暴
                 busy_seen.set()
-                LOG.warning("active slot busy code=%s 放回队列，等待名额释放", result.unique_code)
-                time.sleep(30)
-                queue.appendleft((ch, result))
+                result.busy_count = getattr(result, "busy_count", 0) + 1
+                wait = min(30 * (2 ** min(result.busy_count - 1, 3)), 240)
+                LOG.warning("active slot busy code=%s 第 %s 次（%.0fs 后%s）",
+                            result.unique_code, result.busy_count, wait,
+                            "插队首" if result.busy_count == 1 else "回队尾")
+                time.sleep(wait)
+                if result.busy_count == 1:
+                    queue.appendleft((ch, result))
+                else:
+                    queue.append((ch, result))
                 return
             if status == "deferred":
                 # 60 分钟无果：保留引擎项目进度，放回队列末尾（不标 done），
@@ -457,6 +477,9 @@ def run_benchmark(
                 else:
                     queue.append((ch, result))
                 return
+            # 正常完成（解出/超时关闭）：线程收尾退出——while True 仅为 TransientNetError
+            # 原地重进服务，正常路径必须显式 return（曾缺失导致正常题无限重进，回归挂死）
+            return
 
     # V2-7：预算放不下的题停泊区（时间只减不增，停泊即终局；饥饿回灌走 results 池）
     parked: list = []
@@ -1041,6 +1064,10 @@ def _build_goal(description: str, ch: Any) -> str:
 
 # ---------------- V2-5/V2-6/V2-7：知识库 + 期望预算 ----------------
 
+# 赛中沉淀文件（模块常量：测试 monkeypatch 指向临时目录，避免污染真实 /tmp 沉淀）
+KNOWLEDGE_APPEND_FILE = Path(tempfile.gettempdir()) / "astra-knowledge-append.json"
+DEADENDS_APPEND_FILE = Path(tempfile.gettempdir()) / "astra-deadends-append.json"
+
 KNOWLEDGE_FILE = (
     Path(os.environ.get("ASTRA_KNOWLEDGE_FILE"))
     if os.environ.get("ASTRA_KNOWLEDGE_FILE")
@@ -1155,7 +1182,7 @@ def _append_knowledge_entry(result: ChallengeResult, fact_descriptions: list[str
         # 托管镜像 /opt/knowledge 为 root 只读——沉淀文件写到临时目录（赛后人工取回合并）
         import tempfile as _tempfile
 
-        out = Path(_tempfile.gettempdir()) / "astra-knowledge-append.json"
+        out = KNOWLEDGE_APPEND_FILE
         entry = {
             result.unique_code: {
                 "name": result.unique_code,
@@ -1297,7 +1324,7 @@ def _load_runtime_knowledge() -> dict[str, dict]:
     try:
         import tempfile as _tempfile
 
-        pending_path = Path(_tempfile.gettempdir()) / "astra-knowledge-append.json"
+        pending_path = KNOWLEDGE_APPEND_FILE
         pending = json.loads(pending_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return knowledge
@@ -1423,7 +1450,7 @@ def _append_deadend_entry(result: ChallengeResult) -> None:
     try:
         import tempfile as _tempfile
 
-        out = Path(_tempfile.gettempdir()) / "astra-deadends-append.json"
+        out = DEADENDS_APPEND_FILE
         reason = "defer-giveup" if result.defer_count > 0 else ("wrong-submits" if result.wrong_count > 0 else "unsolved")
         entry = {
             result.unique_code: {
@@ -1470,7 +1497,7 @@ def _load_deadends() -> dict[str, dict]:
         import tempfile as _tempfile
 
         pending = json.loads(
-            (Path(_tempfile.gettempdir()) / "astra-deadends-append.json").read_text(encoding="utf-8")
+            DEADENDS_APPEND_FILE.read_text(encoding="utf-8")
         )
     except (OSError, json.JSONDecodeError):
         pending = {}
@@ -1508,6 +1535,9 @@ def _pick_deadend_warnings(
 
 _close_reap_ts = [0.0]
 _WATCHDOG_STALL_SECONDS = 720  # 12 分钟无 worker 写入判停摆
+# 看门狗基线：进程启动后必须先见过至少一次新鲜会话才有资格判停摆——
+# 否则新进程（测试/重启）会拿历史陈旧会话误判，触发 os.execv 把自己炸了（实测）
+_watchdog_seen_fresh = [False]
 
 
 def _reap_failed_closes(client: BenchmarkClient, progress: Any) -> None:
@@ -1547,7 +1577,11 @@ def _watchdog_stalled() -> bool:
             newest = max(newest, os.path.getmtime(f))
         if newest <= 0:
             return False  # 找不到会话（异常布局）不误杀
-        return (time.time() - newest) > _WATCHDOG_STALL_SECONDS
+        fresh = (time.time() - newest) <= _WATCHDOG_STALL_SECONDS
+        if fresh:
+            _watchdog_seen_fresh[0] = True
+            return False
+        return _watchdog_seen_fresh[0]  # 从未见过新鲜会话：不判停摆（防历史残留误杀）
     except OSError:
         return False
 
