@@ -8,9 +8,9 @@ ARG KALI_MIRROR="http://http.kali.org/kali"
 RUN rm -f /etc/apt/sources.list.d/* && \
     echo "deb ${KALI_MIRROR} kali-rolling main non-free contrib" > /etc/apt/sources.list && \
     apt update && \
-    (apt -y install python3 python3-pip python3-dev build-essential git curl wget jq tmux openssh-client sshpass socat ncat netcat-openbsd zip unzip zstd xz-utils file binutils gdb nmap sqlmap ffuf hashcat hydra john binwalk exiftool openjdk-21-jre-headless ruby ripgrep fd-find bsdextrautils iputils-ping rlwrap || (sleep 5 && apt -y install python3 python3-pip python3-dev build-essential git curl wget jq tmux openssh-client sshpass socat ncat netcat-openbsd zip unzip zstd xz-utils file binutils gdb nmap sqlmap ffuf hashcat hydra john binwalk exiftool openjdk-21-jre-headless ruby ripgrep fd-find bsdextrautils iputils-ping rlwrap)) && \
+    (apt -y install python3 python3-pip git curl wget jq tmux openssh-client sshpass socat ncat netcat-openbsd zip unzip zstd xz-utils file binutils gdb nmap sqlmap ffuf hashcat hydra john binwalk exiftool ruby ripgrep fd-find bsdextrautils iputils-ping rlwrap || (sleep 5 && apt -y install python3 python3-pip git curl wget jq tmux openssh-client sshpass socat ncat netcat-openbsd zip unzip zstd xz-utils file binutils gdb nmap sqlmap ffuf hashcat hydra john binwalk exiftool ruby ripgrep fd-find bsdextrautils iputils-ping rlwrap)) && \
     apt clean && \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/* /usr/share/man /usr/share/doc /usr/share/locale/??
 
 RUN useradd -m -s /bin/bash kali && \
     echo "kali ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
@@ -36,7 +36,8 @@ RUN (sudo apt update || (sleep 5 && sudo apt update)) && \
 RUN for i in 1 2 3; do \
       sudo npm install -g --registry=https://registry.npmmirror.com @playwright/cli@latest && break || sleep 8; \
     done && \
-    (cd /tmp && for i in 1 2 3; do playwright-cli install && break || sleep 8; done)
+    (cd /tmp && for i in 1 2 3; do playwright-cli install && break || sleep 8; done) && \
+    sudo rm -rf /root/.npm /home/kali/.npm /home/kali/.cache /tmp/* 2>/dev/null; true
 
 # 第三方二进制固定版本 + sha256 校验（供应链防护）。
 # 代理不稳定（GnuTLS 长流断），wget 加 3 次退避重试；参考性内容（nuclei-templates）尽力而为。
@@ -52,7 +53,7 @@ RUN fetch() { for i in 1 2 3 4 5 6; do wget -q --timeout=40 "$1" -O "$2" && retu
     echo "56ea86c91f04dd64c675897cc7c9317630d6b65e610b16a079ef25c964ec8ab0  dalfox.tar.gz" | sha256sum -c - && \
     echo "73b0cc7be28a4cdfbfabe7ef1e217e3c871624fc355f01689c12b63893506c3d  cloudfox.zip" | sha256sum -c - && \
     echo "710a9d2653c8bd3689e451778dab9daec0de4c4c75f900788ccf23ef254b122a  kerbrute" | sha256sum -c - && \
-    (git -c http.version=HTTP/1.1 clone --depth=1 https://github.com/projectdiscovery/nuclei-templates.git /home/kali/.local/nuclei-templates 2>/dev/null || echo "WARN: skip nuclei-templates (network)") && \
+    (git -c http.version=HTTP/1.1 clone --depth=1 https://github.com/projectdiscovery/nuclei-templates.git /home/kali/.local/nuclei-templates 2>/dev/null && rm -rf /home/kali/.local/nuclei-templates/.git || echo "WARN: skip nuclei-templates (network)") && \
     unzip -q katana.zip katana && sudo mv katana /usr/local/bin/ && \
     unzip -q nuclei.zip nuclei && sudo mv nuclei /usr/local/bin/ && \
     tar -xzf dalfox.tar.gz && sudo mv dalfox-linux-amd64 /usr/local/bin/dalfox && \
@@ -65,9 +66,9 @@ RUN fetch() { for i in 1 2 3 4 5 6; do wget -q --timeout=40 "$1" -O "$2" && retu
 RUN gclone() { for i in 1 2 3; do rm -rf "$2"; git -c http.version=HTTP/1.1 clone --depth=1 "https://github.com/$1.git" "$2" 2>/dev/null && return 0 || sleep $((i*3)); done; echo "WARN: skip knowledge $1 (network)"; return 0; } && \
     mkdir -p /home/kali/knowledges && \
     gclone swisskyrepo/PayloadsAllTheThings /home/kali/knowledges/PayloadsAllTheThings && \
-    gclone swisskyrepo/InternalAllTheThings /home/kali/knowledges/InternalAllTheThings && \
     gclone HackTricks-wiki/hacktricks /home/kali/knowledges/hacktricks && \
-    gclone HackTricks-wiki/hacktricks-cloud /home/kali/knowledges/hacktricks-cloud
+    gclone HackTricks-wiki/hacktricks-cloud /home/kali/knowledges/hacktricks-cloud && \
+    rm -rf /home/kali/knowledges/*/.git
 
 # 工具（ysoserial 必须可用；jwt_tool / jdwp 尽力而为）
 RUN fetch() { for i in 1 2 3; do wget -q --timeout=30 "$1" -O "$2" && return 0 || sleep $((i*5)); done; return 1; } && \
@@ -112,14 +113,15 @@ COPY ./container/dsh /opt/astra/dsh
 # 镜像默认入口：astra-runner（本地模式可手动执行 python3 /opt/astra-runner/runner.py）
 ENTRYPOINT ["python3", "/opt/astra-runner/runner.py"]
 
-RUN sudo npm install -g --registry=https://registry.npmmirror.com @openai/codex@0.118.0
-RUN sudo npm install -g --registry=https://registry.npmmirror.com @anthropic-ai/claude-code@2.1.98
-RUN sudo npm install -g --registry=https://registry.npmmirror.com @mariozechner/pi-coding-agent@0.73.0
+# 体积裁剪（3GB 上限）：托管舰队为 dsh 单系（deepseek/zhipu 双通道都走 dsh），
+# codex/claude-code/pi 三个 CLI 全无对应 worker 配置——裁掉省 ~430MB；
+# claudecode 兜底评审路径保留在代码里，需要时配 worker 即可（本地另装）。
 # DeepSeek Harness 无头模式 + ASTRA runner 插件（复制进 dsh 包 lib/，供 --patch 以裸说明符加载）
 RUN sudo npm install -g --registry=https://registry.npmmirror.com @deepseek-ai/dsh@0.1.0-rc.6 && \
     sudo cp /opt/astra/dsh/astra-headless-runner.js "$(sudo npm root -g)/@deepseek-ai/dsh/lib/astra-headless-runner.js"
 # Playwright MCP（headless 通过 mcp-client 接入，Web 类题目用真实浏览器；npx -y 现场下载的替代）
-RUN sudo npm install -g --registry=https://registry.npmmirror.com @playwright/mcp@latest
+RUN sudo npm install -g --registry=https://registry.npmmirror.com @playwright/mcp@latest && \
+    sudo rm -rf /root/.npm /home/kali/.npm /home/kali/.cache 2>/dev/null; true
 
 RUN sudo chmod +x /usr/local/bin/kerbrute
 RUN mkdir -p /home/kali/.config/nuclei && \

@@ -15,3 +15,7 @@ astra/node_modules
 **/__pycache__
 *.tar.gz
 .env
+# 运行时真实配置（含密钥）绝不进构建上下文
+dispatch.yaml
+dispatch.astra.yaml
+dispatch*secret*
