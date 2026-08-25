@@ -89,6 +89,23 @@ class SlotBusyError(Exception):
     """平台活跃名额已满（start 409），稍后重试。"""
 
 
+class TransientNetError(Exception):
+    """网络瞬断（平台/LLM 不可达）——题不死，_work 等待后原地重进。"""
+
+
+# 自愈①：网络瞬断特征（平台 request to / DNS getaddrinfo / 连接重置 / 超时等）
+_NET_SIGNATURES = (
+    "request to", "unreachable", "getaddrinfo", "connect error", "connectionerror",
+    "timed out", "timeout", "max retries", "temporary failure", "connection reset",
+    "connection refused", "ssl", "eof occurred", "remoteendclosed", "broken pipe",
+)
+
+
+def _is_transient_network_error(exc: Exception) -> bool:
+    text = f"{type(exc).__name__} {exc}".lower()
+    return any(sig in text for sig in _NET_SIGNATURES)
+
+
 class BenchmarkClient(Protocol):
     """tsec_benchmark SDK 的最小接口投影（便于注入 fake 测试）。"""
 
@@ -158,10 +175,19 @@ def extract_flags(text: str) -> list[str]:
     return flags
 
 
-def collect_flags_from_facts(descriptions: list[str]) -> list[str]:
+def collect_flags_from_facts(descriptions: list[str], exclude_texts: list[str] | None = None) -> list[str]:
+    """从星记描述收集 flag；exclude_texts（题面/goal 原文）中出现的 flag 串一律剔除。
+
+    a-05 实例：题面示例 flag 格式串被 bootstrap 抄进星记 → 被当发现提交 → 错交两次，
+    且 flags_found 非空触发"部分解出正常收尾"把整题白白关掉。题面里出现过的 flag
+    不可能是答案（答案只存在于靶机实测输出）。
+    """
+    banned: set[str] = set()
+    for text in exclude_texts or []:
+        banned.update(extract_flags(text))
     flags: list[str] = []
     for description in descriptions:
-        flags.extend(extract_flags(description))
+        flags.extend(f for f in extract_flags(description) if f not in banned)
     seen: set[str] = set()
     unique: list[str] = []
     for flag in flags:
@@ -364,53 +390,16 @@ def run_benchmark(
                     hint2_after_seconds=hint2_after_seconds, defer_after_seconds=defer_after_seconds,
                     hint_min_score=hint_min_score,
                 )
-                if status == "deferred":
-                    # 60 分钟无果：保留引擎项目进度，放回队列末尾（不标 done），
-                    # 队列轮转后再续跑——避免死磕单题拖垮整轮吞吐
-                    result.defer_count += 1
-                    if result.defer_count >= MAX_DEFER_PER_CHALLENGE:
-                        # 达到 defer 上限：彻底放弃——删引擎项目并标 done（防重启重跑）
-                        LOG.info(
-                            "challenge give up code=%s defer=%s（达到上限，删除项目放弃）",
-                            result.unique_code, result.defer_count,
-                        )
-                        # V5 失败经验库：删项目前抢救末段星记——死路与打法同样是资产
-                        if result.project_id and not result.kb_approach_draft:
-                            try:
-                                list_fn = getattr(engine_factory(), "list_fact_descriptions", None)
-                                if callable(list_fn):
-                                    _dd = list_fn(result.project_id)
-                                    if _dd:
-                                        result.kb_approach_draft = "；".join(_dd[-3:])[:800]
-                            except Exception:  # noqa: BLE001
-                                pass
-                        try:
-                            delete_fn = getattr(engine_factory(), "delete_project", None)
-                            if callable(delete_fn):
-                                delete_fn(result.project_id)
-                        except Exception:  # noqa: BLE001
-                            pass
-                        if progress is not None:
-                            progress.mark(result.unique_code, "done")
-                        return
-                    LOG.info("challenge deferred code=%s（%s 分钟无结果，保留进度放回队尾）", result.unique_code, defer_after_seconds / 60)
-                    # 僵尸项目修复（R5 实测）：defer 即停项目——平台容器已关，继续调度
-                    # 只会攻击死靶机并占用 max_running_projects 预算饿死新题；
-                    # 服务端 stop 清 worker 租约+reason，scheduler 停止派发并取消在途任务，
-                    # 星图数据保留，回队复用时 reactivate 恢复。
-                    try:
-                        stop_fn = getattr(engine_factory(), "stop_project", None)
-                        if callable(stop_fn) and result.project_id:
-                            stop_fn(result.project_id)
-                    except Exception:  # noqa: BLE001
-                        pass
-                    # V2-2：近失题（错交过 flag=差一步）回队插队首，普通题仍走队尾
-                    if result.wrong_count > 0:
-                        LOG.info("near-miss requeue to head code=%s wrong=%s", result.unique_code, result.wrong_count)
-                        queue.appendleft((ch, result))
-                    else:
-                        queue.append((ch, result))
-                return
+            except TransientNetError as exc:
+                # 自愈①：网络瞬断——题不死，退避等待后原地重进（断网 50 分钟类
+                # 事故只损失等待时间，不再丢题丢线程）
+                wait = min(120.0, 30.0 * max(1, result.defer_count))
+                LOG.warning(
+                    "network transient code=%s error=%.80s（%.0fs 后重进，星图进度保留）",
+                    result.unique_code, str(exc), wait,
+                )
+                time.sleep(wait)
+                continue
             except TaskFinishedError as exc:
                 stop_errors.append(exc)
                 stop_event.set()
@@ -420,6 +409,53 @@ def run_benchmark(
                 LOG.warning("active slot busy code=%s 放回队列，等待名额释放", result.unique_code)
                 time.sleep(30)
                 queue.appendleft((ch, result))
+                return
+            if status == "deferred":
+                # 60 分钟无果：保留引擎项目进度，放回队列末尾（不标 done），
+                # 队列轮转后再续跑——避免死磕单题拖垮整轮吞吐
+                result.defer_count += 1
+                if result.defer_count >= MAX_DEFER_PER_CHALLENGE:
+                    # 达到 defer 上限：彻底放弃——删引擎项目并标 done（防重启重跑）
+                    LOG.info(
+                        "challenge give up code=%s defer=%s（达到上限，删除项目放弃）",
+                        result.unique_code, result.defer_count,
+                    )
+                    # V5 失败经验库：删项目前抢救末段星记——死路与打法同样是资产
+                    if result.project_id and not result.kb_approach_draft:
+                        try:
+                            list_fn = getattr(engine_factory(), "list_fact_descriptions", None)
+                            if callable(list_fn):
+                                _dd = list_fn(result.project_id)
+                                if _dd:
+                                    result.kb_approach_draft = "；".join(_dd[-3:])[:800]
+                        except Exception:  # noqa: BLE001
+                            pass
+                    try:
+                        delete_fn = getattr(engine_factory(), "delete_project", None)
+                        if callable(delete_fn):
+                            delete_fn(result.project_id)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    if progress is not None:
+                        progress.mark(result.unique_code, "done")
+                    return
+                LOG.info("challenge deferred code=%s（%s 分钟无结果，保留进度放回队尾）", result.unique_code, defer_after_seconds / 60)
+                # 僵尸项目修复（R5 实测）：defer 即停项目——平台容器已关，继续调度
+                # 只会攻击死靶机并占用 max_running_projects 预算饿死新题；
+                # 服务端 stop 清 worker 租约+reason，scheduler 停止派发并取消在途任务，
+                # 星图数据保留，回队复用时 reactivate 恢复。
+                try:
+                    stop_fn = getattr(engine_factory(), "stop_project", None)
+                    if callable(stop_fn) and result.project_id:
+                        stop_fn(result.project_id)
+                except Exception:  # noqa: BLE001
+                    pass
+                # V2-2：近失题（错交过 flag=差一步）回队插队首，普通题仍走队尾
+                if result.wrong_count > 0:
+                    LOG.info("near-miss requeue to head code=%s wrong=%s", result.unique_code, result.wrong_count)
+                    queue.appendleft((ch, result))
+                else:
+                    queue.append((ch, result))
                 return
 
     # V2-7：预算放不下的题停泊区（时间只减不增，停泊即终局；饥饿回灌走 results 池）
@@ -607,6 +643,16 @@ def run_benchmark(
                 LOG.warning("live memory reload failed error=%s（继续）", exc)
         _fill()
         _reconcile_orphans()
+        # 自愈②：close_failed 清道夫——每 10 分钟补试泄漏容器的关闭，成功转 done
+        #（断网期 close 失败的题不再永久占坑）
+        if progress is not None and time.monotonic() - _close_reap_ts[0] > 600:
+            _close_reap_ts[0] = time.monotonic()
+            _reap_failed_closes(client, progress)
+        # 自愈③：停摆看门狗——有活跃题但 worker 会话 12 分钟无写入 → 进程级自重启
+        #（progress 断点续跑，engine 换血自愈；托管无人值守的生命线）
+        if active and os.environ.get("ASTRA_SELF_HEAL", "1") != "0":
+            if _watchdog_stalled() or _progress_pulse_stalled(engine_factory, active, results):
+                _self_heal_restart()
         if active:
             time.sleep(2)
             continue
@@ -688,7 +734,10 @@ def _run_single_challenge(
         container_addr = getattr(started, "container_addr", None) or []
         origin = ", ".join(str(addr) for addr in container_addr) or code
         goal = _build_goal(description, ch)
-        # defer 续跑：复用原引擎项目（星图/会话进度保留），否则新建
+        # defer 续跑：复用原引擎项目（星图/会话进度保留），否则新建。
+        # reactivate 失败（终态/不存在）→ 放弃复用新建项目——丢星图远好于
+        # 对着 completed 星图无限空转（resume 死锁，实测一次咬死三题一小时）
+        reuse_ok = False
         if result.project_id:
             project_id = result.project_id
             LOG.info("challenge resumed code=%s reuse project=%s（defer 续跑）", code, project_id)
@@ -696,9 +745,16 @@ def _run_single_challenge(
             try:
                 reactivate_fn = getattr(engine, "reactivate_project", None)
                 if callable(reactivate_fn):
-                    reactivate_fn(project_id)
+                    reuse_ok = bool(reactivate_fn(project_id))
+                else:
+                    reuse_ok = True
             except Exception:  # noqa: BLE001
-                pass
+                reuse_ok = False
+            if not reuse_ok:
+                LOG.warning("resume 复用失败 code=%s project=%s（终态/不存在）→ 新建项目重打", code, project_id)
+                project_id = None
+                result.project_id = None
+        if project_id:
             # V2-1④：defer 续跑复用已购 hint（平台按次扣分，重购=白烧分）
             if result.hint_texts:
                 for cached in result.hint_texts:
@@ -814,7 +870,7 @@ def _run_single_challenge(
             try:
                 fact_descs = engine.list_fact_descriptions(project_id)
                 fact_count = len(fact_descs)
-                flags = collect_flags_from_facts(fact_descs)
+                flags = collect_flags_from_facts(fact_descs, [result.description])
                 pending = [flag for flag in flags if flag not in result.flags_found]
                 for flag in pending:
                     _submit_flag_safely(client, code, flag, result, started_at)
@@ -847,7 +903,7 @@ def _run_single_challenge(
                         # 先收最后一批 flag（多 flag 题可能还有未提交的），再删引擎项目
                         try:
                             last_descs = engine.list_fact_descriptions(project_id)
-                            last_flags = collect_flags_from_facts(last_descs)
+                            last_flags = collect_flags_from_facts(last_descs, [result.description])
                             for flag in [f for f in last_flags if f not in result.flags_found]:
                                 _submit_flag_safely(client, code, flag, result, started_at)
                             if last_descs:
@@ -886,7 +942,7 @@ def _run_single_challenge(
             time.sleep(flag_poll_seconds)
         if not done:
             # 引擎未完成：最后收一次 flag
-            flags = collect_flags_from_facts(engine.list_fact_descriptions(project_id))
+            flags = collect_flags_from_facts(engine.list_fact_descriptions(project_id), [goal])
             pending = [flag for flag in flags if flag not in result.flags_found]
             for flag in pending:
                 _submit_flag_safely(client, code, flag, result, started_at)
@@ -910,7 +966,7 @@ def _run_single_challenge(
         # 从星图收集 flag 并统一提交（引擎完成后再等一个短窗口）
         deadline = time.monotonic() + (DONE_FLAG_WAIT_SECONDS if continue_flag_wait and not project_gone else 0)
         while not project_gone and time.monotonic() < deadline:
-            flags = collect_flags_from_facts(engine.list_fact_descriptions(project_id))
+            flags = collect_flags_from_facts(engine.list_fact_descriptions(project_id), [goal])
             pending = [flag for flag in flags if flag not in result.flags_found]
             if not pending:
                 if flags:
@@ -925,6 +981,10 @@ def _run_single_challenge(
     except SlotBusyError:
         raise
     except Exception as exc:  # noqa: BLE001 —— 单题失败不阻断整轮
+        if _is_transient_network_error(exc):
+            # 自愈①：网络瞬断不杀题——_work 循环等待后原地重进（start 幂等、
+            # project_id 复用星图），断网 50 分钟类事故不再丢题
+            raise TransientNetError(str(exc)) from exc
         result.error = str(exc)
         LOG.exception("challenge failed code=%s error=%s", code, exc)
     finally:
@@ -1442,6 +1502,129 @@ def _pick_deadend_warnings(
         if len(out) >= limit:
             break
     return out
+
+
+# ---------------- 自愈组件：close 清道夫 + 停摆看门狗（托管无人值守的生命线） ----------------
+
+_close_reap_ts = [0.0]
+_WATCHDOG_STALL_SECONDS = 720  # 12 分钟无 worker 写入判停摆
+
+
+def _reap_failed_closes(client: BenchmarkClient, progress: Any) -> None:
+    """自愈②：补试历史 close_failed 题的容器关闭，成功转 done（释放平台名额记忆）。"""
+    try:
+        for code, state in list(progress._data.items()):
+            if state != "close_failed":
+                continue
+            closed = _close_challenge_quiet(client, code)
+            if closed:
+                progress.mark(code, "done")
+                LOG.info("self-heal: 补关泄漏容器成功 code=%s（转 done）", code)
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning("close reaper failed error=%s（下轮再试）", exc)
+
+
+def _close_challenge_quiet(client: BenchmarkClient, code: str) -> bool:
+    try:
+        closed = client.close_challenge(code)
+        return bool(getattr(closed, "closed", True))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _watchdog_stalled() -> bool:
+    """自愈③a：全停检测——活跃题存在，但全部 dsh worker 会话文件超时无写入。
+
+    会话目录按 worker 隔离（$TMP/astra-dsh/<worker>/sessions），任一文件新鲜即视为
+    系统在工作；全部陈旧且持续超过阈值才触发（避免把"长命令执行中"误判为停摆）。
+    """
+    import glob as _glob
+    import tempfile as _tempfile
+
+    try:
+        newest = 0.0
+        for f in _glob.glob(str(Path(_tempfile.gettempdir()) / "astra-dsh" / "*" / "sessions" / "*" / "*" / "*.zstd")):
+            newest = max(newest, os.path.getmtime(f))
+        if newest <= 0:
+            return False  # 找不到会话（异常布局）不误杀
+        return (time.time() - newest) > _WATCHDOG_STALL_SECONDS
+    except OSError:
+        return False
+
+
+# 自愈③b：半死检测——worker 在说话但星图零产出（b-02 冻结一小时事故的形态）。
+# 每 120s 对活跃题的星图 facts 总量拍照，连续 15 分钟（可调）零增长即判半死。
+_pulse_ts = [0.0]
+_pulse_facts = [-1]
+_pulse_stall_since = [0.0]
+
+
+def _progress_pulse_stalled(engine_factory: Any, active: dict, results: dict) -> bool:
+    try:
+        now = time.monotonic()
+        if now - _pulse_ts[0] < 120:
+            return False  # 采样间隔未到
+        _pulse_ts[0] = now
+        sample = -1
+        engine = engine_factory()
+        stats_fn = getattr(engine, "stats", None)
+        if callable(stats_fn):
+            sample = 0
+            for code in list(active):
+                r = results.get(code)
+                if r is not None and r.project_id:
+                    try:
+                        sample += int(stats_fn(r.project_id).get("facts", 0) or 0)
+                    except Exception:  # noqa: BLE001
+                        pass
+        if sample < 0:
+            return False  # 引擎不可查询时不误杀
+        if sample > _pulse_facts[0]:
+            _pulse_facts[0] = sample
+            _pulse_stall_since[0] = now
+            return False
+        # 零增长：累计停滞时长
+        if not _pulse_stall_since[0]:
+            _pulse_stall_since[0] = now
+            return False
+        stalled = now - _pulse_stall_since[0]
+        if stalled > float(os.environ.get("ASTRA_STALL_SECONDS", "900")):
+            LOG.error("watchdog: 活跃题存在但星图 %.0f 分钟零增长（facts=%s）——判定半死", stalled / 60, sample)
+            _pulse_stall_since[0] = now  # 重置，配合重启预算防风暴
+            return True
+        return False
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _self_heal_restart() -> None:
+    """自愈③：进程级自重启（os.execv 原位替换）——progress 断点续跑，引擎换血。
+
+    重启预算：4 小时窗口内最多 3 次（状态文件计数），防故障风暴；耗尽则只告警不重启。
+    ASTRA_SELF_HEAL=0 可整体关闭。
+    """
+    budget = Path(os.environ.get("ASTRA_SELF_HEAL_BUDGET_FILE", "/tmp/astra-selfheal-count.json"))
+    if sys.platform == "win32":
+        import tempfile as _tempfile
+
+        budget = Path(_tempfile.gettempdir()) / "astra-selfheal-count.json"
+    now = time.time()
+    try:
+        data = json.loads(budget.read_text(encoding="utf-8"))
+        data["ts"] = [t for t in data.get("ts", []) if now - t < 4 * 3600]
+    except (OSError, json.JSONDecodeError):
+        data = {"ts": []}
+    if len(data["ts"]) >= 3:
+        LOG.error("watchdog: 引擎停摆但自重启预算耗尽（4h 内 3 次）——人工介入！")
+        return
+    data["ts"].append(now)
+    try:
+        budget.write_text(json.dumps(data), encoding="utf-8")
+    except OSError:
+        pass
+    LOG.critical("watchdog: worker 会话 %.0f 分钟无写入，判定引擎停摆——自重启（第 %s 次）",
+                 _WATCHDOG_STALL_SECONDS / 60, len(data["ts"]))
+    os.execv(sys.executable, [sys.executable, *sys.argv])
 
 
 def _try_platform_hint(
