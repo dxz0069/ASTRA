@@ -47,3 +47,7 @@ docs/重构备忘.md
 docs/靶场运行手册.md
 仿生*.pdf
 docs/review-drafts/
+# 镜像产物不入库（本地保留）
+*.tar.gz
+# 运行时知识产物不入库（种子由仓库提供，运行时改写不回传）
+container/knowledge/constellation.json
