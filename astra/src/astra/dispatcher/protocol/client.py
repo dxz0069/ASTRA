@@ -179,7 +179,13 @@ class ASTRAClient:
             return ApiResult(status_code=0, text=str(exc))
         data: Any | None = None
         if response.headers.get("content-type", "").startswith("application/json"):
-            data = response.json()
+            try:
+                data = response.json()
+            except (ValueError, UnicodeDecodeError) as exc:
+                # D3 修复：content-type 声称 json 但 body 非法（网关错误页/截断响应）
+                # ——裸抛会杀死心跳线程导致租约静默失效→同 intent 双跑
+                LOG.warning("response json parse failed method=%s path=%s error=%s", method, path, exc)
+                return ApiResult(status_code=response.status_code, text=response.text)
         return ApiResult(status_code=response.status_code, data=data, text=response.text)
 
     def _url(self, path: str) -> str:

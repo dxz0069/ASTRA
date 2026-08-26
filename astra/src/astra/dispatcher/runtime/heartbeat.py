@@ -94,7 +94,15 @@ class HeartbeatLease:
     def _run(self) -> None:
         try:
             while not self._stop.wait(self._interval):
-                result = self._heartbeat()
+                try:
+                    result = self._heartbeat()
+                except Exception as exc:  # noqa: BLE001 —— D3：任何异常（含 JSON 解析）
+                    # 不让心跳线程静默死亡——死亡后租约无人续期→同 intent 被重派双跑
+                    LOG.warning(
+                        "heartbeat call raised scope=%s worker=%s error=%s（按瞬时失败处理）",
+                        self._scope, self._worker_name, exc,
+                    )
+                    result = ApiResult(status_code=0, text=str(exc))
                 if result.ok:
                     self._last_success_at = time.monotonic()
                     continue

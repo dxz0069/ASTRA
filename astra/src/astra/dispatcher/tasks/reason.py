@@ -541,6 +541,15 @@ def run_reason_task(
                 ):
                     return "failed"
                 return "success"
+            # 调度器 D2 修复：审查（可达分钟级）期间租约可能已过期——写图前复查，
+            # 失效则放弃写入（否则与重派的 reason 并发双重写图）
+            if lease.failure is not None:
+                LOG.warning(
+                    "reason lease lost during review, aborting complete write project=%s worker=%s",
+                    project.project.id,
+                    worker.name,
+                )
+                return "failed"
             response = client.complete(project.project.id, data["from"], data["description"], worker.name)
             if response.status_code in (403, 404):
                 LOG.info("project became inactive during reason complete project=%s worker=%s", project.project.id, worker.name)
@@ -607,6 +616,14 @@ def run_reason_task(
                     )
                     continue
                 response = client.create_intent(project.project.id, intent_data["from"], intent_data["description"], worker.name)
+                # 调度器 D2：写航向前复查租约（审查阶段可能已过期，防双重写图）
+                if lease.failure is not None:
+                    LOG.warning(
+                        "reason lease lost during review, aborting intent write project=%s worker=%s",
+                        project.project.id,
+                        worker.name,
+                    )
+                    return "failed"
                 if response.status_code in (403, 404):
                     LOG.info("project became inactive during reason intent create project=%s worker=%s created=%s", project.project.id, worker.name, created)
                     return "success"

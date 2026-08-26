@@ -53,11 +53,18 @@ def pick_stale_facts(project: ProjectDetail, batch_size: int) -> list[dict[str, 
     簇不足时按剩余主题补齐。同簇内保持星图顺序（时间线可读）。
     """
     referenced = {intent.to for intent in project.intents if intent.to}
+    # 调度器 D4 修复：同时保护未决航向（concluded_at IS NULL）的 from 引用——
+    # 归档这些星记会静默删除 intent_sources 导致来源链断裂、星图导出不一致
+    open_from_refs: set[str] = set()
+    for intent in project.intents:
+        if intent.concluded_at is None:
+            open_from_refs.update(intent.from_)
     stale = [
         fact
         for fact in project.facts
         if fact.id not in ("goal", "origin")
         and fact.id not in referenced
+        and fact.id not in open_from_refs
         and fact.kind != SUMMARY_KIND
     ]
     clusters: dict[str, list] = {}
@@ -197,6 +204,9 @@ def _run_consolidate_task(
             worker.name,
             archive.status_code,
         )
+        # 调度器 D6：返回 failed 进 15s 冷却——否则每 interval 叠一条新摘要
+        # + superseded 列表膨胀 prompt，直到 archive 恢复（成本风暴）
+        return "failed"
     LOG.info(
         "consolidate done project=%s worker=%s facts_compressed=%s execute_ms=%s",
         project.project.id,
