@@ -80,6 +80,7 @@ class ChallengeResult:
     kb_approach_draft: str | None = None  # V2-6：末段星记浓缩（解出后沉淀知识库用）
     kb_neighbor_texts: list[str] = field(default_factory=list)  # V4：同题型邻居经验（举一反三注入）
     transient_count: int = 0  # 自愈①：连续网络瞬断计数（超上限判死退出，防误匹配死循环）
+    busy_count: int = 0  # 自愈④：槽位 busy 连击计数（指数退避用；漏定义曾致 SlotBusy 线程炸死）
     kb_deadend_texts: list[str] = field(default_factory=list)  # V5：同题型避坑提示（失败经验库注入）
 
 
@@ -419,7 +420,7 @@ def run_benchmark(
                 # 自愈④：busy 指数退避——首次插队首快速重试，反复撞满则指数等待+
                 # 回队尾，杜绝"十几个线程每 30 秒集体空转刷 409"的自旋风暴
                 busy_seen.set()
-                result.busy_count = getattr(result, "busy_count", 0) + 1
+                result.busy_count += 1
                 wait = min(30 * (2 ** min(result.busy_count - 1, 3)), 240)
                 LOG.warning("active slot busy code=%s 第 %s 次（%.0fs 后%s）",
                             result.unique_code, result.busy_count, wait,
