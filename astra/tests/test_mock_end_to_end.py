@@ -73,11 +73,14 @@ class InProcessClient:
         confidence: str = "medium",
         evidence: str | None = None,
         challenged: bool = False,
+        kind: str = "regular",
     ) -> ApiResult:
         body: dict[str, Any] = {"worker": worker, "description": description, "confidence": confidence}
         if evidence:
             body["evidence"] = evidence
         body["challenged"] = challenged
+        if kind != "regular":
+            body["kind"] = kind
         return self._post(
             f"/projects/{project_id}/intents/{intent_id}/conclude",
             body,
