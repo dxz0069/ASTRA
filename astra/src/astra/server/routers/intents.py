@@ -135,8 +135,8 @@ def conclude(project_id: str, intent_id: str, body: ConcludeRequest):
         fid = next_fact_id(conn, project_id)
 
         conn.execute(
-            "INSERT INTO facts (id, project_id, description, confidence, evidence, challenged) VALUES (?, ?, ?, ?, ?, ?)",
-            (fid, project_id, body.description, body.confidence, body.evidence, int(body.challenged)),
+            "INSERT INTO facts (id, project_id, description, confidence, evidence, challenged, kind) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (fid, project_id, body.description, body.confidence, body.evidence, int(body.challenged), body.kind),
         )
         conn.execute(
             "UPDATE intents SET to_fact_id = ?, worker = ?, last_heartbeat_at = ?, concluded_at = ?, challenged = ? WHERE id = ? AND project_id = ?",
@@ -149,6 +149,6 @@ def conclude(project_id: str, intent_id: str, body: ConcludeRequest):
         ).fetchone()
 
         return ConcludeResponse(
-            fact=Fact(id=fid, description=body.description, confidence=body.confidence, evidence=body.evidence, challenged=body.challenged),
+            fact=Fact(id=fid, description=body.description, confidence=body.confidence, evidence=body.evidence, challenged=body.challenged, kind=body.kind),
             intent=intent_to_model(conn, updated, project_id),
         )

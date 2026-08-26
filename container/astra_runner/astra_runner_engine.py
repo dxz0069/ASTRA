@@ -62,6 +62,47 @@ class AstraDaemon:
                 cls._instance = cls()
             return cls._instance
 
+    def shutdown(self) -> None:
+        """优雅关闭引擎子进程（execv 自愈重启前必须调用，否则旧进程占端口+烧 token）。
+
+        P0 修复：os.execv 原位替换不清子进程，旧 server 持 8000 端口导致新进程
+        exited early → 整轮报废。此方法在 execv 前被调用，确保干净换血。
+        """
+        import signal as _signal
+
+        for name, proc in [("dispatcher", self._dispatcher), ("server", self._server)]:
+            if proc is not None and proc.poll() is None:
+                try:
+                    # POSIX 下杀整组（dsh 的 node→nmap/curl 孙进程）
+                    if sys.platform != "win32":
+                        try:
+                            os.killpg(os.getpgid(proc.pid), _signal.SIGTERM)
+                        except (ProcessLookupError, PermissionError):
+                            proc.terminate()
+                    else:
+                        proc.terminate()
+                    proc.wait(timeout=10)
+                    LOG.info("daemon %s stopped (pid=%s)", name, proc.pid)
+                except subprocess.TimeoutExpired:
+                    LOG.warning("daemon %s SIGTERM timeout, SIGKILL", name)
+                    proc.kill()
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        pass
+                except Exception as exc:  # noqa: BLE001
+                    LOG.warning("daemon %s stop failed: %s", name, exc)
+        self._server = None
+        self._dispatcher = None
+        # 等 8000 端口真正释放（新进程才能绑定）
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            try:
+                requests.get(f"{ASTRA_SERVER_URL}/projects", timeout=1)
+                time.sleep(0.5)  # 还活着，继续等
+            except Exception:  # noqa: BLE001
+                break  # 连不上 = 端口已释放
+
     def ensure_started(self) -> None:
         if os.environ.get("ASTRA_EXTERNAL_ENGINE") == "1":
             # 外部引擎模式：server/dispatcher 由外部管理（避免进程组级联退出）

@@ -308,6 +308,10 @@ def run_benchmark(
             except Exception:  # noqa: BLE001 —— 幂等清理，失败忽略
                 pass
     queue: deque = deque()
+    # P1-1：队列互斥锁——_pick_candidate 的"快照→clear→extend"与 worker 线程的
+    # requeue（appendleft/append）并发时非原子，落在 list 与 clear 间隙里的题会被
+    # clear 永久清除（丢题）。所有队列读改写统一持锁串行化。
+    queue_lock = threading.Lock()
     results: dict[str, ChallengeResult] = {}
     for ch in challenges:
         code = getattr(ch, "unique_code", None) or getattr(ch, "code", "")
@@ -426,10 +430,12 @@ def run_benchmark(
                             result.unique_code, result.busy_count, wait,
                             "插队首" if result.busy_count == 1 else "回队尾")
                 time.sleep(wait)
-                if result.busy_count == 1:
-                    queue.appendleft((ch, result))
-                else:
-                    queue.append((ch, result))
+                # P1-1：requeue 与 _pick_candidate 的快照重建并发，必须持队列锁
+                with queue_lock:
+                    if result.busy_count == 1:
+                        queue.appendleft((ch, result))
+                    else:
+                        queue.append((ch, result))
                 return
             if status == "deferred":
                 # 60 分钟无果：保留引擎项目进度，放回队列末尾（不标 done），
@@ -472,11 +478,13 @@ def run_benchmark(
                 except Exception:  # noqa: BLE001
                     pass
                 # V2-2：近失题（错交过 flag=差一步）回队插队首，普通题仍走队尾
-                if result.wrong_count > 0:
-                    LOG.info("near-miss requeue to head code=%s wrong=%s", result.unique_code, result.wrong_count)
-                    queue.appendleft((ch, result))
-                else:
-                    queue.append((ch, result))
+                # P1-1：requeue 与 _pick_candidate 的快照重建并发，必须持队列锁
+                with queue_lock:
+                    if result.wrong_count > 0:
+                        LOG.info("near-miss requeue to head code=%s wrong=%s", result.unique_code, result.wrong_count)
+                        queue.appendleft((ch, result))
+                    else:
+                        queue.append((ch, result))
                 return
             # 正常完成（解出/超时关闭）：线程收尾退出——while True 仅为 TransientNetError
             # 原地重进服务，正常路径必须显式 return（曾缺失导致正常题无限重进，回归挂死）
@@ -495,21 +503,26 @@ def run_benchmark(
     }
 
     def _pick_candidate():
-        """V2-2：尾段（剩余<2h）优先选近失题（错交过=差一步），否则队首。"""
-        if not queue:
-            return None
-        items = list(queue)
-        idx = 0
-        late_window = window_deadline is not None and _remaining_seconds() < NEAR_MISS_LATE_WINDOW_SECONDS
-        if late_window:
-            for i, item in enumerate(items):
-                if item[1].wrong_count > 0:
-                    idx = i
-                    break
-        picked = items.pop(idx)
-        queue.clear()
-        queue.extend(items)
-        return picked
+        """V2-2：尾段（剩余<2h）优先选近失题（错交过=差一步），否则队首。
+
+        P1-1：快照→弹出→重建全程持 queue_lock——否则与 worker 线程的 requeue
+        并发时，落在快照与 clear 之间 append 的题会被 clear 永久清除（丢题）。
+        """
+        with queue_lock:
+            if not queue:
+                return None
+            items = list(queue)
+            idx = 0
+            late_window = window_deadline is not None and _remaining_seconds() < NEAR_MISS_LATE_WINDOW_SECONDS
+            if late_window:
+                for i, item in enumerate(items):
+                    if item[1].wrong_count > 0:
+                        idx = i
+                        break
+            picked = items.pop(idx)
+            queue.clear()
+            queue.extend(items)
+            return picked
 
     def _starvation_refill() -> bool:
         """V2-7：队列空且剩余>门槛 → 无视 defer 上限按 EV 重拉已弃题（满窗口利用）。
@@ -543,7 +556,9 @@ def run_benchmark(
             return False
         target = candidates[0]
         target.defer_count = 0  # 饥饿回灌无视 defer 上限
-        queue.append((challenges_by_code[target.unique_code], target))
+        # P1-1：入队与 _pick_candidate 的快照重建互斥，统一持队列锁
+        with queue_lock:
+            queue.append((challenges_by_code[target.unique_code], target))
         LOG.warning(
             "starvation requeue code=%s wrong=%s facts=%s hints=%s（队列空，重拉已弃题续用窗口）",
             target.unique_code, target.wrong_count, target.facts_count, target.hints_count,
@@ -676,7 +691,7 @@ def run_benchmark(
         #（progress 断点续跑，engine 换血自愈；托管无人值守的生命线）
         if active and os.environ.get("ASTRA_SELF_HEAL", "1") != "0":
             if _watchdog_stalled() or _progress_pulse_stalled(engine_factory, active, results):
-                _self_heal_restart()
+                _self_heal_restart(engine_factory)
         if active:
             time.sleep(2)
             continue
@@ -1636,7 +1651,7 @@ def _progress_pulse_stalled(engine_factory: Any, active: dict, results: dict) ->
         return False
 
 
-def _self_heal_restart() -> None:
+def _self_heal_restart(engine_factory=None) -> None:
     """自愈③：进程级自重启（os.execv 原位替换）——progress 断点续跑，引擎换血。
 
     重启预算：4 小时窗口内最多 3 次（状态文件计数），防故障风暴；耗尽则只告警不重启。
@@ -1663,6 +1678,25 @@ def _self_heal_restart() -> None:
         pass
     LOG.critical("watchdog: worker 会话 %.0f 分钟无写入，判定引擎停摆——自重启（第 %s 次）",
                  _WATCHDOG_STALL_SECONDS / 60, len(data["ts"]))
+    # P0 修复：execv 前必须优雅关闭引擎子进程——否则旧 server 占 8000 端口，
+    # 新进程 exited early → 整轮报废；旧 dsh worker 成孤儿继续烧 token。
+    try:
+        _daemon = engine_factory() if engine_factory else None
+        shutdown = getattr(_daemon, "shutdown", None) if _daemon else None
+        if callable(shutdown):
+            shutdown()
+            LOG.info("watchdog: engine daemon shutdown complete before execv")
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning("watchdog: daemon shutdown failed: %s（仍执行 execv）", exc)
+    # 再杀非 daemon 拉起的 dsh worker（_popen 未设进程组，用 pkill 兜底）
+    if sys.platform != "win32":
+        try:
+            subprocess.run(
+                ["pkill", "-TERM", "-f", "dsh --profile headless"],
+                capture_output=True, timeout=10,
+            )
+        except Exception:  # noqa: BLE001
+            pass
     os.execv(sys.executable, [sys.executable, *sys.argv])
 
 
