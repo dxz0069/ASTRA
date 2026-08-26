@@ -225,13 +225,21 @@ class ProgressStore:
                 if isinstance(loaded, dict):
                     store._data = {str(k): str(v) for k, v in loaded.items()}
             except (json.JSONDecodeError, OSError):
-                store._data = {}  # 损坏的进度文件按空处理，不阻断
+                # D5：主文件损坏时尝试 .tmp 回退（可能是上次崩溃前完整的写入）
+                try:
+                    store._data = json.loads(
+                        (path.parent / (path.name + ".tmp")).read_text(encoding="utf-8")
+                    )
+                except (OSError, json.JSONDecodeError):
+                    store._data = {}  # 损坏的进度文件按空处理，不阻断
         return store
 
     def skipped_codes(self) -> set[str]:
         # 跳过 done / close_failed：已完整跑过或关题泄漏需人工；started 不跳过——
         # 崩溃重启后重新 start（平台幂等返回同地址）继续解题，避免放弃已启动的题目。
-        return {code for code, state in self._data.items() if state in ("done", "close_failed")}
+        # B3：读路径持锁（防 worker 并发 mark 时 dict 迭代 RuntimeError）
+        with self._lock:
+            return {code for code, state in self._data.items() if state in ("done", "close_failed")}
 
     def mark(self, code: str, state: str) -> None:
         with self._lock:
@@ -383,7 +391,8 @@ def run_benchmark(
     active: dict[str, threading.Thread] = {}
     auto_mode = parallel == "auto" or parallel is None
     slots = 2 if auto_mode else max(1, int(parallel))
-    stop_event = threading.Event()
+    
+    _reset_watchdog_state()  # 跨实例状态重置（审计 D3）stop_event = threading.Event()
     stop_errors: list[Exception] = []
     busy_seen = threading.Event()
     probed_locked = [False]
@@ -686,7 +695,7 @@ def run_benchmark(
         #（断网期 close 失败的题不再永久占坑）
         if progress is not None and time.monotonic() - _close_reap_ts[0] > 600:
             _close_reap_ts[0] = time.monotonic()
-            _reap_failed_closes(client, progress)
+            _reap_failed_closes(client, progress, active)
         # 自愈③：停摆看门狗——有活跃题但 worker 会话 12 分钟无写入 → 进程级自重启
         #（progress 断点续跑，engine 换血自愈；托管无人值守的生命线）
         if active and os.environ.get("ASTRA_SELF_HEAL", "1") != "0":
@@ -755,6 +764,7 @@ def _run_single_challenge(
     # V2-6 修复：finally 段（星记采集）引用这两个变量——start 阶段即抛 TaskFinishedError
     # 时它们尚未赋值，UnboundLocalError 会掩盖原异常导致 409 全停信号失效。前置初始化。
     project_id: str | None = None
+    started_this_round = False  # B1：本轮局部标记，防跨轮残留假 close_failed
     project_gone = False
     try:
         engine.start()
@@ -768,6 +778,7 @@ def _run_single_challenge(
                 raise SlotBusyError(str(exc)) from exc
             raise
         result.started = True
+        started_this_round = True
         if progress is not None:
             progress.mark(code, "started")
         container_addr = getattr(started, "container_addr", None) or []
@@ -1051,7 +1062,7 @@ def _run_single_challenge(
         # defer：保留引擎项目进度（不删），仅关平台题释放名额；progress 保持
         # started/不标 done，队列轮转后重新 start 直接续跑同项目
         deferred = status == "deferred"
-        if result.started:
+        if started_this_round:
             closed = False
             for attempt in range(3):
                 try:
@@ -1083,6 +1094,7 @@ def _build_goal(description: str, ch: Any) -> str:
 # 赛中沉淀文件（模块常量：测试 monkeypatch 指向临时目录，避免污染真实 /tmp 沉淀）
 KNOWLEDGE_APPEND_FILE = Path(tempfile.gettempdir()) / "astra-knowledge-append.json"
 DEADENDS_APPEND_FILE = Path(tempfile.gettempdir()) / "astra-deadends-append.json"
+_constellation_lock = threading.Lock()  # D4：read→modify→write 串行化（防并发覆盖丢数据）
 
 KNOWLEDGE_FILE = (
     Path(os.environ.get("ASTRA_KNOWLEDGE_FILE"))
@@ -1388,25 +1400,26 @@ def _load_constellation() -> dict:
 
 
 def _record_constellation(origin: str, recon_facts: list[str]) -> None:
-    """origin 形如 http://10.0.x.y:port ——按 /24 网段聚合侦察卡。"""
+    """origin 形如 http://10.0.x.y:port ——按 /24 网段聚合侦察卡（D4：加锁防并发覆盖）。"""
     if not recon_facts:
         return
     m = re.search(r"((?:\d{1,3}\.){3})\d{1,3}", origin or "")
     if not m:
         return
     subnet = m.group(1).rstrip(".")
-    try:
-        data = _load_constellation()
-        card = data.setdefault(subnet, {"facts": [], "updated": ""})
-        for f in recon_facts:
-            if f not in card["facts"]:
-                card["facts"].append(f)
-        card["facts"] = card["facts"][-12:]  # 每网段最多 12 条，滚动窗口
-        card["updated"] = datetime.now().isoformat(timespec="seconds")
-        _constellation_path().parent.mkdir(parents=True, exist_ok=True)
-        _constellation_path().write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
-    except (OSError, ValueError):
-        pass
+    with _constellation_lock:
+        try:
+            data = _load_constellation()
+            card = data.setdefault(subnet, {"facts": [], "updated": ""})
+            for f in recon_facts:
+                if f not in card["facts"]:
+                    card["facts"].append(f)
+            card["facts"] = card["facts"][-12:]  # 每网段最多 12 条，滚动窗口
+            card["updated"] = datetime.now().isoformat(timespec="seconds")
+            _constellation_path().parent.mkdir(parents=True, exist_ok=True)
+            _constellation_path().write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+        except (OSError, ValueError):
+            pass
 
 
 def _constellation_text(origin: str) -> str:
@@ -1560,12 +1573,18 @@ _WATCHDOG_STALL_SECONDS = 720  # 12 分钟无 worker 写入判停摆
 _watchdog_seen_fresh = [False]
 
 
-def _reap_failed_closes(client: BenchmarkClient, progress: Any) -> None:
-    """自愈②：补试历史 close_failed 题的容器关闭，成功转 done（释放平台名额记忆）。"""
+def _reap_failed_closes(client: BenchmarkClient, progress: Any, active: dict | None = None) -> None:
+    """自愈②：补试历史 close_failed 题的容器关闭，成功转 done（释放平台名额记忆）。
+
+    B2 修复：跳过当前活跃（active）的题——TransientNet 重进后该题可能正在解题，
+    清道夫误关其容器等于杀活题。
+    """
     try:
         for code, state in list(progress._data.items()):
             if state != "close_failed":
                 continue
+            if active and code in active:
+                continue  # B2：活跃题正在打，不能关
             closed = _close_challenge_quiet(client, code)
             if closed:
                 progress.mark(code, "done")
@@ -1613,6 +1632,18 @@ _pulse_facts = [-1]
 _pulse_stall_since = [0.0]
 
 
+def _reset_watchdog_state() -> None:
+    """重置看门狗/脉搏的模块级状态（跨 run_benchmark 实例残留清理）。
+
+    审计 D3：模块级变量在测试/多实例场景下残留前实例的峰值与时间戳，
+    导致第二实例首次采样即被判"停摆"→ os.execv 炸掉测试进程。
+    """
+    _pulse_ts[0] = 0.0
+    _pulse_facts[0] = -1
+    _pulse_stall_since[0] = 0.0
+    _watchdog_seen_fresh[0] = False
+
+
 def _progress_pulse_stalled(engine_factory: Any, active: dict, results: dict) -> bool:
     try:
         now = time.monotonic()
@@ -1633,7 +1664,7 @@ def _progress_pulse_stalled(engine_factory: Any, active: dict, results: dict) ->
                         pass
         if sample < 0:
             return False  # 引擎不可查询时不误杀
-        if sample > _pulse_facts[0]:
+        if sample != _pulse_facts[0]:
             _pulse_facts[0] = sample
             _pulse_stall_since[0] = now
             return False
@@ -1680,12 +1711,12 @@ def _self_heal_restart(engine_factory=None) -> None:
                  _WATCHDOG_STALL_SECONDS / 60, len(data["ts"]))
     # P0 修复：execv 前必须优雅关闭引擎子进程——否则旧 server 占 8000 端口，
     # 新进程 exited early → 整轮报废；旧 dsh worker 成孤儿继续烧 token。
+    # 注意：engine_factory() 返回 LocalAstraEngine（无 shutdown），必须直接
+    # 调 AstraDaemon.instance().shutdown()——审计确认前一版是死代码（D1）。
     try:
-        _daemon = engine_factory() if engine_factory else None
-        shutdown = getattr(_daemon, "shutdown", None) if _daemon else None
-        if callable(shutdown):
-            shutdown()
-            LOG.info("watchdog: engine daemon shutdown complete before execv")
+        from astra_runner.astra_runner_engine import AstraDaemon
+        AstraDaemon.instance().shutdown()
+        LOG.info("watchdog: engine daemon shutdown complete before execv")
     except Exception as exc:  # noqa: BLE001
         LOG.warning("watchdog: daemon shutdown failed: %s（仍执行 execv）", exc)
     # 再杀非 daemon 拉起的 dsh worker（_popen 未设进程组，用 pkill 兜底）

@@ -699,10 +699,20 @@ class DispatcherLoop:
 
     def _reap_futures(self) -> None:
         done = [future for future in self.futures if future.done()]
+        # 调度器 J2：先收集本批每个 worker 的结局——unhealthy 优先于 success
+        batch_unhealthy_workers: set[str] = set()
+        batch_results: list[tuple[Any, str]] = []
         for future in done:
             task = self.futures.pop(future)
             try:
                 outcome = future.result()
+                batch_results.append((task, outcome))
+                if outcome == "unhealthy":
+                    batch_unhealthy_workers.add(task.worker_name)
+            except Exception as exc:  # noqa: BLE001 —— worker 函数崩溃
+                LOG.exception("task crashed project=%s", getattr(task, "project_id", "?"))
+                batch_results.append((task, "crashed"))
+        for task, outcome in batch_results:
                 if outcome == "cancelled":
                     LOG.info(
                         "task cancelled project=%s task=%s worker=%s",
@@ -719,6 +729,11 @@ class DispatcherLoop:
                         outcome,
                     )
                 self._clear_project_log_state(task.project_id)
+                # 调度器 D1 修复：项目在 futures 中已无任务时从 runtime_project_ids
+                # 移除——否则只增不减，长跑后 max_running_projects 被"碰过的"而非
+                # "在跑的"项目耗尽，新项目永久饿死
+                if not any(t.project_id == task.project_id for t in self.futures.values()):
+                    self.runtime_project_ids.discard(task.project_id)
                 if outcome == "unhealthy":
                     retry_after_seconds = UNHEALTHY_RETRY_AFTER_SECONDS
                     self.worker_unhealthy_until[task.worker_name] = time.time() + retry_after_seconds
@@ -727,7 +742,8 @@ class DispatcherLoop:
                         task.worker_name,
                         retry_after_seconds,
                     )
-                else:
+                elif task.worker_name not in batch_unhealthy_workers:
+                    # 调度器 J2：本批该 worker 有 unhealthy 结局时不清除冷却
                     self.worker_unhealthy_until.pop(task.worker_name, None)
                 rejection_key = (task.project_id, task.task_type, task.worker_name)
                 if outcome == "rejected":
@@ -768,12 +784,11 @@ class DispatcherLoop:
                         task.hint_count,
                         task.open_intent_count,
                     )
-            except Exception:
-                LOG.exception("task crashed project=%s task=%s worker=%s", task.project_id, task.task_type, task.worker_name)
-                # 崩溃（未捕获异常）同样进冷却：触发条件往往仍成立（如 consolidate 的
-                # 星记超预算），不冷却会每个调度周期重派崩溃、无限刷屏
-                crash_key = (task.project_id, task.task_type, task.worker_name)
-                self.worker_rejected_until[crash_key] = time.time() + FAILED_RETRY_AFTER_SECONDS
+                if outcome == "crashed":
+                    # 崩溃（未捕获异常）同样进冷却：触发条件往往仍成立（如 consolidate 的
+                    # 星记超预算），不冷却会每个调度周期重派崩溃、无限刷屏
+                    crash_key = (task.project_id, task.task_type, task.worker_name)
+                    self.worker_rejected_until[crash_key] = time.time() + FAILED_RETRY_AFTER_SECONDS
 
     def _cleanup_completed_containers(self, summaries: list[ProjectSummary]) -> None:
         for summary in summaries:
