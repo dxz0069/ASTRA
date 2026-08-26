@@ -392,7 +392,8 @@ def run_benchmark(
     auto_mode = parallel == "auto" or parallel is None
     slots = 2 if auto_mode else max(1, int(parallel))
     
-    _reset_watchdog_state()  # 跨实例状态重置（审计 D3）stop_event = threading.Event()
+    _reset_watchdog_state()  # 跨实例状态重置（审计 D3）
+    stop_event = threading.Event()
     stop_errors: list[Exception] = []
     busy_seen = threading.Event()
     probed_locked = [False]
