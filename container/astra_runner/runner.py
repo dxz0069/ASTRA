@@ -1410,11 +1410,15 @@ def _constellation_text(origin: str) -> str:
     )
 
 
-def _attach_knowledge(queue: list, knowledge: dict) -> int:
-    """V4：把知识库条目/邻居经验挂到队列中未开题的 result 上（初始挂载与赛中热加载共用）。"""
+def _attach_knowledge(queue: Any, knowledge: dict) -> int:
+    """V4：把知识库条目/邻居经验挂到队列中未开题的 result 上（初始挂载与赛中热加载共用）。
+
+    迭代前快照：主循环热加载与 _work 线程的 requeue（appendleft/append）并发，
+    直接迭代 deque 会 RuntimeError: deque mutated during iteration（实测刷屏）。
+    """
     attached = 0
     deadends = _load_deadends()
-    for ch_item, res in queue:
+    for ch_item, res in list(queue):
         if res.started:
             continue  # 已开题不回填——注入 fact 只在项目创建时做
         code = res.unique_code.lower()
