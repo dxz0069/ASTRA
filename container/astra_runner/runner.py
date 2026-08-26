@@ -228,9 +228,9 @@ class ProgressStore:
                 # D5：主文件损坏时尝试 .tmp 回退（可能是上次崩溃前完整的写入）
                 try:
                     store._data = json.loads(
-                        (path.parent / (path.name + ".tmp")).read_text(encoding="utf-8")
+                        store.path.with_name(store.path.name + ".tmp").read_text(encoding="utf-8")
                     )
-                except (OSError, json.JSONDecodeError):
+                except (OSError, json.JSONDecodeError, AttributeError):
                     store._data = {}  # 损坏的进度文件按空处理，不阻断
         return store
 
