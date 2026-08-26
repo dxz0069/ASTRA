@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
+import sys
+import tempfile
 import time
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 
 from astra.dispatcher.config import DispatchConfig, WorkerConfig
 from astra.dispatcher.protocol.client import ASTRAClient
@@ -18,6 +22,11 @@ HEALTHCHECK_COMMUNICATE_GRACE_SECONDS = 10
 PROCESS_COMMUNICATE_GRACE_SECONDS = 15
 LOG_PREVIEW_LIMIT = 1200
 GRAPH_SNAPSHOT_ROOT = "/tmp/astra-prompts"
+# P1-4：图快照目录最长保留时长——超过即视为陈旧可清理（任务超时远小于该值）
+GRAPH_SNAPSHOT_MAX_AGE_SECONDS = 2 * 3600
+# P1-4：陈旧快照清理节流间隔——不必每次派任务都全量扫描目录
+_GRAPH_SNAPSHOT_CLEANUP_INTERVAL_SECONDS = 600
+_last_snapshot_cleanup_at = [0.0]
 LOG = logging.getLogger(__name__)
 
 FAILURE_HINT_PREFIX = "[失败学习] "
@@ -199,6 +208,37 @@ def task_healthcheck_enabled(config: DispatchConfig) -> bool:
     return config.runtime.worker_healthcheck == "startup_and_task"
 
 
+def _cleanup_stale_graph_snapshots() -> None:
+    """P1-4：清理宿主侧超过 2 小时的旧图快照目录，防止 /tmp/astra-prompts 无限膨胀。
+
+    每次派任务都写一份 <phase>-<uuid>/graph.yaml 且从不清理；本地执行模式下
+    快照落在宿主临时目录（POSIX: $TMPDIR/astra-prompts，Windows: C:\\tmp\\
+    astra-prompts——与 LocalContainerManager._to_host_path 的 /tmp 映射约定一致），
+    跨项目累积成磁盘泄漏；docker 模式容器随项目整体回收，不受此影响。
+    目录 mtime 即创建时间（写 graph.yaml 后不再变动），任务最长超时远小于
+    2 小时，按此判龄不会删到在用快照。清理失败静默忽略——不影响派发主流程。
+    """
+    now = time.time()
+    if now - _last_snapshot_cleanup_at[0] < _GRAPH_SNAPSHOT_CLEANUP_INTERVAL_SECONDS:
+        return
+    _last_snapshot_cleanup_at[0] = now
+    try:
+        if sys.platform == "win32":
+            root = Path("C:/tmp") / "astra-prompts"
+        else:
+            root = Path(tempfile.gettempdir()) / "astra-prompts"
+        if not root.is_dir():
+            return
+        for entry in root.iterdir():
+            try:
+                if entry.is_dir() and now - entry.stat().st_mtime > GRAPH_SNAPSHOT_MAX_AGE_SECONDS:
+                    shutil.rmtree(entry, ignore_errors=True)
+            except OSError:
+                continue  # 单个目录清理失败不影响其余
+    except OSError:
+        pass
+
+
 def write_graph_snapshot_reference(
     container_manager: ContainerManager,
     container_name: str,
@@ -206,6 +246,8 @@ def write_graph_snapshot_reference(
     *,
     phase: str,
 ) -> str:
+    # P1-4：写入新快照前顺手清理陈旧快照目录（节流，见函数内说明）
+    _cleanup_stale_graph_snapshots()
     path = f"{GRAPH_SNAPSHOT_ROOT}/{phase}-{uuid.uuid4().hex[:12]}/graph.yaml"
     container_manager.write_text_file(container_name, path, graph_yaml)
     return (
@@ -363,6 +405,7 @@ def write_conclude_result_with_fact_id(
     confidence: str = "medium",
     evidence: str | None = None,
     challenged: bool = False,
+    kind: str = "regular",
 ) -> ConcludeWriteResult:
     response = client.conclude(
         project_id,
@@ -372,6 +415,7 @@ def write_conclude_result_with_fact_id(
         confidence=confidence,
         evidence=evidence,
         challenged=challenged,
+        kind=kind,
     )
     if response.ok:
         fact_id: str | None = None

@@ -7,6 +7,7 @@ from __future__ import annotations
 """
 
 import logging
+import os
 import shutil
 import signal
 import subprocess
@@ -61,8 +62,13 @@ class LocalProcess:
         # 禁用其参数转换以保持 Python list2cmdline 的引号语义
         full_env.setdefault("MSYS2_ARG_CONV_EXCL", "*")
         creationflags = 0
+        # P1-3：POSIX 下新建会话/进程组——terminate 时才能 killpg 连同 dsh(node)
+        # 派生的孙进程（nmap/curl 等）一并回收；否则只杀直接子进程，孙进程成孤儿
+        popen_kwargs: dict = {}
         if sys.platform == "win32":
             creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            popen_kwargs["start_new_session"] = True
         # Windows 上 npm 全局 CLI 是 .cmd 包装，Popen 找不到裸命令名——用 which 解析真实可执行文件
         argv = list(self.command)
         if self.command and sys.platform == "win32":
@@ -79,6 +85,7 @@ class LocalProcess:
             errors="replace",
             env=full_env,
             creationflags=creationflags,
+            **popen_kwargs,
         )
         # stdout/stderr 分开线程读取，避免管道缓冲死锁
         self._stdout_reader = threading.Thread(target=self._read_pipe, args=(self._process.stdout, self._stdout), daemon=True)
@@ -130,7 +137,12 @@ class LocalProcess:
             if sys.platform == "win32":
                 self._process.send_signal(signal.CTRL_BREAK_EVENT)
             else:
-                self._process.terminate()
+                # P1-3：按进程组发 SIGTERM——连同 dsh 派生的孙进程一起回收；
+                # 进程恰好已退出（竞态）时忽略 ProcessLookupError
+                try:
+                    os.killpg(os.getpgid(self._process.pid), signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
         except OSError:
             pass
         deadline = time.monotonic() + max(self._kill_after_seconds, 1.0)
@@ -139,7 +151,14 @@ class LocalProcess:
         if self._process.poll() is None:
             LOG.warning("force killing local process pid=%s", self._process.pid)
             try:
-                self._process.kill()
+                if sys.platform == "win32":
+                    self._process.kill()
+                else:
+                    # P1-3：强杀同样按进程组 SIGKILL，杜绝孙进程逃逸成孤儿
+                    try:
+                        os.killpg(os.getpgid(self._process.pid), signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
             except OSError:
                 pass
 

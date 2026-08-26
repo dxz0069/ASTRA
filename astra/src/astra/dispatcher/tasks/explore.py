@@ -31,7 +31,23 @@ from astra.dispatcher.tasks.common import (
     write_graph_snapshot_reference,
 )
 from astra.dispatcher.workers.registry import get_driver
+
+# V8 负结果一等公民：从星记描述推断 fact kind——"此路不通/已穷尽/无结果"类
+# 发现标记为 negative，焦点裁剪时加权保活（防同类死路被反复开航向）。
+_NEGATIVE_RE = re.compile(
+    r"(?i)(此路不通|已穷尽|无结果|未发现|不存在|已排除|dead.?end|exhausted|"
+    r"no.?result|not.?found|ruled.?out|deadend|穷尽|排除|无可用|无有效|zero.?hit)"
+)
+
+
+def _infer_fact_kind(description: str) -> str:
+    """正/负结果自动分流：负面结论 → negative kind（与 regular 同权存储）。"""
+    if _NEGATIVE_RE.search(description or ""):
+        return "negative"
+    return "regular"
+
 from astra.server.models import Intent, ProjectDetail
+import re
 
 LOG = logging.getLogger(__name__)
 
@@ -334,6 +350,7 @@ def run_explore_task(
                 confidence=confidence,
                 evidence=evidence,
                 challenged=(note == "accepted"),
+                kind=_infer_fact_kind(description),
             )
         if did_timeout(first):
             LOG.warning(

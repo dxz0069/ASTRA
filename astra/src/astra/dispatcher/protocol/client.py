@@ -116,12 +116,15 @@ class ASTRAClient:
         confidence: str = "medium",
         evidence: str | None = None,
         challenged: bool = False,
+        kind: str = "regular",
     ) -> ApiResult:
         body: dict[str, Any] = {"worker": worker, "description": description, "confidence": confidence}
         if evidence:
             body["evidence"] = evidence
         if challenged:
             body["challenged"] = True
+        if kind != "regular":
+            body["kind"] = kind
         return self._request_json(
             "POST",
             f"/projects/{project_id}/intents/{intent_id}/conclude",
@@ -195,3 +198,16 @@ class ASTRAClient:
         with self._sessions_lock:
             self._sessions[threading.get_ident()] = session
         return session
+
+    def _remove_session(self) -> None:
+        """按当前线程 ident 注销并关闭其 Session（P1-2：修复 _sessions 只增不减泄漏）。
+
+        HeartbeatLease 每个任务新建心跳线程并在其中调用 client 接口（_session()
+        会在线程 ident 下注册 Session），线程结束后 Session 残留在 _sessions 里；
+        长跑进程字典无线膨胀。心跳线程退出时调用本方法回收自身 Session。
+        """
+        ident = threading.get_ident()
+        with self._sessions_lock:
+            session = self._sessions.pop(ident, None)
+        if session is not None:
+            session.close()

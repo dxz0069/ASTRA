@@ -835,6 +835,21 @@ class DispatcherLoop:
             current_status = inactive_status_by_id.get(project_id)
             if current_status != status:
                 self._inactive_cleanup_done.pop(project_id, None)
+        # P1-7：清理已从服务端消失（删除）的项目在调度器字典中的残留键，防跨项目
+        # 无界增长。注意判据用"服务端项目列表"而非 runtime_project_ids——后者只含
+        # 本实例派发过的活跃项目，按它清理会把"活跃但暂未派发"项目的 reason
+        # checkpoint 逐周期驱逐，_reason_trigger 误判 initial 导致反复重派 reason
+        # 任务（回归）；项目删除后其键才是真正的死数据，驱逐零风险。
+        known_ids = {summary.id for summary in summaries}
+        for project_id in list(self.reason_checkpoints):
+            if project_id not in known_ids:
+                self.reason_checkpoints.pop(project_id, None)
+        for key in list(self.worker_rejected_until):
+            if key[0] not in known_ids:
+                self.worker_rejected_until.pop(key, None)
+        for scope in list(self._log_state):
+            if scope.startswith("project:") and scope.split(":", 2)[1] not in known_ids:
+                self._log_state.pop(scope, None)
 
     def _cancel_inactive_tasks(self, summaries: list[ProjectSummary]) -> None:
         status_by_project = {summary.id: summary.status for summary in summaries}

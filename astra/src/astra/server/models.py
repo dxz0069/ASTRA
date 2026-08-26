@@ -196,6 +196,9 @@ class ConcludeRequest(BaseModel):
     evidence: str | None = None
     # 该发现是否经过了双星质询（低置信巡猎的 challenge 阶段跑过才置 True）
     challenged: bool = False
+    # V8 负结果一等公民："negative"=此路不通/方向已穷尽（与 regular 同等存储，
+    # 焦点裁剪时加权保活，防同类死路被反复开航向）
+    kind: str = "regular"
 
     @field_validator("worker", "description")
     @classmethod

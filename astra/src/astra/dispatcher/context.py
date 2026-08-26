@@ -135,6 +135,10 @@ def build_focus_fact_ids(project: ProjectDetail, budget: int) -> list[str]:
         semantic = _semantic_score(fact.id, fact.description)
         recency = index / total  # 0..1，越新越高
         chain = _CHAIN_BONUS.get(chain_depths.get(fact.id, 0), 0.0)
+        # V8 负结果一等公民：已穷尽的方向（negative）在焦点中保活——防止
+        # 同类死路被反复开航向（Cairn_X 实测靠关闭账本避免重复劳动）
+        if fact.kind == "negative":
+            chain += 0.8
         if _is_critical(fact):
             pinned.add(fact.id)  # 钉住：预算外保底，防关键发现被裁剪丢失
         scored.append((relevance * 2.0 + semantic * 2.0 + recency + chain, fact.id))
