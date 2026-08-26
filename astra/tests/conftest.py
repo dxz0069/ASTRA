@@ -131,9 +131,10 @@ class FakeClient:
         confidence: str = "medium",
         evidence: str | None = None,
         challenged: bool = False,
+        kind: str = "regular",
     ) -> ApiResult:
         self.concluded.append((project_id, intent_id, worker, description))
-        return ApiResult(200, {"fact": {"id": "f002", "confidence": confidence, "evidence": evidence, "challenged": challenged}})
+        return ApiResult(200, {"fact": {"id": "f002", "confidence": confidence, "evidence": evidence, "challenged": challenged, "kind": kind}})
 
     def complete(self, project_id: str, from_ids: list[str], description: str, worker: str) -> ApiResult:
         self.completed.append((project_id, from_ids, description, worker))

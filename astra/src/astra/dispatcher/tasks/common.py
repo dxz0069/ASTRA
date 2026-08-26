@@ -376,6 +376,7 @@ def write_conclude_result(
     confidence: str = "medium",
     evidence: str | None = None,
     challenged: bool = False,
+    kind: str = "regular",
 ) -> str:
     return write_conclude_result_with_fact_id(
         client,
@@ -389,6 +390,7 @@ def write_conclude_result(
         confidence=confidence,
         evidence=evidence,
         challenged=challenged,
+        kind=kind,
     ).status
 
 
