@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 
 from astra.dispatcher.config import DispatchConfig, WorkerConfig
@@ -47,7 +48,6 @@ def _infer_fact_kind(description: str) -> str:
     return "regular"
 
 from astra.server.models import Intent, ProjectDetail
-import re
 
 LOG = logging.getLogger(__name__)
 
