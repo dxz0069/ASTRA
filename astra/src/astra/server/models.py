@@ -2,18 +2,22 @@ from __future__ import annotations
 
 from typing import Literal
 
+from typing import Literal
+
 from pydantic import BaseModel, Field, field_validator
 
 
 class Settings(BaseModel):
-    intent_timeout: int = Field(ge=5)
-    reason_timeout: int = Field(ge=5)
+    # 安全审计 C3：加上限——intent_timeout=999999999 会让 expire_workers 永不生效
+    # （全服务租约瘫痪 DoS），5 是下限（现有校验），3600 是合理上限（1小时）
+    intent_timeout: int = Field(ge=5, le=3600)
+    reason_timeout: int = Field(ge=5, le=3600)
 
 
 class Fact(BaseModel):
     id: str
     description: str
-    kind: str = "regular"
+    kind: Literal["regular", "summary", "negative"] = "regular"
     confidence: str = "medium"
     evidence: str | None = None
     challenged: bool = False
@@ -51,7 +55,7 @@ class ProjectReason(BaseModel):
 
 class ProjectMeta(BaseModel):
     id: str
-    title: str
+    title: str = Field(max_length=4096)
     status: Literal["active", "stopped", "completed"]
     bootstrap_enabled: bool
     created_at: str
@@ -88,7 +92,7 @@ class CreateHintInline(BaseModel):
 
 class CreateFactRequest(BaseModel):
     description: str
-    kind: str = "regular"
+    kind: Literal["regular", "summary", "negative"] = "regular"
     creator: str = "system"
 
     @field_validator("description")
@@ -101,15 +105,15 @@ class CreateFactRequest(BaseModel):
 
 
 class ArchiveFactsRequest(BaseModel):
-    fact_ids: list[str]
+    fact_ids: list[str] = Field(max_length=500)
 
 
 class CreateProjectRequest(BaseModel):
     title: str
-    origin: str
-    goal: str
+    origin: str = Field(max_length=65536)
+    goal: str = Field(max_length=65536)
     bootstrap_enabled: bool = True
-    hints: list[CreateHintInline] | None = None
+    hints: list[CreateHintInline] | None = Field(default=None, max_length=200)
 
     @field_validator("title", "origin", "goal")
     @classmethod
@@ -190,15 +194,15 @@ class ReasonClaimRequest(BaseModel):
 
 
 class ConcludeRequest(BaseModel):
-    worker: str
-    description: str
+    worker: str = Field(max_length=256)
+    description: str = Field(max_length=65536)
     confidence: str = "medium"
     evidence: str | None = None
     # 该发现是否经过了双星质询（低置信巡猎的 challenge 阶段跑过才置 True）
     challenged: bool = False
     # V8 负结果一等公民："negative"=此路不通/方向已穷尽（与 regular 同等存储，
     # 焦点裁剪时加权保活，防同类死路被反复开航向）
-    kind: str = "regular"
+    kind: Literal["regular", "summary", "negative"] = "regular"
 
     @field_validator("worker", "description")
     @classmethod
