@@ -135,18 +135,43 @@ COPY ./container/AGENTS.md /home/kali/workspace/AGENTS.md
 COPY ./container/AGENTS.md /home/kali/workspace/CLAUDE.md
 COPY ./container/knowledge /home/kali/workspace/knowledge
 
-# V9 体积治理（3GB 纪律线，裸 fs 8.6G→目标 ~7.5G）：
-# - 砍 OpenCL 整链 hashcat→pocl→clang-21→llvm-21（776M；容器无 GPU，pocl 只是 CPU 模拟，
-#   john+z3 全覆盖 f2 爆破场景，历届得分从未依赖 hashcat）
+# V9 体积治理（托管 3G 上传硬限，裸 fs 8.6G→目标 ~7G）：
+# - 砍 OpenCL 整链 hashcat→pocl→clang-21→llvm-21（~776M；容器无 GPU，pocl 只是 CPU 模拟，
+#   john+z3 全覆盖 f2 爆破场景，历届得分从未依赖 hashcat）。
+#   教训：apt purge 带通配名时有不存在项会整批中止且被 || true 吞掉——首版静默失败，
+#   OpenCL 链全留在镜像里。改为 dpkg 查实名再 purge。
+# - UPX 压 Go 巨型二进制（cloudfox 311M/nuclei 122M/aliyun 90M/katana 46M/dalfox 33M/
+#   kerbrute 8M → 合计省 ~380M；压后逐个 --version 验证，失败自动还原）
+# - Awesome-POC 砍"网络设备漏洞"（94M，两靶场均无路由器/交换机题）
+# - tencentcloud SDK 只留常用服务目录（全量 356M 装了 200+ 服务的 API 模型）
 # - chisel 只留 linux_amd64/linux_arm64（隧道目标只会是 Linux）
 # - 后装包的 doc/man/locale 复扫（layer1 清过，工具层又装回来一部分）
-RUN sudo apt purge -y hashcat pocl* clang-21* llvm-21* libclang-* 2>/dev/null || true; \
-    sudo apt autoremove -y 2>/dev/null || true; \
-    sudo rm -rf /usr/share/chisel-common-binaries/chisel_*_darwin_* \
+RUN set -e; purge_list=$(dpkg -l 2>/dev/null | grep -E "^ii\s+(hashcat|pocl|clang|llvm)-?[0-9]*" | awk '{print $2}' || true); \
+    if [ -n "$purge_list" ]; then sudo apt-get purge -y $purge_list || true; sudo apt-get autoremove -y || true; fi; \
+    for bin in cloudfox nuclei aliyun katana dalfox kerbrute; do \
+      if [ -f "/usr/local/bin/$bin" ]; then \
+        sudo cp "/usr/local/bin/$bin" "/tmp/$bin.bak"; \
+        if sudo upx -9 --lzma -q "/usr/local/bin/$bin" >/dev/null 2>&1 && "/usr/local/bin/$bin" --version >/dev/null 2>&1 || "/usr/local/bin/$bin" -h >/dev/null 2>&1 || "/usr/local/bin/$bin" help >/dev/null 2>&1; then \
+          echo "upx ok: $bin"; sudo rm -f "/tmp/$bin.bak"; \
+        else \
+          echo "upx failed, restore: $bin"; sudo cp "/tmp/$bin.bak" "/usr/local/bin/$bin"; sudo rm -f "/tmp/$bin.bak"; \
+        fi; \
+      fi; \
+    done; \
+    sudo rm -rf "/home/kali/pocs/Awesome-POC/网络设备漏洞" \
+                /usr/share/chisel-common-binaries/chisel_*_darwin_* \
                 /usr/share/chisel-common-binaries/chisel_*_openbsd_* \
                 /usr/share/chisel-common-binaries/chisel_*_linux_386 \
                 /usr/share/doc /usr/share/man /usr/share/locale \
-                /var/cache/apt /var/log/*.log /tmp/* 2>/dev/null; \
-    sudo apt clean 2>/dev/null || true; true
+                /var/cache/apt /var/log/*.log /tmp/* 2>/dev/null || true; \
+    if cd /home/kali/.local/lib/python3.14/site-packages/tencentcloud 2>/dev/null; then \
+      for d in */; do \
+        case "${d%/}" in \
+          common|cvm|vpc|scf|cam|sts|cls|monitor|cdb|redis|mysql|ckafka|clb|ssl|cdn|dnspod|tcr|cr|as|tag|organization) ;; \
+          *) sudo rm -rf "$d" 2>/dev/null || true ;; \
+        esac; \
+      done; \
+    fi; \
+    sudo apt-get clean 2>/dev/null || true; true
 
 WORKDIR /home/kali/workspace
