@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 import os
+import secrets as _secrets
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -45,7 +46,8 @@ async def auth_middleware(request: Request, call_next):
         auth_header = request.headers.get("authorization", "")
         api_key_header = request.headers.get("x-api-key", "")
         provided = auth_header.removeprefix("Bearer ").strip() or api_key_header.strip()
-        if provided != _AUTH_TOKEN:
+        # 安全审计：constant-time 比较——普通 != 会泄露 token 长度/前缀（计时攻击）
+        if not _secrets.compare_digest(provided, _AUTH_TOKEN):
             return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
     return await call_next(request)
 
