@@ -43,6 +43,32 @@ def _dsh_home(worker_name: str) -> str:
     return str(Path(_dsh_home_root()) / worker_name)
 
 
+def _cleanup_stale_engine_files(keep_dbs: int = 5) -> None:
+    """文件系统审计：清理旧引擎 db 文件与含密钥的 dispatch yaml。
+
+    每次引擎重启产生新 uuid db（含 WAL/SHM），自愈重启频繁时 temp 目录膨胀。
+    保留最近 keep_dbs 个（正在使用的排最近），超过的删除。
+    dispatch yaml 含 API key 明文，进程退出后必须删除。
+    """
+    temp_dir = Path(tempfile.gettempdir())
+    # 旧 db 文件（按 mtime 排序，保留最新几个）
+    db_files = sorted(temp_dir.glob("astra-runner-*.db*"), key=lambda p: p.stat().st_mtime)
+    for old in db_files[:-keep_dbs * 3]:  # ×3 因为每个 db 可能带 .db-wal/.db-shm
+        try:
+            old.unlink(missing_ok=True)
+        except OSError:
+            pass
+    # 含密钥的 dispatch yaml（超过 1 小时的）
+    import time as _time
+    cutoff = _time.time() - 3600
+    for yaml_file in temp_dir.glob("astra-dispatch-*.yaml"):
+        try:
+            if yaml_file.stat().st_mtime < cutoff:
+                yaml_file.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 class AstraDaemon:
     """server + dispatcher 进程单例。"""
 
@@ -102,6 +128,14 @@ class AstraDaemon:
                 time.sleep(0.5)  # 还活着，继续等
             except Exception:  # noqa: BLE001
                 break  # 连不上 = 端口已释放
+        # 文件系统审计：清理本次引擎的 dispatch yaml（含 API key）与旧 db 文件
+        if self._dispatch_config is not None:
+            try:
+                self._dispatch_config.unlink(missing_ok=True)
+            except OSError:
+                pass
+            self._dispatch_config = None
+        _cleanup_stale_engine_files()
 
     def ensure_started(self) -> None:
         if os.environ.get("ASTRA_EXTERNAL_ENGINE") == "1":
@@ -118,6 +152,7 @@ class AstraDaemon:
             self._start_locked()
 
     def _start_locked(self) -> None:
+        _cleanup_stale_engine_files()
         self._cleanup_dsh_home()
         db_path = Path(tempfile.gettempdir()) / f"astra-runner-{uuid.uuid4().hex[:8]}.db"
         LOG.info("starting astra server db=%s", db_path)
