@@ -18,6 +18,16 @@ DISPATCH_PID=0
 DISPATCH_LOG=""
 fail_count=0
 
+# 文件系统审计：旧日志清理（保留最近 10 个 server/dispatch 日志）
+cleanup_logs() {
+  local dir="$1"
+  for prefix in astra-server astra-dispatch; do
+    ls -t "$dir"/${prefix}-*.log 2>/dev/null | tail -n +11 | while read -r f; do
+      rm -f "$f"
+    done
+  done
+}
+
 log(){ echo "[supervisor] $(date '+%H:%M:%S') $*"; }
 
 # 按命令行杀 ASTRA 引擎进程（Windows 下 kill PID 可能留下 uv 链孤儿）
@@ -27,6 +37,7 @@ kill_engine(){
 
 start_server(){
   local ts; ts=$(date +%Y%m%d-%H%M%S)
+  cleanup_logs "$LOG_DIR"
   local out="$LOG_DIR/astra-server-$ts.log"
   log "starting server port=$SERVER_PORT db=$DB_PATH log=$out"
   ( cd "$PROJECT_DIR/astra" && uv run astra serve --port "$SERVER_PORT" --db-path "$DB_PATH" --no-access-log > "$out" 2>&1 ) &
