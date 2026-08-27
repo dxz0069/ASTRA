@@ -1,3 +1,4 @@
+import os
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
 from datetime import datetime
@@ -107,6 +108,13 @@ def _export_yaml(conn, project_id: str) -> str:
     if intent_list:
         data["intents"] = intent_list
 
+    # 安全审计 M4：大图防护——事实数超阈值时拒绝导出（防 yaml.dump 全量序列化 OOM）
+    max_export_facts = int(os.environ.get("ASTRA_MAX_EXPORT_FACTS", "10000"))
+    if len(facts) > max_export_facts:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Project too large to export ({len(facts)} facts > {max_export_facts} limit)",
+        )
     return yaml.dump(data, allow_unicode=True, default_flow_style=False, sort_keys=False)
 
 
