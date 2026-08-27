@@ -124,7 +124,7 @@ class AstraDaemon:
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
             try:
-                requests.get(f"{ASTRA_SERVER_URL}/projects", timeout=1)
+                requests.get(f"{ASTRA_SERVER_URL}/projects", headers=_auth_headers(),  timeout=1)
                 time.sleep(0.5)  # 还活着，继续等
             except Exception:  # noqa: BLE001
                 break  # 连不上 = 端口已释放
@@ -162,7 +162,7 @@ class AstraDaemon:
             if self._server.poll() is not None:
                 raise RuntimeError(f"astra server exited early: {self._server.returncode}")
             try:
-                requests.get(f"{ASTRA_SERVER_URL}/projects", timeout=2).raise_for_status()
+                requests.get(f"{ASTRA_SERVER_URL}/projects", headers=_auth_headers(),  timeout=2).raise_for_status()
                 break
             except Exception:  # noqa: BLE001
                 time.sleep(1)
@@ -547,6 +547,12 @@ def _engine_log_path() -> Path:
     return temp_dir / f"{_ENGINE_LOG_PREFIX}{stamp}.log"
 
 
+def _auth_headers() -> dict[str, str]:
+    """审计修复：服务端启用 ASTRA_AUTH_TOKEN 时引擎直连请求带 Bearer 头。"""
+    token = os.environ.get("ASTRA_AUTH_TOKEN", "")
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
 def _popen(argv: list[str]) -> subprocess.Popen:
     log_file = open(_engine_log_path(), "ab", buffering=0)
     return subprocess.Popen(
@@ -571,6 +577,7 @@ class LocalAstraEngine:
     def create_project(self, title: str, origin: str, goal: str) -> str:
         response = requests.post(
             f"{ASTRA_SERVER_URL}/projects",
+            headers=_auth_headers(),
             json={
                 "title": title,
                 "origin": origin,
@@ -587,6 +594,7 @@ class LocalAstraEngine:
         """注入指引（hint）：供 runner 把平台 hint 注入 ASTRA 项目，星探下次读取吸收。"""
         response = requests.post(
             f"{ASTRA_SERVER_URL}/projects/{project_id}/hints",
+            headers=_auth_headers(),
             json={"content": content, "creator": "astra.runner"},
             timeout=15,
         )
@@ -597,7 +605,7 @@ class LocalAstraEngine:
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
             try:
-                response = requests.get(f"{ASTRA_SERVER_URL}/projects/{project_id}", timeout=10)
+                response = requests.get(f"{ASTRA_SERVER_URL}/projects/{project_id}", headers=_auth_headers(),  timeout=10)
                 response.raise_for_status()
                 status = response.json()["project"]["status"]
                 if status in PROJECT_COMPLETED_STATUSES:
@@ -609,13 +617,13 @@ class LocalAstraEngine:
         return False
 
     def list_fact_descriptions(self, project_id: str) -> list[str]:
-        response = requests.get(f"{ASTRA_SERVER_URL}/projects/{project_id}", timeout=10)
+        response = requests.get(f"{ASTRA_SERVER_URL}/projects/{project_id}", headers=_auth_headers(),  timeout=10)
         response.raise_for_status()
         return [fact["description"] for fact in response.json().get("facts", [])]
 
     def delete_project(self, project_id: str) -> None:
         try:
-            requests.delete(f"{ASTRA_SERVER_URL}/projects/{project_id}", timeout=10)
+            requests.delete(f"{ASTRA_SERVER_URL}/projects/{project_id}", headers=_auth_headers(),  timeout=10)
         except requests.RequestException:
             pass
 
@@ -652,7 +660,7 @@ class LocalAstraEngine:
 
     def list_active_projects(self) -> list[dict]:
         """对账扫描（R5 修复清单 1b）：引擎侧 active 项目 [{id, created_at}]。"""
-        response = requests.get(f"{ASTRA_SERVER_URL}/projects", timeout=15)
+        response = requests.get(f"{ASTRA_SERVER_URL}/projects", headers=_auth_headers(),  timeout=15)
         response.raise_for_status()
         payload = response.json()
         items = payload if isinstance(payload, list) else payload.get("projects", [])
@@ -667,7 +675,8 @@ class LocalAstraEngine:
         try:
             response = requests.post(
                 f"{ASTRA_SERVER_URL}/projects/{project_id}/facts",
-                json={"description": description, "kind": "regular", "creator": "astra-runner"},
+                headers=_auth_headers(),
+            json={"description": description, "kind": "regular", "creator": "astra-runner"},
                 timeout=15,
             )
             response.raise_for_status()
@@ -676,7 +685,7 @@ class LocalAstraEngine:
 
     def stats(self, project_id: str) -> dict[str, int]:
         """每题统计（评审量化口径）：星记数/指引数/驳回指引数。"""
-        response = requests.get(f"{ASTRA_SERVER_URL}/projects/{project_id}", timeout=10)
+        response = requests.get(f"{ASTRA_SERVER_URL}/projects/{project_id}", headers=_auth_headers(),  timeout=10)
         response.raise_for_status()
         payload = response.json()
         hints = payload.get("hints", [])

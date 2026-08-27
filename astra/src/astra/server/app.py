@@ -42,7 +42,10 @@ app = FastAPI(
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
-    if _AUTH_TOKEN and request.url.path.startswith("/api"):
+    # 审计修复（表述不符）：路由实际挂在根路径（/projects、/settings…），并无 /api
+    # 前缀——原 startswith("/api") 判断永不命中，认证是死代码。改为 token 设置时
+    # 保护全部路径（生产模式 docs 已禁用；/ 与 /static 属管理 UI，锁住符合预期）
+    if _AUTH_TOKEN:
         auth_header = request.headers.get("authorization", "")
         api_key_header = request.headers.get("x-api-key", "")
         provided = auth_header.removeprefix("Bearer ").strip() or api_key_header.strip()
@@ -54,12 +57,29 @@ async def auth_middleware(request: Request, call_next):
 
 @app.middleware("http")
 async def body_size_limit_middleware(request: Request, call_next):
+    # 审计修复①：畸形 content-length（非数字）原样 int() 会抛 500——改 400 拒收
     content_length = request.headers.get("content-length")
-    if content_length and int(content_length) > _MAX_BODY_SIZE:
-        return JSONResponse(
-            status_code=413,
-            content={"detail": f"Request body too large (max {_MAX_BODY_SIZE // 1024}KB)"},
-        )
+    if content_length:
+        try:
+            declared = int(content_length)
+        except ValueError:
+            return JSONResponse(status_code=400, content={"detail": "Malformed Content-Length"})
+        if declared > _MAX_BODY_SIZE:
+            return JSONResponse(
+                status_code=413,
+                content={"detail": f"Request body too large (max {_MAX_BODY_SIZE // 1024}KB)"},
+            )
+    # 审计修复②：chunked 传输无 content-length，原检查可绕过——实际读取时按上限
+    # 截断（有界读入并缓存 _body，下游 json() 复用缓存，防绕过防 OOM）
+    body = b""
+    async for chunk in request.stream():
+        body += chunk
+        if len(body) > _MAX_BODY_SIZE:
+            return JSONResponse(
+                status_code=413,
+                content={"detail": f"Request body too large (max {_MAX_BODY_SIZE // 1024}KB)"},
+            )
+    request._body = body
     return await call_next(request)
 
 
