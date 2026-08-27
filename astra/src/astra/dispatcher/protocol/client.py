@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 import logging
+import os
 import threading
 
 from pydantic import TypeAdapter
@@ -40,6 +41,12 @@ class ASTRAClient:
         self._local = threading.local()
         self._sessions: dict[int, requests.Session] = {}
         self._sessions_lock = threading.Lock()
+        # 审计修复：服务端启用 ASTRA_AUTH_TOKEN 时客户端自动带 Bearer 头
+        # （原客户端从不发送——认证一旦真正生效会把自家 dispatcher 全部 401）
+        self._auth_headers: dict[str, str] = {}
+        _token = os.environ.get("ASTRA_AUTH_TOKEN", "")
+        if _token:
+            self._auth_headers = {"Authorization": f"Bearer {_token}"}
 
     def close(self) -> None:
         with self._sessions_lock:
@@ -197,6 +204,8 @@ class ASTRAClient:
             return session
 
         session = requests.Session()
+        if self._auth_headers:
+            session.headers.update(self._auth_headers)
         adapter = HTTPAdapter(pool_connections=64, pool_maxsize=64, pool_block=False)
         session.mount("http://", adapter)
         session.mount("https://", adapter)

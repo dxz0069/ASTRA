@@ -305,3 +305,75 @@ def test_conclude_persists_challenged_flag(client: TestClient) -> None:
     assert detail["facts"][-1]["challenged"] is True
     exported = client.get(f"/projects/{project_id}/export?format=yaml").text
     assert "challenged: true" in exported
+
+
+# ---------------- 审计修复回归：认证覆盖面 / 请求体限制 ----------------
+
+def test_auth_token_protects_all_routes(client, monkeypatch) -> None:
+    """表述不符修复：路由挂在根路径，认证必须覆盖全部路径而非 startswith('/api')。"""
+    import astra.server.app as app_module
+
+    monkeypatch.setattr(app_module, "_AUTH_TOKEN", "secret-token-123")
+    # 无凭证 → 401（修复前：路径不含 /api 直接放行）
+    assert client.get("/projects").status_code == 401
+    # 错误凭证 → 401
+    assert client.get("/projects", headers={"Authorization": "Bearer wrong"}).status_code == 401
+    # 正确 Bearer → 200
+    assert client.get("/projects", headers={"Authorization": "Bearer secret-token-123"}).status_code == 200
+    # X-API-Key 等效通道 → 200
+    assert client.get("/projects", headers={"X-API-Key": "secret-token-123"}).status_code == 200
+    # 非 /api 前缀的导出端点同样受保护（修复前裸奔）
+    assert client.get("/projects/p000/export?format=yaml").status_code == 401
+
+
+def test_client_sends_auth_header_when_env_set(monkeypatch) -> None:
+    """dispatcher 客户端：ASTRA_AUTH_TOKEN 设置时自动带 Bearer（认证生效的前提）。"""
+    from astra.dispatcher.protocol.client import ASTRAClient
+
+    monkeypatch.setenv("ASTRA_AUTH_TOKEN", "tok-abc")
+    c = ASTRAClient("http://127.0.0.1:8000")
+    assert c._session().headers.get("Authorization") == "Bearer tok-abc"
+
+    monkeypatch.delenv("ASTRA_AUTH_TOKEN")
+    c2 = ASTRAClient("http://127.0.0.1:8000")
+    assert "Authorization" not in c2._session().headers
+    c.close()
+    c2.close()
+
+
+def test_body_limit_bounded_read_blocks_oversized_stream(client) -> None:
+    """chunked 绕过修复：无 content-length 的超大流式请求体也必须被 413 截断。"""
+    import asyncio
+
+    from astra.server import app as app_module
+
+    received: list = []
+
+    async def call_next(request):
+        received.append(await request.body())
+        from starlette.responses import JSONResponse
+
+        return JSONResponse({"ok": True})
+
+    class FakeStreamRequest:
+        def __init__(self, chunks):
+            self._chunks = chunks
+            self.headers = {}
+            self._body = None
+            self.stream = self._stream
+
+        async def _stream(self):
+            for chunk in self._chunks:
+                yield chunk
+
+        async def body(self):
+            return self._body  # 模拟 Starlette Request.body()：命中 _body 缓存
+
+    small = FakeStreamRequest([b"x" * 1024])
+    response = asyncio.run(app_module.body_size_limit_middleware(small, call_next))
+    assert response.status_code == 200
+    assert received[-1] == b"x" * 1024  # 有界读入并缓存 _body，下游拿到完整体
+
+    big = FakeStreamRequest([b"x" * 1024] * 4096)  # 4MB > 2MB 上限，无 content-length
+    response = asyncio.run(app_module.body_size_limit_middleware(big, call_next))
+    assert response.status_code == 413
