@@ -496,6 +496,76 @@ def test_run_benchmark_defer_resumes_same_project() -> None:
     assert results[0].project_id is not None
 
 
+def test_run_benchmark_multiflag_partial_defers_for_remaining() -> None:
+    """V9 多旗收割：flag_count>已收旗数时 defer 回队续攻，不提前关题丢剩余旗。"""
+    challenges = [FakeChallenge("mflag", total_score=1200, flag_count=4)]
+
+    class PartialEngine(FakeEngine):
+        """永不归航；星图第 1 窗口吐 1 旗、第 2 窗口起吐 2 旗（部分进展）。"""
+
+        def __init__(self, flags_by_project):
+            super().__init__(flags_by_project)
+            self.windows = 0
+
+        def list_fact_descriptions(self, project_id: str) -> list[str]:
+            n = min(2, self.windows) if self.windows else 1
+            return [f"found flag flag{{m{i}_part}}" for i in range(1, n + 1)]
+
+        def wait_project(self, project_id: str, timeout_seconds: float) -> bool:
+            return False  # 不归航：逼 defer 路径
+
+        def start(self) -> None:
+            super().start()
+            self.windows += 1
+
+    engines: list[PartialEngine] = []
+
+    def factory():
+        e = PartialEngine({})
+        engines.append(e)
+        return e
+
+    client = FakeClient(challenges, flags={"mflag": ["flag{m1_part}"]})
+    results = run_benchmark(
+        client, factory,
+        challenge_timeout_seconds=0.2, flag_poll_seconds=0.05,
+        defer_after_seconds=0.2,
+    )
+    r = results[0]
+    # 有正确旗（1 旗）且 flag_count=4 未收满 → 必须 defer 而非关题；预算=2+2*1=4
+    assert r.flags_correct >= 1
+    assert r.defer_count >= 1
+    # 多旗 defer 回队：同题被 start 多次（首攻 + defer 后续攻）
+    assert client.started.count("mflag") >= 2
+
+
+def test_run_benchmark_multiflag_closes_when_all_collected() -> None:
+    """V9 多旗收割：旗收满（flags_correct ≥ flag_count）→ 正常关题不再 defer。"""
+    challenges = [FakeChallenge("mfull", total_score=400, flag_count=2)]
+    client = FakeClient(challenges, flags={"mfull": ["flag{alpha}", "flag{beta}"]})
+
+    class FullEngine(FakeEngine):
+        def wait_project(self, project_id: str, timeout_seconds: float) -> bool:
+            return False
+
+        def list_fact_descriptions(self, project_id: str) -> list[str]:
+            return ["found flag flag{alpha}", "found flag flag{beta}"]
+
+    def factory():
+        return FullEngine({"x": ["flag{a}", "flag{b}"]})
+
+    results = run_benchmark(
+        client, factory,
+        challenge_timeout_seconds=0.2, flag_poll_seconds=0.05,
+        defer_after_seconds=0.2,
+    )
+    r = results[0]
+    assert r.flags_correct == 2
+    # 旗收满：正常关题一次，不回队续攻
+    assert client.started.count("mfull") == 1
+    assert r.defer_count == 0
+
+
 def test_run_benchmark_records_first_flag_seconds() -> None:
     """首次正确提交记录 first_flag_seconds（评审'单高危漏洞发现时长'口径）。"""
     from astra_runner.runner import _submit_flag_safely

@@ -23,14 +23,17 @@ USER kali
 
 # 工具层（V2 能力层追加 jadx/apktool：Android 静态逆向——run 10089 两题 Android 因无反编译
 # 工具被迫走模拟器死路，FileBox 手写 DEX 解析器 6min；加层缓存失效属预期）
+# V9 弱项补强（托管雷达 f=二进制 6/13、a=Web 缺 PHP）：radare2+r2ghidra 反编译、
+# upx 脱壳、qemu-user 跨架构仿真（f2 固件/MCU）、php-cli（a 系源码审计/利用开发）、
+# ropper（f1 ROP 构造）
 RUN (sudo apt update || (sleep 5 && sudo apt update)) && \
     sudo apt install -y bsdextrautils npm jq iputils-ping sshpass ncat rlwrap \
     bloodyad coercer enum4linux-ng pwncat chisel-common-binaries \
     dirsearch yq krb5-user gitleaks naabu nikto netexec adb python3-pwntools \
-    jadx apktool && \
+    jadx apktool radare2 r2ghidra upx-ucl strace xxd php-cli qemu-user && \
     sudo apt clean && \
     sudo rm -rf /var/lib/apt/lists/* && \
-    pip3 install -i http://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn pymongo --break-system-packages
+    pip3 install -i http://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn pymongo ropper z3-solver --break-system-packages
 
 # playwright CLI（独立层：npm 用国内源直连 + 三次重试，失败不拖垮 apt 层）
 RUN for i in 1 2 3; do \

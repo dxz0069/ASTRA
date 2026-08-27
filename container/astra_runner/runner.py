@@ -41,6 +41,8 @@ DEFAULT_CHALLENGE_TIMEOUT_SECONDS = 30 * 60
 DEFAULT_FLAG_POLL_SECONDS = 5
 # 每题最多 defer（45 分钟无果放回队尾）次数——超过则关闭放弃，防无限轮转
 MAX_DEFER_PER_CHALLENGE = 2
+# V9 战果扩展预算封顶（多旗题每收一旗 +2 窗口，hard +1）
+MAX_DEFER_BUDGET_CAP = 8
 # V2-1③：单题 hint 成本上限（每次扣该题 10%，2 次=20%）
 MAX_HINTS_PER_CHALLENGE = 2
 # V2-2：尾段窗口（剩余<2h）优先重攻近失题
@@ -82,6 +84,7 @@ class ChallengeResult:
     transient_count: int = 0  # 自愈①：连续网络瞬断计数（超上限判死退出，防误匹配死循环）
     busy_count: int = 0  # 自愈④：槽位 busy 连击计数（指数退避用；漏定义曾致 SlotBusy 线程炸死）
     kb_deadend_texts: list[str] = field(default_factory=list)  # V5：同题型避坑提示（失败经验库注入）
+    flag_count: int = 0  # 平台题旗数（多旗题收割调度依据；0=未知按单旗处理）
 
 
 class TaskFinishedError(Exception):
@@ -327,6 +330,7 @@ def run_benchmark(
         if not code:
             continue
         result = ChallengeResult(unique_code=code, description=description)
+        result.flag_count = int(getattr(ch, "flag_count", 0) or 0)
         if skip_completed and getattr(ch, "is_completed", False):
             LOG.info("skip completed challenge code=%s", code)
             results[code] = result
@@ -451,7 +455,16 @@ def run_benchmark(
                 # 60 分钟无果：保留引擎项目进度，放回队列末尾（不标 done），
                 # 队列轮转后再续跑——避免死磕单题拖垮整轮吞吐
                 result.defer_count += 1
-                if result.defer_count >= MAX_DEFER_PER_CHALLENGE:
+                # V9 战果扩展预算：每收一旗 +2 窗口（多旗题还有油水就不放弃），
+                # hard 题 +1；星图已深（≥25 星记=有实质进展非空转）再 +1；
+                # 封顶 MAX_DEFER_BUDGET_CAP——零战果题维持原上限 2
+                budget = MAX_DEFER_PER_CHALLENGE + 2 * (result.flags_correct or 0)
+                if str(getattr(ch, "difficulty", "") or "").lower() == "hard":
+                    budget += 1
+                if result.facts_count >= 25:
+                    budget += 1
+                budget = min(budget, MAX_DEFER_BUDGET_CAP)
+                if result.defer_count >= budget:
                     # 达到 defer 上限：彻底放弃——删引擎项目并标 done（防重启重跑）
                     LOG.info(
                         "challenge give up code=%s defer=%s（达到上限，删除项目放弃）",
@@ -916,6 +929,9 @@ def _run_single_challenge(
         # V2-1④：hint 次数缓存感知——defer 前已购的 hint 不重购
         hint_taken = min(len(result.hint_texts), MAX_HINTS_PER_CHALLENGE)
         facts_at_hint1: int | None = None  # V2-1①：hint1 时的星记数（hint2 前对比是否产生新攻击面）
+        # V9 多旗收割：hint 门控从"零旗才买"改为"本窗口停滞即买"——多旗题卡在
+        # 2/6 时同样需要 hint 解锁下一旗（剩余旗的收益远大于 hint 扣分）
+        flags_at_window_start = len(result.flags_found)
         while time.monotonic() < deadline:
             fact_count: int | None = None
             try:
@@ -927,7 +943,8 @@ def _run_single_challenge(
                     _submit_flag_safely(client, code, flag, result, started_at)
             except Exception:  # noqa: BLE001 —— 引擎 API 偶发失败不中断等待
                 pass
-            if hint_eligible and not result.flags_found:
+            stalled_no_new_flag = len(result.flags_found) == flags_at_window_start
+            if hint_eligible and stalled_no_new_flag:
                 now = time.monotonic()
                 if hint_taken < 1 and now >= hint_trigger_at:
                     if _try_platform_hint(client, engine, code, project_id, result):
@@ -997,8 +1014,26 @@ def _run_single_challenge(
             pending = [flag for flag in flags if flag not in result.flags_found]
             for flag in pending:
                 _submit_flag_safely(client, code, flag, result, started_at)
-            if result.flags_found:
-                # 已部分解出（多 flag 题）：正常收尾关闭，不 defer
+            expected = result.flag_count or 1
+            remaining_flags = expected - result.flags_correct
+            if result.flags_found and remaining_flags <= 0:
+                # 旗已收满：正常收尾关闭
+                LOG.info("challenge closed all flags collected code=%s flags=%s", code, result.flags_found)
+                continue_flag_wait = False
+            elif result.flags_found and remaining_flags > 0 and defer_after_seconds > 0:
+                # V9 多旗收割：部分得手但旗未收满（b 系 4-6 旗大分题）——原逻辑
+                # 此处直接关题放弃剩余旗（b-02 六旗题单题曾漏上千分）。改为 defer
+                # 保留星图进度回队续攻；预算由 _work 按 flags_correct 扩展。
+                LOG.info(
+                    "challenge deferred for remaining flags code=%s flags=%s/%s（保留进度回队收割）",
+                    code, len(result.flags_found), expected,
+                )
+                project_gone = True
+                continue_flag_wait = False
+                status = "deferred"
+                return status
+            elif result.flags_found:
+                # 旗数未知（flag_count=0）但有斩获：保守收割——正常关题
                 LOG.info("challenge closed with partial flags code=%s flags=%s", code, result.flags_found)
                 continue_flag_wait = False
             else:
