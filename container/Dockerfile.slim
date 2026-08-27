@@ -135,4 +135,18 @@ COPY ./container/AGENTS.md /home/kali/workspace/AGENTS.md
 COPY ./container/AGENTS.md /home/kali/workspace/CLAUDE.md
 COPY ./container/knowledge /home/kali/workspace/knowledge
 
+# V9 体积治理（3GB 纪律线，裸 fs 8.6G→目标 ~7.5G）：
+# - 砍 OpenCL 整链 hashcat→pocl→clang-21→llvm-21（776M；容器无 GPU，pocl 只是 CPU 模拟，
+#   john+z3 全覆盖 f2 爆破场景，历届得分从未依赖 hashcat）
+# - chisel 只留 linux_amd64/linux_arm64（隧道目标只会是 Linux）
+# - 后装包的 doc/man/locale 复扫（layer1 清过，工具层又装回来一部分）
+RUN sudo apt purge -y hashcat pocl* clang-21* llvm-21* libclang-* 2>/dev/null || true; \
+    sudo apt autoremove -y 2>/dev/null || true; \
+    sudo rm -rf /usr/share/chisel-common-binaries/chisel_*_darwin_* \
+                /usr/share/chisel-common-binaries/chisel_*_openbsd_* \
+                /usr/share/chisel-common-binaries/chisel_*_linux_386 \
+                /usr/share/doc /usr/share/man /usr/share/locale \
+                /var/cache/apt /var/log/*.log /tmp/* 2>/dev/null; \
+    sudo apt clean 2>/dev/null || true; true
+
 WORKDIR /home/kali/workspace
