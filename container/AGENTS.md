@@ -101,8 +101,10 @@
 - 逆向校验算法 → 构造合法序列号/license 绕过；固件类 binwalk 解包；命令处理器试命令注入
 - **V9 工具链 SOP（镜像已装 radare2/r2ghidra/upx/qemu-user/strace）**：
   1. `file` 看架构 → 加壳先 `upx -d` 脱壳；`strings`/`xxd` 找线索
-  2. `r2 -A -q -c 'afl; pdf @main'` 定位校验函数 → **`pdg`（r2ghidra 反编译）读伪代码**
-     ——比读汇快一个量级，8 成校验器是"输入变换→与常量比对"，pdg 直接看算法
+  2. `r2 -A -q -c 'afl; pdf @main'` 定位校验函数 → **反编译读伪代码（比读汇快一个量级，
+     8 成校验器是"输入变换→与常量比对"，伪码直接看算法）**：rizin 的 Ghidra 级反编译
+     `rizin -q -c 'aaa; s main; pdg' ./binary`（首选）；r2 自带伪码 `r2 -q -c 'aaa; pdf @main'`
+     兜底
   3. 非 x86（ARM/MIPS 固件）：`qemu-arm ./binary`（`-L /usr/<triplet>` 挂 libc）用户态仿真跑起来，
      配 strace/gdb 观察校验路径；飞线 patch 用 r2 `-w` 写跳转
   4. 校验算法逆出来后本地写脚本枚举合法码（python z3 约束求解最快），喂给程序拿回凭证
