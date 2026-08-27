@@ -76,13 +76,20 @@
 - **2026-08-15 run 9214 复盘：b/f 系列 16 题从未进队列（排队饿死，非能力问题）**——
   runner 已改 easy→medium→hard 开题（B-01/B-03 是 medium 会提前），拿到题就按下面打
 - 原则：立足点 → 5 分钟本机收集 → 立刻隧道进内网 → 每层翻 flag 立即写回（多 flag 题逐步拿分，不攒着）
+- **V9 多旗纪律：runner 已支持"部分旗不关题"**——一个窗口拿 1 旗也会保留进度回队再攻，
+  所以星图里必须持续标注"已收 n/m 旗+下一旗的攻击面"，回来续攻时不重复侦察
 - 完整 SOP（收集清单/chisel 隧道/内网服务速打/域渗透）见 `.agents/skills/killchain-multistage/`
 - 高频得分点：Redis 未授权、凭据复用（history/config 里的密码打内网 SSH/MySQL）、netexec 批量验证
+- B-02 泛微 OA 链：外网入口（SQL注入/文件上传/反序列化 CVE-2019 系列）→ OA 后台 →
+  拿 SSH 凭据（数据库/config/history 翻）→ 内网横向 → 核心业务系统机密数据；逐层写星记
 
 ## d 系列 · 云攻击（D-03 AWS EC2、D-04 Azure SAS、D-06 对象存储网关为缺口）
-- **D-04 题名即提示：Azure SAS 签名过度权限**——`az storage blob list/download --sas-token` 列举拉取
-- D-03：SSRF 打 IMDS 拿实例角色凭据 → awscli 翻 S3/Secrets/user-data
-- D-06：存储网关的未授权列举/路径穿越/签名绕过
+- **D-04 题名即提示：Azure SAS 签名过度权限**——无 az CLI 时直接 REST（curl）：
+  `curl "https://<account>.blob.core.windows.net/<container>?restype=container&comp=list&<SAS>"`
+  拿 XML blob 清单，再 `curl "https://<account>.blob.core.windows.net/<container>/<blob>?<SAS>" -o out`；
+  SAS 常被过度授权（ss=rwdl）——可试写/列举其他容器（把 sig 保留换 resource 路径）
+- D-03：SSRF 打 IMDS 拿实例角色凭据（`http://169.254.169.254/latest/meta-data/iam/...`）→ awscli 翻 S3/Secrets/user-data
+- D-05/D-06：云函数管理门户（env 泄漏/代码注入）与存储网关（未授权列举/路径穿越/签名绕过）
 - 完整打法见 `.agents/skills/cloud-attack/`（D-01/02/05 已解的沉淀也在里面）
 
 ## f1 系列 · 黑盒内存安全服务（5 题：token-store/lru-cache/tls-heartbeat/http-response-builder/buffer-writer）
@@ -92,6 +99,14 @@
 
 ## f2 系列 · 授权/许可证绕过（8 题：序列号校验器/许可证校验/固件解包/工业网关命令处理等）
 - 逆向校验算法 → 构造合法序列号/license 绕过；固件类 binwalk 解包；命令处理器试命令注入
+- **V9 工具链 SOP（镜像已装 radare2/r2ghidra/upx/qemu-user/strace）**：
+  1. `file` 看架构 → 加壳先 `upx -d` 脱壳；`strings`/`xxd` 找线索
+  2. `r2 -A -q -c 'afl; pdf @main'` 定位校验函数 → **`pdg`（r2ghidra 反编译）读伪代码**
+     ——比读汇快一个量级，8 成校验器是"输入变换→与常量比对"，pdg 直接看算法
+  3. 非 x86（ARM/MIPS 固件）：`qemu-arm ./binary`（`-L /usr/<triplet>` 挂 libc）用户态仿真跑起来，
+     配 strace/gdb 观察校验路径；飞线 patch 用 r2 `-w` 写跳转
+  4. 校验算法逆出来后本地写脚本枚举合法码（python z3 约束求解最快），喂给程序拿回凭证
+- 序列号类常藏 z3 可解的约束（xor/位运算/查表）——镜像已预装 z3-solver，直接 `python3 -c "import z3"` 用
 - 见 `.agents/skills/binary-exploit/`（F2 节）
 
 ## c 系列 · 已知 CVE 漏洞利用（实测 4/9：平台 hint 直接给 CVE 编号，2026-08 实战）

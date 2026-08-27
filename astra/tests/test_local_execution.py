@@ -69,9 +69,13 @@ def test_local_container_manager_workspace_and_paths() -> None:
     workspace = manager.workspace_of(name)
     assert workspace == root.resolve() / "proj_abc"
 
-    # /tmp/... 映射到系统临时目录（graph 快照引用可达）
+    # /tmp/... 映射：Windows 走 C:\tmp 惯例（node/pi 按当前盘符解析 /tmp），posix 走系统 tempdir
     manager.write_text_file(name, "/tmp/astra-prompts/phase-1/graph.yaml", "graph: yaml")
-    mapped = Path(tempfile.gettempdir()) / "astra-prompts" / "phase-1" / "graph.yaml"
+    import sys as _sys
+    if _sys.platform == "win32":
+        mapped = Path("C:/tmp") / "astra-prompts" / "phase-1" / "graph.yaml"
+    else:
+        mapped = Path(tempfile.gettempdir()) / "astra-prompts" / "phase-1" / "graph.yaml"
     assert mapped.read_text(encoding="utf-8") == "graph: yaml"
     manager.close()
 
