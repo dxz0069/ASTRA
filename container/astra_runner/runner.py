@@ -1898,8 +1898,30 @@ def main(argv: list[str] | None = None) -> int:
     token = args.token or _env("BENCHMARK_TOKEN") or _env("TSEC_TOKEN")
     base_url = args.base_url or _env("BENCHMARK_BASE_URL") or _env("TSEC_BASE_URL")
     if not token or not base_url:
-        LOG.error("缺少 BENCHMARK_TOKEN / BENCHMARK_BASE_URL（或 TSEC_TOKEN / TSEC_BASE_URL）")
-        return 2
+        # 托管部署健壮性（08-28 部署超时复盘）：平台部署/验证阶段可能先起容器后注
+        # env（或注入晚于容器启动），原逻辑 2 秒退出 → 容器反复重启 → 部署探测永远
+        # 等不到存活信号。改为等待凭证就位（默认 15 分钟，ASTRA_CRED_WAIT_SECONDS
+        # 可调；--check/--once 本地用法不受影响——等不到最终仍以原错误码退出）
+        try:
+            wait_seconds = 0.0 if args.check else float(os.environ.get("ASTRA_CRED_WAIT_SECONDS", "900"))
+        except ValueError:
+            wait_seconds = 900.0
+        if wait_seconds > 0:
+            LOG.warning(
+                "缺少 BENCHMARK_TOKEN / BENCHMARK_BASE_URL（或 TSEC_TOKEN / TSEC_BASE_URL）——"
+                "等待环境注入（最长 %.0f 分钟，每 10s 复查）", wait_seconds / 60,
+            )
+            deadline = time.monotonic() + wait_seconds
+            while time.monotonic() < deadline:
+                time.sleep(10)
+                token = args.token or _env("BENCHMARK_TOKEN") or _env("TSEC_TOKEN")
+                base_url = args.base_url or _env("BENCHMARK_BASE_URL") or _env("TSEC_BASE_URL")
+                if token and base_url:
+                    LOG.info("凭证已就位（环境注入完成），继续启动")
+                    break
+        if not token or not base_url:
+            LOG.error("等待超时仍缺少 BENCHMARK_TOKEN / BENCHMARK_BASE_URL，放弃启动")
+            return 2
 
     if args.check:
         return _run_environment_check(token, base_url)
