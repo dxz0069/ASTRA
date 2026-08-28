@@ -337,11 +337,12 @@ def run_reason_task(
     export_yaml: str,
     worker: WorkerConfig,
     cancellation: TaskCancellation,
+    lease_token: str | None = None,
 ) -> str:
     driver = get_driver(worker.type)
     task_started = time.perf_counter()
     healthcheck_timeout = config.runtime.healthcheck_timeout
-    lease = HeartbeatLease.for_reason(client, project.project.id, worker.name, config.runtime.interval)
+    lease = HeartbeatLease.for_reason(client, project.project.id, worker.name, config.runtime.interval, lease_token)
     lease.start()
     try:
         container_name = container_manager.ensure_running(project.project.id)
@@ -550,7 +551,7 @@ def run_reason_task(
                     worker.name,
                 )
                 return "failed"
-            response = client.complete(project.project.id, data["from"], data["description"], worker.name)
+            response = client.complete(project.project.id, data["from"], data["description"], worker.name, lease_token)
             if response.status_code in (403, 404):
                 LOG.info("project became inactive during reason complete project=%s worker=%s", project.project.id, worker.name)
                 return "success"
@@ -684,4 +685,4 @@ def run_reason_task(
         return "success"
     finally:
         lease.stop()
-        best_effort_release_reason(client, project.project.id, worker.name)
+        best_effort_release_reason(client, project.project.id, worker.name, lease_token)

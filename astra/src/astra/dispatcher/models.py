@@ -15,6 +15,7 @@ class RunningTask:
     fact_count: int | None = None
     hint_count: int | None = None
     open_intent_count: int | None = None
+    lease_token: str | None = None  # 审计修复：reason 租约持有凭证（清理释放时携带）
 
 
 @dataclass(slots=True)

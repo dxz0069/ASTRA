@@ -60,6 +60,8 @@ class ProjectMeta(BaseModel):
     bootstrap_enabled: bool
     created_at: str
     reason: ProjectReason | None = None
+    # 审计修复（租约令牌）：仅 claim 响应填充下发；其余端点恒为 None（不回显）
+    reason_token: str | None = Field(default=None, max_length=128)
 
 
 class ProjectSummary(ProjectMeta):
@@ -170,6 +172,8 @@ class CreateIntentRequest(BaseModel):
 
 class HeartbeatRequest(BaseModel):
     worker: str
+    # 审计修复（租约令牌）：claim 下发的持有凭证；旧租约（token NULL）不强制
+    lease_token: str | None = Field(default=None, max_length=128)
 
     @field_validator("worker")
     @classmethod
@@ -224,6 +228,7 @@ class CompleteRequest(BaseModel):
     from_: list[str] = Field(alias="from", min_length=1)
     description: str
     worker: str
+    lease_token: str | None = Field(default=None, max_length=128)
 
     model_config = {"populate_by_name": True}
 

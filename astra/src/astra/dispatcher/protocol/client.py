@@ -93,18 +93,18 @@ class ASTRAClient:
             json={"worker": worker, "trigger": trigger},
         )
 
-    def reason_heartbeat(self, project_id: str, worker: str) -> ApiResult:
+    def reason_heartbeat(self, project_id: str, worker: str, lease_token: str | None = None) -> ApiResult:
         return self._request_json(
             "POST",
             f"/projects/{project_id}/reason/heartbeat",
-            json={"worker": worker},
+            json={"worker": worker, "lease_token": lease_token},
         )
 
-    def release_reason(self, project_id: str, worker: str) -> ApiResult:
+    def release_reason(self, project_id: str, worker: str, lease_token: str | None = None) -> ApiResult:
         return self._request_json(
             "POST",
             f"/projects/{project_id}/reason/release",
-            json={"worker": worker},
+            json={"worker": worker, "lease_token": lease_token},
         )
 
     def release(self, project_id: str, intent_id: str, worker: str) -> ApiResult:
@@ -159,11 +159,11 @@ class ASTRAClient:
             json={"fact_ids": fact_ids},
         )
 
-    def complete(self, project_id: str, from_ids: list[str], description: str, worker: str) -> ApiResult:
+    def complete(self, project_id: str, from_ids: list[str], description: str, worker: str, lease_token: str | None = None) -> ApiResult:
         return self._request_json(
             "POST",
             f"/projects/{project_id}/complete",
-            json={"from": from_ids, "description": description, "worker": worker},
+            json={"from": from_ids, "description": description, "worker": worker, "lease_token": lease_token},
         )
 
     def create_intent(self, project_id: str, from_ids: list[str], description: str, creator: str) -> ApiResult:

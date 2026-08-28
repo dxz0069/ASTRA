@@ -343,8 +343,8 @@ def project_allows_conclude_fallback(client: ASTRAClient, project_id: str, *, wo
     return False
 
 
-def best_effort_release_reason(client: ASTRAClient, project_id: str, worker_name: str) -> None:
-    response = client.release_reason(project_id, worker_name)
+def best_effort_release_reason(client: ASTRAClient, project_id: str, worker_name: str, lease_token: str | None = None) -> None:
+    response = client.release_reason(project_id, worker_name, lease_token)
     if not response.ok and response.status_code not in (403, 409):
         LOG.warning(
             "reason release failed project=%s worker=%s status=%s",

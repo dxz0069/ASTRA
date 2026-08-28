@@ -135,6 +135,11 @@ class PiDriver(WorkerDriver):
                 worker.env.get("PI_CODING_AGENT_DIR")
                 or Path(tempfile.gettempdir()) / "astra-pi" / worker.name
             )
+            # 审计修复（CWE-22）：规范化并拒绝显式遍历段（..）——worker.env 虽属受信
+            # 配置面，仍不放过路径逃逸写 models.json 的可能
+            base_dir = base_dir.resolve()
+            if ".." in base_dir.parts:
+                raise RuntimeError(f"PI_CODING_AGENT_DIR must not contain traversal segments: {base_dir}")
             base_dir.mkdir(parents=True, exist_ok=True)
             (base_dir / "sessions").mkdir(exist_ok=True)
             (base_dir / "models.json").write_text(self._models_json(worker), encoding="utf-8")

@@ -27,6 +27,19 @@ def main():
 @click.option("--access-log/--no-access-log", default=True, show_default=True, help="Enable Uvicorn access log")
 def serve(host: str, port: int, db_path: str, log_level: str, access_log: bool):
     """Start the ASTRA API server."""
+    # 审计修复（防误暴露）：绑定非回环地址但未设置 ASTRA_AUTH_TOKEN 时拒绝启动——
+    # 认证中间件在无 token 时完全放行，0.0.0.0 + 无 token = 全端点裸奔
+    import os as _os
+    import sys as _sys
+
+    loopback = host in ("127.0.0.1", "localhost", "::1")
+    if not loopback and not _os.environ.get("ASTRA_AUTH_TOKEN"):
+        click.echo(
+            "ERROR: binding non-loopback host without ASTRA_AUTH_TOKEN refuses to start "
+            "(API would be unauthenticated). Set ASTRA_AUTH_TOKEN or bind 127.0.0.1.",
+            err=True,
+        )
+        _sys.exit(2)
     db.configure(Path(db_path))
     from astra.server.app import app
 

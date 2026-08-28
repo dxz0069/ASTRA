@@ -1,3 +1,5 @@
+import secrets
+import sqlite3
 from fastapi import APIRouter, HTTPException
 
 from astra.server.db import get_conn
@@ -210,6 +212,13 @@ def update_project_status(project_id: str, body: UpdateProjectStatusRequest):
         return project_meta_from_row(updated)
 
 
+def _verify_lease_token(row: sqlite3.Row, provided: str | None) -> None:
+    """租约令牌校验：行内 token 存在时必须精确匹配（旧行 NULL 跳过=平滑过渡）。"""
+    stored = row["reason_token"] if "reason_token" in row.keys() else None
+    if stored and stored != (provided or ""):
+        raise HTTPException(403, "Invalid lease token for this reason lease")
+
+
 @router.post("/projects/{project_id}/reason/claim", response_model=ProjectMeta)
 def claim_project_reason(project_id: str, body: ReasonClaimRequest):
     with get_conn() as conn:
@@ -223,19 +232,24 @@ def claim_project_reason(project_id: str, body: ReasonClaimRequest):
             return project_meta_from_row(row)
 
         now = utcnow()
+        # 审计修复（CWE-284 租约令牌）：claim 下发随机持有凭证，心跳/释放/完成须携带
+        lease_token = secrets.token_hex(16)
         conn.execute(
             """
             UPDATE projects
             SET reason_worker = ?,
                 reason_trigger = ?,
                 reason_started_at = ?,
-                reason_last_heartbeat_at = ?
+                reason_last_heartbeat_at = ?,
+                reason_token = ?
             WHERE id = ?
             """,
-            (body.worker, body.trigger, now, now, project_id),
+            (body.worker, body.trigger, now, now, lease_token, project_id),
         )
         updated = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
-        return project_meta_from_row(updated)
+        meta = project_meta_from_row(updated)
+        meta.reason_token = lease_token  # 仅 claim 响应下发；其余端点不回显
+        return meta
 
 
 @router.post("/projects/{project_id}/reason/heartbeat", response_model=ProjectMeta)
@@ -249,6 +263,7 @@ def heartbeat_project_reason(project_id: str, body: HeartbeatRequest):
             raise HTTPException(409, "Project reason is not currently claimed")
         if current_worker != body.worker:
             raise HTTPException(409, f"Project reason is currently claimed by {current_worker}")
+        _verify_lease_token(row, body.lease_token)
 
         now = utcnow()
         conn.execute(
@@ -270,6 +285,7 @@ def release_project_reason(project_id: str, body: HeartbeatRequest):
             return project_meta_from_row(row)
         if current_worker != body.worker:
             raise HTTPException(409, f"Project reason is currently claimed by {current_worker}")
+        _verify_lease_token(row, body.lease_token)
 
         clear_project_reason(conn, project_id)
         updated = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
@@ -281,8 +297,22 @@ def complete_project(project_id: str, body: CompleteRequest):
     with get_conn() as conn:
         check_project_active(conn, project_id)
         expire_reason_leases(conn, project_id)
+        # 审计修复（CWE-284）：完成依据不得全为系统事实——origin 对每个项目必然存在，
+        # 纯 origin 完成等于零发现强制完成任意项目（审计实测的劫持原语）；
+        # 真实事实与 origin 混列不拦（模型自然引用起点属合法形态）
+        if all(fid in ("origin", "goal") for fid in body.from_):
+            raise HTTPException(422, "from_ cannot reference only system facts (origin/goal)")
         validate_facts_exist(conn, project_id, body.from_)
         validate_goal_not_in_sources(body.from_)
+        # 审计修复（CWE-284）：存在活跃 reason 租约时仅持有者可完成——
+        # expire_reason_leases 只清过期租约，活租约下他人 complete 会清空
+        # 租约并连锁取消在途任务（越权 DoS）
+        row = get_project_or_404(conn, project_id)
+        live_holder = row["reason_worker"]
+        if live_holder is not None and live_holder != body.worker:
+            raise HTTPException(403, f"Project reason lease is held by {live_holder}")
+        if live_holder is not None:
+            _verify_lease_token(row, body.lease_token)
 
         now = utcnow()
         iid = next_intent_id(conn, project_id)

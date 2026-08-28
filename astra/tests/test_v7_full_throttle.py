@@ -157,7 +157,7 @@ def test_intent_dispatch_count_column_and_claim_increment(tmp_path):
     adb.configure(tmp_path / "d.db")
     with adb.get_conn() as conn:
         conn.execute(
-            "INSERT INTO projects VALUES ('p1','t','active','2026-01-01',1,NULL,NULL,NULL,NULL)"
+            "INSERT INTO projects VALUES ('p1','t','active','2026-01-01',1,NULL,NULL,NULL,NULL,NULL)"
         )
         conn.execute(
             "INSERT INTO intents (id,project_id,description,creator,created_at) "
