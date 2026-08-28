@@ -1638,17 +1638,18 @@ def _close_challenge_quiet(client: BenchmarkClient, code: str) -> bool:
 
 
 def _watchdog_stalled() -> bool:
-    """自愈③a：全停检测——活跃题存在，但全部 dsh worker 会话文件超时无写入。
+    """自愈③a：全停检测——活跃题存在，但全部 claudecode worker 会话文件超时无写入。
 
-    会话目录按 worker 隔离（$TMP/astra-dsh/<worker>/sessions），任一文件新鲜即视为
-    系统在工作；全部陈旧且持续超过阈值才触发（避免把"长命令执行中"误判为停摆）。
+    CC 会话按 worker 隔离（$TMP/astra-claude/<worker>/projects/**/*.jsonl），
+    任一文件新鲜即视为系统在工作；全部陈旧且持续超过阈值才触发（避免把
+    "长命令执行中"误判为停摆）。
     """
     import glob as _glob
     import tempfile as _tempfile
 
     try:
         newest = 0.0
-        for f in _glob.glob(str(Path(_tempfile.gettempdir()) / "astra-dsh" / "*" / "sessions" / "*" / "*" / "*.zstd")):
+        for f in _glob.glob(str(Path(_tempfile.gettempdir()) / "astra-claude" / "*" / "projects" / "**" / "*.jsonl"), recursive=True):
             newest = max(newest, os.path.getmtime(f))
         if newest <= 0:
             return False  # 找不到会话（异常布局）不误杀
@@ -1746,7 +1747,7 @@ def _self_heal_restart(engine_factory=None) -> None:
     LOG.critical("watchdog: worker 会话 %.0f 分钟无写入，判定引擎停摆——自重启（第 %s 次）",
                  _WATCHDOG_STALL_SECONDS / 60, len(data["ts"]))
     # P0 修复：execv 前必须优雅关闭引擎子进程——否则旧 server 占 8000 端口，
-    # 新进程 exited early → 整轮报废；旧 dsh worker 成孤儿继续烧 token。
+    # 新进程 exited early → 整轮报废；旧 claude worker 成孤儿继续烧 token。
     # 注意：engine_factory() 返回 LocalAstraEngine（无 shutdown），必须直接
     # 调 AstraDaemon.instance().shutdown()——审计确认前一版是死代码（D1）。
     try:
@@ -1755,11 +1756,12 @@ def _self_heal_restart(engine_factory=None) -> None:
         LOG.info("watchdog: engine daemon shutdown complete before execv")
     except Exception as exc:  # noqa: BLE001
         LOG.warning("watchdog: daemon shutdown failed: %s（仍执行 execv）", exc)
-    # 再杀非 daemon 拉起的 dsh worker（_popen 未设进程组，用 pkill 兜底）
+    # 再杀非 daemon 拉起的 claude worker（_popen 未设进程组，用 pkill 兜底；
+    # 匹配 --dangerously-skip-permissions 而非裸 "claude"，避免误杀无关进程）
     if sys.platform != "win32":
         try:
             subprocess.run(
-                ["pkill", "-TERM", "-f", "dsh --profile headless"],
+                ["pkill", "-TERM", "-f", "dangerously-skip-permissions"],
                 capture_output=True, timeout=10,
             )
         except Exception:  # noqa: BLE001
@@ -1890,7 +1892,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--once", action="store_true", help="跑一轮后退出（默认循环直到任务结束）")
     parser.add_argument("--engine", default="local", choices=["local"], help="ASTRA 引擎模式（当前仅 local）")
     parser.add_argument("--watchdog", action="store_true", help="同时拉起模型健康 watchdog（403/配额秒级告警，2026-08 实测教训）")
-    parser.add_argument("--check", action="store_true", help="环境自检后退出（平台 API 连通 / dsh CLI / DSH patch / 引擎可启动）")
+    parser.add_argument("--check", action="store_true", help="环境自检后退出（平台 API 连通 / claude CLI / 舰队 env / 引擎可启动）")
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -1978,7 +1980,7 @@ def main(argv: list[str] | None = None) -> int:
 
     total_awarded = sum(r.awarded for r in results)
     total_flags = sum(r.flags_correct for r in results)
-    usage = collect_dsh_usage()
+    usage = collect_claude_usage()
     LOG.info("=== astra-runner 报告 ===")
     report: dict[str, Any] = {
         "challenges": [
@@ -2044,41 +2046,27 @@ def _run_environment_check(token: str, base_url: str) -> int:
         LOG.error("[FAIL] 平台 API 不可达 error=%s（检查 BENCHMARK_BASE_URL / 网络 / VPN）", exc)
         ok = False
 
-    # 2. 模型 CLI / dsh 组件（默认 dsh——与引擎 ASTRA_WORKER_TYPE 新默认一致）
-    if os.environ.get("ASTRA_WORKER_TYPE", "dsh") == "dsh":
-        dsh = shutil.which("dsh")
-        if dsh:
-            LOG.info("[PASS] dsh CLI 位于 %s", dsh)
-        else:
-            LOG.error("[FAIL] 未找到 dsh CLI（npm install -g @deepseek-ai/dsh，见 container/dsh/README.md）")
-            ok = False
-        from astra_runner_engine import AstraDaemon
-
-        patch = AstraDaemon._resolve_dsh_patch()
-        if os.path.exists(patch):
-            LOG.info("[PASS] DSH patch 存在 %s", patch)
-        else:
-            LOG.error("[FAIL] DSH patch 不存在 %s", patch)
-            ok = False
-        # 舰队预告：双 key = DS+GLM 混合 4 worker；单 key = 单 worker（渲染时再严格校验）
-        if os.environ.get("DEEPSEEK_API_KEY") and os.environ.get("ZHIPU_API_KEY"):
-            if os.environ.get("ASTRA_MIX_PROVIDERS", "auto") not in ("0", "false"):
-                LOG.info("[PASS] 模型舰队 = dsh 混合（deepseek-main + glm-main + glm-reason + deepseek-fallback）")
-            else:
-                LOG.info("[PASS] 模型舰队 = dsh 单 worker（ASTRA_MIX_PROVIDERS 已关闭混合）")
-        elif os.environ.get("DEEPSEEK_API_KEY"):
-            LOG.info("[PASS] 模型舰队 = dsh 单 worker（deepseek；注入 ZHIPU_API_KEY 可启用混合舰队）")
-        elif os.environ.get("ZHIPU_API_KEY"):
-            LOG.warning("[注意] 仅 ZHIPU_API_KEY：dsh 模式要求 DEEPSEEK_API_KEY（混合或单 DS），当前配置渲染会失败")
-        else:
-            LOG.error("[FAIL] 缺少 DEEPSEEK_API_KEY（dsh 模式必填；混合舰队另需 ZHIPU_API_KEY）")
-            ok = False
+    # 2. 模型 CLI / 舰队配置（claudecode——2026-08-28 起唯一路径，dsh 已移除）
+    if os.environ.get("ASTRA_WORKER_TYPE", "claudecode") != "claudecode":
+        LOG.error("[FAIL] ASTRA_WORKER_TYPE=%s 不受支持（dsh 已于 2026-08-28 移除，仅 claudecode）",
+                  os.environ.get("ASTRA_WORKER_TYPE"))
+        ok = False
+    claude = shutil.which("claude")
+    if claude:
+        LOG.info("[PASS] claude CLI 位于 %s", claude)
     else:
-        claude = shutil.which("claude")
-        LOG.info("[%s] claude CLI 位于 %s", "PASS" if claude else "FAIL", claude or "未找到")
-        if not claude:
-            ok = False
-        LOG.warning("[注意] ASTRA_WORKER_TYPE 已显式指定为 claudecode——默认/推荐路径是 dsh（run 9214 曾因回落 claudecode 退步），确认这是有意为之")
+        LOG.error("[FAIL] 未找到 claude CLI（npm install -g @anthropic-ai/claude-code）")
+        ok = False
+    auth_token = os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
+    if auth_token:
+        LOG.info("[PASS] ANTHROPIC_AUTH_TOKEN 已配置（%s 字符）", len(auth_token))
+    else:
+        LOG.error("[FAIL] 缺少 ANTHROPIC_AUTH_TOKEN（DeepSeek anthropic 兼容端点密钥）")
+        ok = False
+    model = os.environ.get("ANTHROPIC_MODEL", "deepseek-v4-flash")
+    base_url = os.environ.get("ANTHROPIC_BASE_URL", "https://api.deepseek.com/anthropic")
+    LOG.info("[PASS] 模型舰队 = claudecode（explore×%s + reason×1，%s @ %s）",
+             os.environ.get("ASTRA_EXPLORE_REPLICAS", "2"), model, base_url)
 
     # 3. 引擎可启动（server + dispatcher 拉起，含 worker env 校验）
     try:
@@ -2102,39 +2090,41 @@ def _run_environment_check(token: str, base_url: str) -> int:
     return 0 if ok else 1
 
 
-def collect_dsh_usage() -> dict[str, int]:
-    """汇总 $ASTRA_DSH_HOME/usage/astra-usage.jsonl 的 token 用量（dsh runner 逐任务写入）。
+def collect_claude_usage() -> dict[str, int]:
+    """汇总 claudecode worker 会话的 token 用量（CC 会话 jsonl 里每条 assistant
+    消息带 message.usage）。无会话时返回空 dict。
 
-    字段与 DSH TokenUsage 对齐（input/output/cacheRead/cacheWrite/reasoning，单位 token）；
-    billed input = input + cacheRead + cacheWrite（三者互斥）。无记录时返回空 dict。
+    billed input ≈ input_tokens + cache_read + cache_creation（anthropic 口径）。
     """
-    import os
-    import tempfile
+    import glob as _glob
+    import tempfile as _tempfile
 
-    dsh_home = os.environ.get("ASTRA_DSH_HOME") or str(Path(tempfile.gettempdir()) / "astra-dsh" / "deepseek-main")
-    usage_file = Path(dsh_home) / "usage" / "astra-usage.jsonl"
-    if not usage_file.is_file():
-        return {}
     total = {
         "inputTokens": 0,
         "outputTokens": 0,
         "cacheReadTokens": 0,
         "cacheWriteTokens": 0,
-        "reasoningTokens": 0,
     }
-    for line in usage_file.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = line.strip()
-        if not line:
-            continue
+    found = False
+    for f in _glob.glob(str(Path(_tempfile.gettempdir()) / "astra-claude" / "*" / "projects" / "**" / "*.jsonl"), recursive=True):
+        found = True
         try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
+            for line in Path(f).read_text(encoding="utf-8", errors="replace").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                usage = (record.get("message") or {}).get("usage") or {}
+                total["inputTokens"] += int(usage.get("input_tokens") or 0)
+                total["outputTokens"] += int(usage.get("output_tokens") or 0)
+                total["cacheReadTokens"] += int(usage.get("cache_read_input_tokens") or 0)
+                total["cacheWriteTokens"] += int(usage.get("cache_creation_input_tokens") or 0)
+        except OSError:
             continue
-        for key in total:
-            value = record.get(key)
-            if isinstance(value, (int, float)):
-                total[key] += int(value)
-    return total
+    return total if found else {}
 
 
 if __name__ == "__main__":
