@@ -11,7 +11,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 
 TaskType = Literal["reason", "explore", "bootstrap", "consolidate"]
-WorkerType = Literal["claudecode", "codex", "pi", "mock", "dsh"]
+# dsh（DeepSeek Harness）适配器已于 2026-08-28 移除：tsecbench 前十 0 家使用
+# （6 家 Claude Code/Agent SDK + 3 家自研），托管舰队统一 claudecode。
+WorkerType = Literal["claudecode", "codex", "pi", "mock"]
 CompletedAction = Literal["remove", "stop"]
 WorkerHealthcheckMode = Literal["startup_and_task", "startup_only", "disabled"]
 
@@ -32,10 +34,6 @@ WORKER_ENV_KEYS: dict[WorkerType, tuple[str, ...]] = {
         "PI_API_KEY",
         "PI_PROVIDER_API",
     ),
-    # DeepSeek Harness 无头模式：必填校验统一在 _validate_dsh_env（合并报
-    # DSH_MODEL + 凭据）。可选 DEEPSEEK_BASE_URL / ANTHROPIC_BASE_URL /
-    # DSH_PATCH / DSH_RESUME / DSH_HOME / DSH_PERMISSION_MODE
-    "dsh": (),
     "mock": (),
 }
 
@@ -233,8 +231,6 @@ class WorkerConfig(BaseModel):
             raise ValueError(f"worker {self.name} missing env keys: {', '.join(missing)}")
         if self.type == "pi":
             _validate_optional_positive_int_env(self.name, self.env, "PI_MODEL_CONTEXT_WINDOW")
-        if self.type == "dsh":
-            _validate_dsh_env(self.name, self.env)
         if self.type == "mock":
             resolve_mock_behavior(self.name, self.env)
         return self
@@ -309,31 +305,6 @@ def _validate_optional_positive_int_env(worker_name: str, env: dict[str, str], k
         raise ValueError(f"worker {worker_name} env {key} must be an integer") from exc
     if parsed <= 0:
         raise ValueError(f"worker {worker_name} env {key} must be greater than 0")
-
-
-def _validate_dsh_env(worker_name: str, env: dict[str, str]) -> None:
-    """dsh worker 凭据按 DSH_PROVIDER 分派：deepseek → DEEPSEEK_API_KEY；
-    anthropic → ANTHROPIC_AUTH_TOKEN（Anthropic Messages 协议，适配 Kimi /
-    DeepSeek /anthropic 兼容端点等）；zhipu → ZHIPU_API_KEY（智谱 coding
-    端点 chat-completions，GLM-5.3）。模型路由均由 container/dsh/ 扩展的
-    llm-pi-ai 路由提供。"""
-    provider = env.get("DSH_PROVIDER", "deepseek")
-    missing: list[str] = []
-    if not env.get("DSH_MODEL"):
-        missing.append("DSH_MODEL")
-    if provider == "anthropic":
-        if not env.get("ANTHROPIC_AUTH_TOKEN"):
-            missing.append("ANTHROPIC_AUTH_TOKEN")
-    elif provider == "deepseek":
-        if not env.get("DEEPSEEK_API_KEY"):
-            missing.append("DEEPSEEK_API_KEY")
-    elif provider == "zhipu":
-        if not env.get("ZHIPU_API_KEY"):
-            missing.append("ZHIPU_API_KEY")
-    else:
-        raise ValueError(f"worker {worker_name} DSH_PROVIDER must be deepseek, anthropic or zhipu, got {provider}")
-    if missing:
-        raise ValueError(f"worker {worker_name} missing env keys: {', '.join(missing)}")
 
 
 def validate_prompt_resources(prompt_group: str) -> None:

@@ -97,18 +97,21 @@ RUN ok=""; for idx in 1 2 3; do \
 COPY ./container/astra_runner /opt/astra-runner
 # V2-6 知识库（runner 按 /opt/knowledge/challenge-approaches.md 读取，ASTRA_KNOWLEDGE_FILE 可覆盖）
 COPY ./container/knowledge /opt/knowledge
-# ASTRA 定制的 dsh headless 扩展（--session 会话续接，见 container/dsh/README.md）
-COPY ./container/dsh /opt/astra/dsh
 
 # 镜像默认入口：astra-runner（本地模式可手动执行 python3 /opt/astra-runner/runner.py）
 ENTRYPOINT ["python3", "/opt/astra-runner/runner.py"]
 
-# 体积裁剪（3GB 上限）：托管舰队为 dsh 单系（deepseek/zhipu 双通道都走 dsh），
-# codex/claude-code/pi 三个 CLI 全无对应 worker 配置——裁掉省 ~430MB；
-# claudecode 兜底评审路径保留在代码里，需要时配 worker 即可（本地另装）。
-# DeepSeek Harness 无头模式 + ASTRA runner 插件（复制进 dsh 包 lib/，供 --patch 以裸说明符加载）
-RUN sudo npm install -g --registry=https://registry.npmmirror.com @deepseek-ai/dsh@0.1.0-rc.6 && \
-    sudo cp /opt/astra/dsh/astra-headless-runner.js "$(sudo npm root -g)/@deepseek-ai/dsh/lib/astra-headless-runner.js"
+# 2026-08-28 舰队切换 claudecode（tsecbench 前十 0 家 dsh，CC/AgentSDK 系 6 家，
+# 见 docs/Tsecbench前十名日志机制拆解.md §6）：dsh + 自研 headless patch 整体
+# 移除，恢复 claude-code CLI（DeepSeek anthropic 兼容端点驱动 deepseek-v4-flash）。
+# 硬失败纪律：双镜像源装不上直接断构建；装完必须能输出版本号。
+RUN ok=""; \
+    for reg in https://registry.npmmirror.com https://registry.npmjs.org; do \
+      echo "[claude-code] trying $reg"; \
+      if sudo npm install -g --registry=$reg @anthropic-ai/claude-code@2.1.250; then ok=1; break; fi; \
+      sleep $((RANDOM % 5 + 3)); \
+    done; \
+    [ -n "$ok" ] && claude --version
 # Playwright MCP（headless 通过 mcp-client 接入，Web 类题目用真实浏览器；npx -y 现场下载的替代）
 RUN sudo npm install -g --registry=https://registry.npmmirror.com @playwright/mcp@latest && \
     sudo rm -rf /root/.npm /home/kali/.npm /home/kali/.cache 2>/dev/null; true

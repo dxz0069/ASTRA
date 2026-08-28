@@ -45,7 +45,7 @@ def test_state_card_topic_index_with_dispatch_count():
     project = _project(
         [Fact(id="f1", description="10.0.0.5:80 nginx")],
         intents=[Intent(
-            id="i1", from_=["f1"], to=None, description="打注入", creator="w", worker="dsh",
+            id="i1", from_=["f1"], to=None, description="打注入", creator="w", worker="claudecode",
             dispatch_count=3, last_heartbeat_at="2026-01-01T00:10:00Z", created_at="2026-01-01T00:00:00Z",
         )],
     )
@@ -64,9 +64,9 @@ def test_state_card_fallback_when_no_structure():
 # ---------------- 跨模型评审异构 ----------------
 
 _TYPE_ENV = {
-    "mock": {"MOCK_BEHAVIOR": "ok"},
-    "dsh": {"DSH_PROVIDER": "deepseek", "DEEPSEEK_API_KEY": "x", "DSH_MODEL": "deepseek-v4-flash"},
+    "mock": {},
     "claudecode": {"ANTHROPIC_MODEL": "m", "ANTHROPIC_BASE_URL": "http://x", "ANTHROPIC_AUTH_TOKEN": "x"},
+    "pi": {"PI_MODEL": "m", "PI_BASE_URL": "http://x", "PI_API_KEY": "x", "PI_PROVIDER_API": "openai-completions"},
 }
 
 
@@ -79,16 +79,16 @@ def _worker(name: str, wtype: str, priority: int) -> WorkerConfig:
 
 def test_review_prefers_heterogeneous_reviewer():
     config = make_config()
-    proposer_dsh = _worker("dsh-main", "dsh", 1)
-    # 舰队里有不同 type 的可评审 worker → 必须选异构而非提案者自身
-    config.workers = [proposer_dsh, _worker("claude-rev", "claudecode", 2)]
-    reviewer, _ = _resolve_review_worker(config, proposer_dsh)
-    assert reviewer.type != proposer_dsh.type
+    proposer = _worker("cc-main", "claudecode", 1)
+    # 舰队里有不同 type 的可评审 worker（mock 审查可用；pi 显式不支持审查）
+    config.workers = [proposer, _worker("mock-rev", "mock", 2)]
+    reviewer, _ = _resolve_review_worker(config, proposer)
+    assert reviewer.type != proposer.type
 
 
 def test_review_falls_back_to_self_when_only_homogeneous():
     config = make_config()
-    proposer = _worker("solo", "dsh", 1)
+    proposer = _worker("solo", "claudecode", 1)
     config.workers = [proposer]
     reviewer, _ = _resolve_review_worker(config, proposer)
     assert reviewer is proposer

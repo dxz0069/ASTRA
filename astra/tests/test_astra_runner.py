@@ -631,227 +631,161 @@ def test_window_allows_start_pure_logic() -> None:
     assert window_allows_start(3_800.0, 2_800.0, now=1_000.0) is False
 
 
-def test_render_dispatch_config_dsh_worker(monkeypatch) -> None:
-    """ASTRA_WORKER_TYPE=dsh 生成 dsh worker 配置（DSH_* env + 权限/隔离目录）。"""
-    import pytest
+def test_render_dispatch_config_claudecode_fleet(monkeypatch, tmp_path) -> None:
+    """默认 ASTRA_WORKER_TYPE=claudecode：explore×2(p0) + reason×1(p1)，MCP 注入。"""
+    import json as _json
 
     from astra.dispatcher.config import DispatchConfig
     from astra_runner.astra_runner_engine import AstraDaemon
 
-    monkeypatch.setenv("ASTRA_WORKER_TYPE", "dsh")
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
-    monkeypatch.setenv("DSH_MODEL", "deepseek-v4-pro")
-    monkeypatch.setenv("DSH_PATCH", "/opt/astra/dsh/astra-headless.patch.yml")
-    monkeypatch.delenv("ZHIPU_API_KEY", raising=False)
-    monkeypatch.delenv("ASTRA_MIX_PROVIDERS", raising=False)
+    monkeypatch.delenv("ASTRA_WORKER_TYPE", raising=False)
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "sk-test")
+    monkeypatch.setenv("ANTHROPIC_MODEL", "deepseek-v4-flash")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.deepseek.com/anthropic")
+    monkeypatch.setenv("ASTRA_CLAUDE_HOME", str(tmp_path / "claude-home"))
+    monkeypatch.setenv("ASTRA_EXPLORE_REPLICAS", "2")
 
     path = AstraDaemon()._render_dispatch_config()
     yaml = path.read_text(encoding="utf-8")
 
-    assert 'type: "dsh"' in yaml
-    assert 'DSH_MODEL: "deepseek-v4-pro"' in yaml
-    assert 'DEEPSEEK_API_KEY: "sk-test"' in yaml
-    assert 'DSH_PERMISSION_MODE: "danger-full-access"' in yaml
-    assert 'DSH_PATCH: "/opt/astra/dsh/astra-headless.patch.yml"' in yaml
-    assert "DSH_HOME:" in yaml
-    # 生成的配置必须通过 dispatcher 同款 schema 校验（含 prompt 资源检查）
-    config = DispatchConfig.load(path)
-    assert config.workers[0].type == "dsh"
-    assert config.workers[0].env["DSH_MODEL"] == "deepseek-v4-pro"
-
-
-def test_render_dispatch_config_dsh_requires_api_key(monkeypatch) -> None:
-    import pytest
-
-    from astra_runner.astra_runner_engine import AstraDaemon
-
-    monkeypatch.setenv("ASTRA_WORKER_TYPE", "dsh")
-    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
-    monkeypatch.delenv("ZHIPU_API_KEY", raising=False)
-    monkeypatch.delenv("ASTRA_MIX_PROVIDERS", raising=False)
-
-    with pytest.raises(RuntimeError, match="DEEPSEEK_API_KEY"):
-        AstraDaemon()._render_dispatch_config()
-
-
-def test_render_dispatch_config_mixed_fleet(monkeypatch) -> None:
-    """DS+GLM 双 key 齐备 → 混合舰队 4 worker（同题多路并进）。"""
-    from astra.dispatcher.config import DispatchConfig
-    from astra_runner.astra_runner_engine import AstraDaemon
-
-    monkeypatch.setenv("ASTRA_WORKER_TYPE", "dsh")
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-ds-test")
-    monkeypatch.setenv("ZHIPU_API_KEY", "zk-glm-test")
-    monkeypatch.setenv("DSH_PATCH", "/opt/astra/dsh/astra-headless.patch.yml")
-
-    path = AstraDaemon()._render_dispatch_config()
+    assert 'type: "claudecode"' in yaml
+    assert 'ANTHROPIC_MODEL: "deepseek-v4-flash"' in yaml
+    assert 'ANTHROPIC_BASE_URL: "https://api.deepseek.com/anthropic"' in yaml
     config = DispatchConfig.load(path)
     assert [w.name for w in config.workers] == [
-        "deepseek-main",
-        "glm-main",
-        "glm-reason",
-        "deepseek-fallback",
+        "deepseek-explore-0", "deepseek-explore-1", "deepseek-reason",
     ]
     by_name = {w.name: w for w in config.workers}
-    # 探索双通道同优先级（running-count 轮转 → 同题多路不同模型）
-    assert by_name["deepseek-main"].priority == 0
-    assert by_name["glm-main"].priority == 0
-    assert set(by_name["deepseek-main"].task_types) == {"bootstrap", "explore"}
-    assert set(by_name["glm-main"].task_types) == {"bootstrap", "explore"}
-    # 决策走 GLM 深度档，DS 兜底
-    assert by_name["glm-reason"].priority == 1  # DSH_PRO_MODEL 未设时为 0，设了 pro 档让位 1
-    assert by_name["glm-reason"].env["DSH_REASONING_EFFORT"] == "xhigh"
-    assert set(by_name["glm-reason"].task_types) == {"reason", "consolidate"}
-    assert by_name["deepseek-fallback"].priority == 3
-    # 通道与凭据
-    assert by_name["deepseek-main"].env["DSH_PROVIDER"] == "deepseek"
-    assert by_name["glm-main"].env["DSH_PROVIDER"] == "zhipu"
-    assert by_name["glm-main"].env["ZHIPU_API_KEY"] == "zk-glm-test"
-    assert by_name["glm-main"].env["DSH_REASONING_EFFORT"] == "high"
-    assert by_name["glm-main"].env["DSH_MODEL"] == "glm-5.3"
+    assert set(by_name["deepseek-explore-0"].task_types) == {"bootstrap", "explore"}
+    assert set(by_name["deepseek-reason"].task_types) == {"reason", "consolidate"}
+    assert by_name["deepseek-explore-0"].priority == 0
+    assert by_name["deepseek-reason"].priority == 1
+    assert by_name["deepseek-explore-0"].max_running == 3
+    env0 = by_name["deepseek-explore-0"].env
+    # SMALL_FAST/SUBAGENT 钉主模型（anthropic 兼容端点无 haiku）
+    assert env0["ANTHROPIC_SMALL_FAST_MODEL"] == "deepseek-v4-flash"
+    assert env0["CLAUDE_CODE_SUBAGENT_MODEL"] == "deepseek-v4-flash"
+    # MCP 注入：worker 的 CLAUDE_CONFIG_DIR 下应有 .claude.json
+    mcp = _json.loads((Path(env0["CLAUDE_CONFIG_DIR"]) / ".claude.json").read_text(encoding="utf-8"))
+    assert mcp["mcpServers"]["playwright"]["command"] == "mcp-server-playwright"
 
 
-def test_render_dispatch_config_mixed_fleet_disabled(monkeypatch) -> None:
-    """ASTRA_MIX_PROVIDERS=0 强制单 worker（历史行为）。"""
-    from astra.dispatcher.config import DispatchConfig
-    from astra_runner.astra_runner_engine import AstraDaemon
-
-    monkeypatch.setenv("ASTRA_WORKER_TYPE", "dsh")
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-ds-test")
-    monkeypatch.setenv("ZHIPU_API_KEY", "zk-glm-test")
-    monkeypatch.setenv("ASTRA_MIX_PROVIDERS", "0")
-    monkeypatch.setenv("DSH_PATCH", "/opt/astra/dsh/astra-headless.patch.yml")
-
-    path = AstraDaemon()._render_dispatch_config()
-    config = DispatchConfig.load(path)
-    assert [w.name for w in config.workers] == ["deepseek-main"]
-
-
-def test_render_dispatch_config_dsh_anthropic_mode(monkeypatch) -> None:
-    """DSH_PROVIDER=anthropic → ANTHROPIC_* env（Kimi 等 Anthropic 兼容端点）。"""
-    import pytest
-
-    from astra.dispatcher.config import DispatchConfig
-    from astra_runner.astra_runner_engine import AstraDaemon
-
-    monkeypatch.setenv("ASTRA_WORKER_TYPE", "dsh")
-    monkeypatch.setenv("DSH_PROVIDER", "anthropic")
-    monkeypatch.setenv("DSH_MODEL", "k3")
-    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "sk-kimi")
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.kimi.com/coding/")
-
-    path = AstraDaemon()._render_dispatch_config()
-    yaml = path.read_text(encoding="utf-8")
-
-    assert 'type: "dsh"' in yaml
-    assert 'DSH_PROVIDER: "anthropic"' in yaml
-    assert 'ANTHROPIC_AUTH_TOKEN: "sk-kimi"' in yaml
-    assert 'ANTHROPIC_BASE_URL: "https://api.kimi.com/coding/"' in yaml
-    assert "DEEPSEEK_API_KEY" not in yaml
-    config = DispatchConfig.load(path)
-    assert config.workers[0].env["DSH_PROVIDER"] == "anthropic"
-
-
-def test_render_dispatch_config_dsh_anthropic_requires_token(monkeypatch) -> None:
+def test_render_dispatch_config_claudecode_requires_token(monkeypatch) -> None:
     import pytest
 
     from astra_runner.astra_runner_engine import AstraDaemon
 
-    monkeypatch.setenv("ASTRA_WORKER_TYPE", "dsh")
-    monkeypatch.setenv("DSH_PROVIDER", "anthropic")
+    monkeypatch.delenv("ASTRA_WORKER_TYPE", raising=False)
     monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
 
     with pytest.raises(RuntimeError, match="ANTHROPIC_AUTH_TOKEN"):
         AstraDaemon()._render_dispatch_config()
 
 
-def _make_session_dir(root: Path, name: str, age_days: float) -> Path:
-    session_dir = root / f"--cwd--" / name
-    session_dir.mkdir(parents=True, exist_ok=True)
-    (session_dir / "session.jsonl.zstd").write_bytes(b"x")
-    old = time.time() - age_days * 86400
-    os.utime(session_dir, (old, old))
-    os.utime(session_dir / "session.jsonl.zstd", (old, old))
-    return session_dir
+def test_render_dispatch_config_rejects_dsh(monkeypatch) -> None:
+    """dsh 已移除：显式 ASTRA_WORKER_TYPE=dsh 必须硬失败（防旧 env 静默跑错栈）。"""
+    import pytest
 
-
-def test_cleanup_dsh_home_keeps_recent_and_removes_stale(monkeypatch, tmp_path) -> None:
-    """启动清理：保留最近 keep 个会话目录，删除更旧的（只清会话、不碰其他）。"""
     from astra_runner.astra_runner_engine import AstraDaemon
 
-    dsh_home = tmp_path / "dsh-home"
-    sessions = dsh_home / "sessions"
-    _make_session_dir(sessions, "session-old-1", age_days=30)
-    _make_session_dir(sessions, "session-old-2", age_days=20)
-    _make_session_dir(sessions, "session-new", age_days=0.01)
-    # 非会话文件不应被删
-    keep_me = sessions / "keep.txt"
+    monkeypatch.setenv("ASTRA_WORKER_TYPE", "dsh")
+
+    with pytest.raises(RuntimeError, match="claudecode"):
+        AstraDaemon()._render_dispatch_config()
+
+
+def test_render_dispatch_config_single_explore_replica(monkeypatch, tmp_path) -> None:
+    from astra.dispatcher.config import DispatchConfig
+    from astra_runner.astra_runner_engine import AstraDaemon
+
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "sk-test")
+    monkeypatch.setenv("ASTRA_CLAUDE_HOME", str(tmp_path / "claude-home"))
+    monkeypatch.setenv("ASTRA_EXPLORE_REPLICAS", "1")
+
+    path = AstraDaemon()._render_dispatch_config()
+    config = DispatchConfig.load(path)
+    assert [w.name for w in config.workers] == ["deepseek-explore", "deepseek-reason"]
+
+
+def _make_claude_worker_home(root: Path, name: str, age_days: float) -> Path:
+    worker_dir = root / name
+    session = worker_dir / "projects" / "--cwd--" / "s1"
+    session.mkdir(parents=True, exist_ok=True)
+    (session / "session-abc.jsonl").write_text("{}", encoding="utf-8")
+    old = time.time() - age_days * 86400
+    os.utime(worker_dir, (old, old))
+    return worker_dir
+
+
+def test_cleanup_claude_homes_removes_stale_keeps_recent(monkeypatch, tmp_path) -> None:
+    """启动清理：整 worker 目录按 mtime 判定，近期（72h 内）绝不清理。"""
+    from astra_runner.astra_runner_engine import AstraDaemon
+
+    root = tmp_path / "claude-home"
+    root.mkdir()
+    _make_claude_worker_home(root, "old-worker", age_days=30)
+    recent = _make_claude_worker_home(root, "live-worker", age_days=0.01)
+    # 非目录文件不应被动
+    keep_me = root / "keep.txt"
     keep_me.write_text("x", encoding="utf-8")
 
-    monkeypatch.setenv("ASTRA_DSH_HOME", str(dsh_home))
-    AstraDaemon._cleanup_dsh_home(keep=1)
+    monkeypatch.setenv("ASTRA_CLAUDE_HOME", str(root))
+    AstraDaemon._cleanup_claude_homes()
 
-    remaining = sorted(p.name for p in sessions.rglob("*") if p.is_dir() and (p / "session.jsonl.zstd").exists())
-    assert remaining == ["session-new"]
+    assert not (root / "old-worker").exists()
+    assert recent.exists()
     assert keep_me.exists()
 
 
-def test_cleanup_dsh_home_noop_when_absent(monkeypatch, tmp_path) -> None:
+def test_cleanup_claude_homes_noop_when_absent(monkeypatch, tmp_path) -> None:
     from astra_runner.astra_runner_engine import AstraDaemon
 
-    monkeypatch.setenv("ASTRA_DSH_HOME", str(tmp_path / "missing"))
-    AstraDaemon._cleanup_dsh_home()  # 不应抛异常
+    monkeypatch.setenv("ASTRA_CLAUDE_HOME", str(tmp_path / "missing"))
+    AstraDaemon._cleanup_claude_homes()  # 不应抛异常
 
 
-def test_collect_dsh_usage_aggregates_and_tolerates_bad_lines(monkeypatch, tmp_path) -> None:
-    """token 计量：汇总 $DSH_HOME/usage/astra-usage.jsonl，坏行跳过。"""
-    from astra_runner.runner import collect_dsh_usage
+def test_collect_claude_usage_aggregates_and_tolerates_bad_lines(monkeypatch, tmp_path) -> None:
+    """token 计量：汇总 CC 会话 jsonl 的 message.usage，坏行/缺字段跳过。"""
+    from astra_runner.runner import collect_claude_usage
 
-    usage_dir = tmp_path / "dsh" / "usage"
-    usage_dir.mkdir(parents=True)
-    usage_file = usage_dir / "astra-usage.jsonl"
-    usage_file.write_text(
-        "\n".join(
-            [
-                '{"ts":"t1","session":"s1","inputTokens":100,"outputTokens":20,"cacheReadTokens":10,"cacheWriteTokens":5,"reasoningTokens":3}',
-                '{"ts":"t2","session":"s2","inputTokens":50,"outputTokens":30}',
-                "not-json-line",
-                "",
-            ]
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("ASTRA_DSH_HOME", str(tmp_path / "dsh"))
+    session_dir = tmp_path / "claude-home" / "cc-worker" / "projects" / "--cwd--"
+    session_dir.mkdir(parents=True)
+    lines = [
+        '{"message":{"usage":{"input_tokens":100,"output_tokens":20,"cache_read_input_tokens":10,"cache_creation_input_tokens":5}}}',
+        '{"message":{"usage":{"input_tokens":50,"output_tokens":30}}}',
+        "not-json-line",
+        '{"message":{}}',
+        "",
+    ]
+    (session_dir / "a.jsonl").write_text(chr(10).join(lines), encoding="utf-8")
+    monkeypatch.setenv("ASTRA_CLAUDE_HOME", str(tmp_path / "claude-home"))
 
-    total = collect_dsh_usage()
+    total = collect_claude_usage()
     assert total["inputTokens"] == 150
     assert total["outputTokens"] == 50
     assert total["cacheReadTokens"] == 10
     assert total["cacheWriteTokens"] == 5
-    assert total["reasoningTokens"] == 3
 
-    # 无文件 → 空 dict
-    monkeypatch.setenv("ASTRA_DSH_HOME", str(tmp_path / "missing"))
-    assert collect_dsh_usage() == {}
+    monkeypatch.setenv("ASTRA_CLAUDE_HOME", str(tmp_path / "missing"))
+    assert collect_claude_usage() == {}
 
 
-def test_render_dispatch_config_defaults_to_dsh(monkeypatch) -> None:
-    """默认 ASTRA_WORKER_TYPE=dsh（2026-08-15 翻转：run 9214 因漏带该变量静默
-    回落 claudecode 单模型导致退步，默认值改为 dsh 防再犯）。"""
+def test_render_dispatch_config_defaults_to_claudecode(monkeypatch, tmp_path) -> None:
+    """默认 ASTRA_WORKER_TYPE=claudecode（2026-08-28 翻转：tsecbench 前十 0 家
+    dsh，CC/Agent SDK 系 6 家）。漏带该变量也走正确栈。"""
     from astra_runner.astra_runner_engine import AstraDaemon
 
     monkeypatch.delenv("ASTRA_WORKER_TYPE", raising=False)
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
-    monkeypatch.delenv("ZHIPU_API_KEY", raising=False)
-    monkeypatch.delenv("ASTRA_MIX_PROVIDERS", raising=False)
-    monkeypatch.setenv("DSH_PATCH", "/opt/astra/dsh/astra-headless.patch.yml")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "sk-test")
+    monkeypatch.setenv("ASTRA_CLAUDE_HOME", str(tmp_path / "claude-home"))
 
     path = AstraDaemon()._render_dispatch_config()
     yaml = path.read_text(encoding="utf-8")
 
-    assert 'type: "dsh"' in yaml
-    assert 'DEEPSEEK_API_KEY: "sk-test"' in yaml
-    assert "claudecode" not in yaml
+    assert 'type: "claudecode"' in yaml
+    assert 'ANTHROPIC_AUTH_TOKEN: "sk-test"' in yaml
+    assert "dsh" not in yaml.replace("0 家 dsh", "")
+
 
 def test_defer_stops_and_resume_reactivates_project() -> None:
     """R5 修复清单 P0-1 验收：defer→stop_project；requeue→reactivate_project；上限→delete 不变。"""

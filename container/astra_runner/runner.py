@@ -1647,9 +1647,10 @@ def _watchdog_stalled() -> bool:
     import glob as _glob
     import tempfile as _tempfile
 
+    root = os.environ.get("ASTRA_CLAUDE_HOME") or str(Path(_tempfile.gettempdir()) / "astra-claude")
     try:
         newest = 0.0
-        for f in _glob.glob(str(Path(_tempfile.gettempdir()) / "astra-claude" / "*" / "projects" / "**" / "*.jsonl"), recursive=True):
+        for f in _glob.glob(str(Path(root) / "*" / "projects" / "**" / "*.jsonl"), recursive=True):
             newest = max(newest, os.path.getmtime(f))
         if newest <= 0:
             return False  # 找不到会话（异常布局）不误杀
@@ -2099,6 +2100,7 @@ def collect_claude_usage() -> dict[str, int]:
     import glob as _glob
     import tempfile as _tempfile
 
+    root = os.environ.get("ASTRA_CLAUDE_HOME") or str(Path(_tempfile.gettempdir()) / "astra-claude")
     total = {
         "inputTokens": 0,
         "outputTokens": 0,
@@ -2106,7 +2108,7 @@ def collect_claude_usage() -> dict[str, int]:
         "cacheWriteTokens": 0,
     }
     found = False
-    for f in _glob.glob(str(Path(_tempfile.gettempdir()) / "astra-claude" / "*" / "projects" / "**" / "*.jsonl"), recursive=True):
+    for f in _glob.glob(str(Path(root) / "*" / "projects" / "**" / "*.jsonl"), recursive=True):
         found = True
         try:
             for line in Path(f).read_text(encoding="utf-8", errors="replace").splitlines():
