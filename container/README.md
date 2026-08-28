@@ -3,7 +3,7 @@
 ## 镜像构建
 
 ```bash
-docker build -f container/Dockerfile -t astra-runner .   # 构建目录为仓库根
+docker build -f container/Dockerfile.slim -t astra-runner .   # 托管出包用 slim；Dockerfile 为本地全量开发镜像
 ```
 
 镜像内置：Kali 工具链、ASTRA 引擎（server+dispatcher）、**claude-code CLI**、
@@ -39,6 +39,6 @@ playwright MCP（镜像内全局安装的 `playwright-mcp`，Web 类题目真实
 ## 托管模式
 
 ```bash
-docker build -f container/Dockerfile -t astra-runner .
+docker build -f container/Dockerfile.slim -t astra-runner .
 docker save astra-runner:latest | gzip > agent.tar.gz   # 按平台规范上传
 ```

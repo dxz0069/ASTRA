@@ -70,6 +70,15 @@ class ASTRAClient:
         response.raise_for_status()
         return Settings.model_validate(response.json())
 
+    def update_settings(self, intent_timeout: int, reason_timeout: int) -> Settings:
+        response = self._session().put(
+            self._url("/settings"),
+            json={"intent_timeout": intent_timeout, "reason_timeout": reason_timeout},
+            timeout=self._timeout,
+        )
+        response.raise_for_status()
+        return Settings.model_validate(response.json())
+
     def export_project(self, project_id: str) -> str:
         response = self._session().get(
             self._url(f"/projects/{project_id}/export"),

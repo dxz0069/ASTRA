@@ -20,7 +20,9 @@ import time
 import urllib.error
 import urllib.request
 
-ALERT_FILE = os.path.join(os.environ.get("TEMP", "."), "astra-model-alert.txt")
+import tempfile as _tempfile
+
+ALERT_FILE = os.path.join(_tempfile.gettempdir(), "astra-model-alert.txt")
 CHECK_INTERVAL = 60
 FAIL_THRESHOLD = 3  # 连续失败次数（R5：端点抖动 2-5 分钟自愈，2 次误报）
 
@@ -72,7 +74,7 @@ def scan_recent_sessions_403() -> int:
     修复备注：dsh 时代此函数的计数器从未初始化（NameError 被 except 吞掉，
     计数恒 0 的死代码），CC 版重写时一并修正。
     """
-    root = os.environ.get("ASTRA_CLAUDE_HOME") or os.path.join(os.environ.get("TEMP", "."), "astra-claude")
+    root = os.environ.get("ASTRA_CLAUDE_HOME") or os.path.join(_tempfile.gettempdir(), "astra-claude")
     sessions = glob.glob(os.path.join(root, "*", "projects", "**", "*.jsonl"), recursive=True)
     sessions.sort(key=os.path.getmtime, reverse=True)
     count = 0

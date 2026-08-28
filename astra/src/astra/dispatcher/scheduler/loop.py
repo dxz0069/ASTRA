@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
@@ -934,16 +935,29 @@ class DispatcherLoop:
     def _validate_server_settings(self) -> None:
         settings = self.client.get_settings()
         interval = self.config.runtime.interval
+        needs_patch: dict[str, int] = {}
         for name, value in (("intent_timeout", settings.intent_timeout), ("reason_timeout", settings.reason_timeout)):
             if value <= interval:
-                # 审计修复：原实现 raise 未捕获会击穿调度循环（配置错=整个 dispatcher 死）。
-                # 改为本地钳制 + 告警：按 interval*2 的安全下限生效，心跳余量保住，
-                # 调度不中断（自愈优先于崩溃，配置错误在下一轮修正后自动恢复）。
+                # 审计修复（2026-08-28 二修）：此前只 LOG 不动作，"钳制"是空头支票——
+                # 心跳仍按 interval 发，租约 value<=interval 必过期，同任务重派双跑。
+                # 现在真的修：把 server 端超时 PATCH 到 interval*2 安全下限；修不动
+                # （网络故障/只读）才退化为告警（自愈优先于崩溃）。
+                needs_patch[name] = interval * 2
                 LOG.error(
-                    "server %s=%ss <= dispatcher interval=%ss; clamping effective floor to %ss (fix server settings)",
+                    "server %s=%ss <= dispatcher interval=%ss; patching server setting to %ss",
                     name, value, interval, interval * 2,
                 )
-            if value < interval * 2:
+        if needs_patch:
+            try:
+                self.client.update_settings(
+                    intent_timeout=needs_patch.get("intent_timeout", settings.intent_timeout),
+                    reason_timeout=needs_patch.get("reason_timeout", settings.reason_timeout),
+                )
+                LOG.info("server settings patched to safe floor %s", needs_patch)
+            except Exception as exc:  # noqa: BLE001
+                LOG.error("server settings patch failed (%s); heartbeat/lease mismatch risk until server fixed", exc)
+        for name, value in (("intent_timeout", settings.intent_timeout), ("reason_timeout", settings.reason_timeout)):
+            if value < interval * 2 and name not in needs_patch:
                 LOG.warning(
                     "server %s is tight %s=%ss interval=%ss; heartbeat slack is only %ss",
                     name,
@@ -952,13 +966,6 @@ class DispatcherLoop:
                     interval,
                     value - interval,
                 )
-                continue
-            LOG.info(
-                "server setting validated %s=%ss interval=%ss",
-                name,
-                value,
-                interval,
-            )
 
     def _run_startup_healthchecks(self, *, show_commands: bool) -> None:
         results = run_startup_healthchecks(self.config, self.container_manager, show_commands=show_commands)
