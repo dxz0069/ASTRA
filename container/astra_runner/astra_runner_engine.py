@@ -240,19 +240,25 @@ workers:
         return path
 
     def _render_claudecode_fleet(self) -> str:
-        """claudecode 舰队（2026-08-28，tsecbench 前十主流栈，0 家 dsh）：
+        """claudecode 舰队（2026-08-29 恢复双通道混合，R8 实证布局 × CC 栈）：
           - deepseek-explore-{i}  p0 bootstrap/explore ×N（ASTRA_EXPLORE_REPLICAS，
-            默认 2）每副本 max_running=3（ASTRA_EXPLORE_MAXRUN）→ 峰值 6 路并发探索
-          - deepseek-reason       p1 reason/consolidate ×1，max_running=2
-        纯 deepseek-v4-flash 单模型（虫洞#3/ATX#5/应龙#9 同款）；
-        GLM 双通道随 dsh 一并退役（coding 端点仅 chat-completions，CC 需 anthropic
-        协议，托管网关未验证该路径）。
+            默认 2）每副本 max_running=3（ASTRA_EXPLORE_MAXRUN）——DS 快攻主力
+          - glm-explore           p0 bootstrap/explore ×2（ZHIPU_API_KEY 存在时）——
+            GLM 深挖路，同优先级轮转 → 同题多路不同模型并进（多agent协同探索）
+          - glm-reason            p1 reason/consolidate ×2 —— R8 实证决策层（GLM-5.3）
+          - deepseek-reason       p1 兜底（无 GLM key 时的单通道决策位）
+        GLM 走智谱 anthropic 兼容端点（2026-08-29 实测可用：
+        open.bigmodel.cn/api/anthropic，coding-plan key，glm-5.3 带 thinking）；
+        此前"CC 无法接 GLM"的退役理由不成立，已恢复。
         """
         model = os.environ.get("ANTHROPIC_MODEL", "deepseek-v4-flash")
         base_url = os.environ.get("ANTHROPIC_BASE_URL", "https://api.deepseek.com/anthropic")
         auth_token = os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
         if not auth_token:
             raise RuntimeError("缺少 ANTHROPIC_AUTH_TOKEN（DeepSeek anthropic 兼容端点密钥）")
+        glm_key = os.environ.get("ZHIPU_API_KEY", "")
+        glm_model = os.environ.get("ZHIPU_MODEL", "glm-5.3")
+        glm_base = os.environ.get("ZHIPU_ANTHROPIC_BASE_URL", "https://open.bigmodel.cn/api/anthropic")
         explore_replicas = max(1, int(os.environ.get("ASTRA_EXPLORE_REPLICAS", "2")))
         explore_maxrun = max(1, int(os.environ.get("ASTRA_EXPLORE_MAXRUN", "3")))
         fleet: list[str] = []
@@ -265,13 +271,29 @@ workers:
                     model=model, base_url=base_url, auth_token=auth_token,
                 )
             )
-        fleet.append(
-            self._render_claudecode_worker(
-                "deepseek-reason", ["reason", "consolidate"],
-                max_running=2, priority=1,
-                model=model, base_url=base_url, auth_token=auth_token,
+        if glm_key:
+            fleet.append(
+                self._render_claudecode_worker(
+                    "glm-explore", ["bootstrap", "explore"],
+                    max_running=2, priority=0,
+                    model=glm_model, base_url=glm_base, auth_token=glm_key,
+                )
             )
-        )
+            fleet.append(
+                self._render_claudecode_worker(
+                    "glm-reason", ["reason", "consolidate"],
+                    max_running=2, priority=1,
+                    model=glm_model, base_url=glm_base, auth_token=glm_key,
+                )
+            )
+        else:
+            fleet.append(
+                self._render_claudecode_worker(
+                    "deepseek-reason", ["reason", "consolidate"],
+                    max_running=2, priority=1,
+                    model=model, base_url=base_url, auth_token=auth_token,
+                )
+            )
         return "\n".join(fleet)
 
     def _render_claudecode_worker(

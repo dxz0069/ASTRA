@@ -2118,8 +2118,16 @@ def _run_environment_check(token: str, base_url: str) -> int:
         ok = False
     model = os.environ.get("ANTHROPIC_MODEL", "deepseek-v4-flash")
     base_url = os.environ.get("ANTHROPIC_BASE_URL", "https://api.deepseek.com/anthropic")
-    LOG.info("[PASS] 模型舰队 = claudecode（explore×%s + reason×1，%s @ %s）",
-             os.environ.get("ASTRA_EXPLORE_REPLICAS", "2"), model, base_url)
+    if os.environ.get("ZHIPU_API_KEY"):
+        LOG.info("[PASS] 模型舰队 = claudecode 双通道（DS explore×%s + GLM explore×2 + GLM reason×2；"
+                 "DS %s @ %s，GLM %s @ %s）",
+                 os.environ.get("ASTRA_EXPLORE_REPLICAS", "2"), model, base_url,
+                 os.environ.get("ZHIPU_MODEL", "glm-5.3"),
+                 os.environ.get("ZHIPU_ANTHROPIC_BASE_URL", "https://open.bigmodel.cn/api/anthropic"))
+    else:
+        LOG.info("[PASS] 模型舰队 = claudecode 单通道（explore×%s + reason×1，%s @ %s；"
+                 "注入 ZHIPU_API_KEY 可启用 GLM 双通道）",
+                 os.environ.get("ASTRA_EXPLORE_REPLICAS", "2"), model, base_url)
 
     # 3. 引擎可启动（server + dispatcher 拉起，含 worker env 校验）
     try:
