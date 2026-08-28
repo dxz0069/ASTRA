@@ -85,6 +85,9 @@ class ChallengeResult:
     busy_count: int = 0  # 自愈④：槽位 busy 连击计数（指数退避用；漏定义曾致 SlotBusy 线程炸死）
     kb_deadend_texts: list[str] = field(default_factory=list)  # V5：同题型避坑提示（失败经验库注入）
     flag_count: int = 0  # 平台题旗数（多旗题收割调度依据；0=未知按单旗处理）
+    total_score: int = 0  # 平台题分值（V10 难题倾斜：大分题 defer 预算 +1）
+    flags_correct_at_defer: int = 0  # V10：上次 defer 时的已收旗数（图重置判据）
+    graph_reset_count: int = 0  # V10：整图重置次数（榜首经验：死图清掉重来）
 
 
 class TaskFinishedError(Exception):
@@ -331,6 +334,7 @@ def run_benchmark(
             continue
         result = ChallengeResult(unique_code=code, description=description)
         result.flag_count = int(getattr(ch, "flag_count", 0) or 0)
+        result.total_score = int(getattr(ch, "total_score", 0) or 0)
         if skip_completed and getattr(ch, "is_completed", False):
             LOG.info("skip completed challenge code=%s", code)
             results[code] = result
@@ -457,11 +461,14 @@ def run_benchmark(
                 result.defer_count += 1
                 # V9 战果扩展预算：每收一旗 +2 窗口（多旗题还有油水就不放弃），
                 # hard 题 +1；星图已深（≥25 星记=有实质进展非空转）再 +1；
+                # V10 难题倾斜（榜首经验：51% 会话堆难题——大分题≥800 再 +1）；
                 # 封顶 MAX_DEFER_BUDGET_CAP——零战果题维持原上限 2
                 budget = MAX_DEFER_PER_CHALLENGE + 2 * (result.flags_correct or 0)
                 if str(getattr(ch, "difficulty", "") or "").lower() == "hard":
                     budget += 1
                 if result.facts_count >= 25:
+                    budget += 1
+                if result.total_score >= 800:
                     budget += 1
                 budget = min(budget, MAX_DEFER_BUDGET_CAP)
                 if result.defer_count >= budget:
@@ -490,6 +497,28 @@ def run_benchmark(
                         progress.mark(result.unique_code, "done")
                     return
                 LOG.info("challenge deferred code=%s（%s 分钟无结果，保留进度放回队尾）", result.unique_code, defer_after_seconds / 60)
+                # V10 整图重置（榜首经验：14 题重置后快速收敛）——连续 2 轮 defer
+                # 零新旗 = 星图已被死路/污染占满，保图续攻只会重复旧路线。清图重来，
+                # runner 侧战果（flags_found/correct/近失信号）全部保留，仅引擎星图换新。
+                if (
+                    result.project_id
+                    and result.defer_count >= 2
+                    and result.flags_correct == result.flags_correct_at_defer
+                ):
+                    try:
+                        delete_fn = getattr(engine_factory(), "delete_project", None)
+                        if callable(delete_fn):
+                            delete_fn(result.project_id)
+                            result.project_id = None
+                            result.facts_count = 0
+                            result.graph_reset_count += 1
+                            LOG.info(
+                                "graph reset code=%s defer=%s（连续零新旗，清图重来；runner 战果保留 flags_correct=%s）",
+                                result.unique_code, result.defer_count, result.flags_correct,
+                            )
+                    except Exception as exc:  # noqa: BLE001
+                        LOG.warning("graph reset failed code=%s error=%s（保图续跑）", result.unique_code, exc)
+                result.flags_correct_at_defer = result.flags_correct
                 # 僵尸项目修复（R5 实测）：defer 即停项目——平台容器已关，继续调度
                 # 只会攻击死靶机并占用 max_running_projects 预算饿死新题；
                 # 服务端 stop 清 worker 租约+reason，scheduler 停止派发并取消在途任务，
@@ -940,7 +969,7 @@ def _run_single_challenge(
                 flags = collect_flags_from_facts(fact_descs, [result.description])
                 pending = [flag for flag in flags if flag not in result.flags_found]
                 for flag in pending:
-                    _submit_flag_safely(client, code, flag, result, started_at)
+                    _submit_flag_safely(client, code, flag, result, started_at, engine=engine)
             except Exception:  # noqa: BLE001 —— 引擎 API 偶发失败不中断等待
                 pass
             stalled_no_new_flag = len(result.flags_found) == flags_at_window_start
@@ -973,7 +1002,7 @@ def _run_single_challenge(
                             last_descs = engine.list_fact_descriptions(project_id)
                             last_flags = collect_flags_from_facts(last_descs, [result.description])
                             for flag in [f for f in last_flags if f not in result.flags_found]:
-                                _submit_flag_safely(client, code, flag, result, started_at)
+                                _submit_flag_safely(client, code, flag, result, started_at, engine=engine)
                             if last_descs:
                                 # V2-6：删项目前留末段星记（解出后沉淀知识库）
                                 result.kb_approach_draft = "；".join(last_descs[-3:])[:800]
@@ -1013,7 +1042,7 @@ def _run_single_challenge(
             flags = collect_flags_from_facts(engine.list_fact_descriptions(project_id), [goal])
             pending = [flag for flag in flags if flag not in result.flags_found]
             for flag in pending:
-                _submit_flag_safely(client, code, flag, result, started_at)
+                _submit_flag_safely(client, code, flag, result, started_at, engine=engine)
             expected = result.flag_count or 1
             remaining_flags = expected - result.flags_correct
             if result.flags_found and (remaining_flags <= 0 or result.flag_count <= 0):
@@ -1062,7 +1091,7 @@ def _run_single_challenge(
                 time.sleep(flag_poll_seconds)
                 continue
             for flag in pending:
-                _submit_flag_safely(client, code, flag, result, started_at)
+                _submit_flag_safely(client, code, flag, result, started_at, engine=engine)
             time.sleep(flag_poll_seconds)
     except TaskFinishedError:
         raise
@@ -1812,6 +1841,7 @@ def _submit_flag_safely(
     flag: str,
     result: ChallengeResult,
     started_at: float | None = None,
+    engine: Any = None,
 ) -> None:
     flag = (flag or "").strip()  # V2-3：提交前清洗空白
     if not flag:
@@ -1849,6 +1879,23 @@ def _submit_flag_safely(
             code, value, correct, awarded,
             getattr(res, "correct_flag_count", None), getattr(res, "total_flag_count", None),
         )
+        # V10 平台回执进星图（榜首经验：官方回执是唯一可信收口见证）——
+        # worker 立即可见"已确认 n/m 旗+尾号"，不重复攻已确认旗、聚焦剩余旗
+        if engine is not None and getattr(result, "project_id", None):
+            try:
+                engine.create_fact(
+                    result.project_id,
+                    "[平台回执] flag尾号{tail} correct={correct} 得分+{awarded} 已收{n}/{m}旗 累计{cum}".format(
+                        tail=value[-6:] if len(value) >= 6 else value,
+                        correct=correct,
+                        awarded=awarded or 0,
+                        n=getattr(res, "correct_flag_count", "?"),
+                        m=getattr(res, "total_flag_count", result.flag_count or "?"),
+                        cum=cumulative or "?",
+                    ),
+                )
+            except Exception:  # noqa: BLE001 —— 回执写图失败不影响提交主流程
+                pass
         return correct
 
     res = _submit_once(flag)

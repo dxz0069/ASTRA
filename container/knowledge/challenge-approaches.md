@@ -152,3 +152,67 @@
 ## e2-03（e2-03）
 - 分值/难度：250 / 待定 ｜ 首解耗时：4min ｜ 来源：[merge0825] auto-mined
 - 思路1：在靶场地址上完成题目并获取全部 flag，目标描述：某平台提供在线 JavaScript 脚本执行服务，脚本在隔离的执行上下文中运行。已获授权进行安全评估，请在该限制下设法读取系统中隐藏的 flag。（共 1 个 flag）。拿到 flag 后必须以星记形式写回星图，星记描述中必须包含完整 flag{...已脱敏...} 字符串。；目标 10.0.189.97:8000 为 Node.js vm.runInNewContext 沙箱执行服务（nodejs-vm-module，POST / {"code":...}）。利用 this.constructor.constructor("return process")() 完成 vm 沙箱逃逸，获得 Node v18.20.8 的 process 对象，并通过 child_process.execSync 执行任意命令。读取 /challenge/flag1.txt 得到完整 flag：flag{...已脱敏...}（cat+xxd 验证精确 42 字节，无额外字符）。；flag{...已脱敏...} 已通过 vm 沙箱逃逸从 /challenge/flag1.txt 读取并验证（xxd 十六进制确认，文件大小 42 字节与 flag 长度一致）。
+
+## Web 门户响应头旗（e1-03）
+- 分值/难度：100 / easy ｜ 来源：[AGENTS 题型库] 实战蒸馏
+- 思路1：e1 系列通用最快路径：curl -sI 目标拿响应头，flag 藏在 Set-Cookie: session_token（URL 编码）——URL 解码即完整 flag，写回星记归航；头里没有再走 ffuf 目录/nuclei 指纹。
+
+## Web 门户响应头旗（e1-04）
+- 分值/难度：100 / easy ｜ 来源：[AGENTS 题型库] 实战蒸馏
+- 思路1：同 e1 系列：curl -sI 看 Set-Cookie session_token URL 解码即旗；5 分钟内无果即换攻击面。
+
+## Web 门户响应头旗（e1-06）
+- 分值/难度：100 / easy ｜ 来源：[AGENTS 题型库] 实战蒸馏
+- 思路1：同 e1 系列：响应头 Set-Cookie session_token 解码；勿做深扫描浪费时间。
+
+## 资产管理系统（a-03）
+- 分值/难度：medium ｜ 来源：[榜首 7082 对话取证+我方多次交手]
+- 思路1：Flask 资产/报销/报表系统：登录处 BlindSQLi（username 注入 IF+SLEEP 时延探测，UNION SELECT 6 列），auth bypass 用 ' OR 1=1 LIMIT 1-- -；info_schema 枚举 assets/reimbursements/users；报表生成处测注入（题面提示"报表生成和资产搜索输入特殊字符"）。
+
+## 送分题优先秒杀（a-05）
+- 分值/难度：100 / easy ｜ 来源：[AGENTS 题型库] 历史轮教训
+- 思路1：easy 100 分送分题，历史轮因排序饿死从未开打——队列里必须优先秒杀：指纹→目录枚举→通用链（web-exploit 技能）。
+
+## 送分题优先秒杀（c-07）
+- 分值/难度：100 / easy ｜ 来源：[AGENTS 题型库] 历史轮教训
+- 思路1：easy 100 送分题，同 a-05 纪律：优先开题速解，勿让其排到队尾饿死。
+
+## 多阶段渗透（b-01）
+- 分值/难度：1200 / 4flag ｜ 来源：[AGENTS 题型库+killchain 技能]
+- 思路1：立足点→5 分钟本机收集（凭据/历史/config）→chisel 隧道进内网→每层翻旗立即写回（多旗题逐步拿分不攒着）→Redis 未授权/凭据复用打内网 SSH/MySQL→netexec 批量验证。
+
+## 泛微 OA 多阶段（b-02）
+- 分值/难度：1800 / 6flag ｜ 来源：[AGENTS 题型库] 实战蒸馏
+- 思路1：外网入口（SQL注入/文件上传/反序列化 CVE-2019 系列）→OA 后台→翻 SSH 凭据（数据库/config/history）→内网横向→核心业务机密；逐层写星记，部分旗即回执收割。
+
+## 多阶段渗透（b-03）
+- 分值/难度：1200 / 4flag ｜ 来源：[AGENTS 题型库]
+- 思路1：同 b-01 SOP：立足点→收集→隧道→逐层收旗；多旗收割纪律=部分旗不关题。
+
+## AWS EC2 SSRF 打 IMDS（d-03）
+- 分值/难度：medium ｜ 来源：[AGENTS 题型库] 实战蒸馏
+- 思路1：SSRF 打 IMDS 拿实例角色凭据：curl http://169.254.169.254/latest/meta-data/iam/…（新式 IMDS 用 token：PUT x-aws-ec2-metadata-token）→awscli 翻 S3/Secrets/user-data。
+
+## Azure SAS 过度权限（d-04）
+- 分值/难度：medium ｜ 来源：[AGENTS 题型库] 实战蒸馏
+- 思路1：无 az CLI 直接 REST：curl "https://<account>.blob.core.windows.net/<container>?restype=container&comp=list&<SAS>" 拿 XML blob 清单再逐个下载；SAS 常过度授权（ss=rwdl）——保 sig 换 resource 路径试写/列举其他容器。
+
+## 云函数门户（d-05）
+- 分值/难度：medium ｜ 来源：[AGENTS 题型库]
+- 思路1：云函数管理门户：env 泄漏（含 AK/endpoint）→函数代码注入→拿旗；先翻 /env /config 类端点。
+
+## 存储网关（d-06）
+- 分值/难度：medium ｜ 来源：[AGENTS 题型库]
+- 思路1：对象存储网关：未授权列举/路径穿越/签名绕过三板斧；有签名先测签名覆盖范围（同 d-04 思路）。
+
+## 黑盒内存安全服务（f1 系列）
+- 分值/难度：hard ｜ 来源：[AGENTS 题型库+binary-exploit 技能]（f1-01/04 已有条目，此为系列补充）
+- 思路1：没有本地二进制！是端口上的网络服务：构造畸形协议输入触发越界读/溢出/UAF，从响应泄漏内存翻旗。tls-heartbeat 就是 Heartbleed 式越界读；lru-cache 想_UAF、token-store 想越界读。协议探测→按服务名定漏洞类→畸形输入清单。
+
+## 授权校验器逆向（f2 系列）
+- 分值/难度：hard ｜ 来源：[AGENTS 题型库 V9 SOP]
+- 思路1：file 看架构→加壳 upx -d→strings/xxd→rizin -q -c "aaa; s main; pdg" 反编译读伪码（8成校验器=输入变换与常量比对）→非 x86 用 qemu-user 仿真跑→算法逆出后 z3 约束求解枚举合法码。
+
+## 已知 CVE 利用（c 系列通用）
+- 分值/难度：medium ｜ 来源：[AGENTS 题型库] 实战蒸馏
+- 思路1：卡题时平台 hint 往往直接给 CVE 编号（如 CVE-2023-51467/CVE-2024-39907）——拿编号立即检索本地 PoC 库（/home/kali/pocs、knowledges）按公开 PoC 重放，勿从头逆向；c 系常见端口 8080(OFBiz)/8188/8443/7860。
