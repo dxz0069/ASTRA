@@ -667,7 +667,7 @@ def test_render_dispatch_config_claudecode_fleet(monkeypatch, tmp_path) -> None:
     assert env0["CLAUDE_CODE_SUBAGENT_MODEL"] == "deepseek-v4-flash"
     # MCP 注入：worker 的 CLAUDE_CONFIG_DIR 下应有 .claude.json
     mcp = _json.loads((Path(env0["CLAUDE_CONFIG_DIR"]) / ".claude.json").read_text(encoding="utf-8"))
-    assert mcp["mcpServers"]["playwright"]["command"] == "mcp-server-playwright"
+    assert mcp["mcpServers"]["playwright"]["command"] == "playwright-mcp"
 
 
 def test_render_dispatch_config_claudecode_requires_token(monkeypatch) -> None:

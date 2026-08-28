@@ -316,11 +316,11 @@ workers:
     @staticmethod
     def _write_claude_mcp_config(claude_dir: Path) -> None:
         """写 .claude.json 注册 playwright MCP（镜像内全局安装的
-        mcp-server-playwright；Web 类题目真实浏览器，取代 dsh 的 mcp-client 接入）。"""
+        playwright-mcp；Web 类题目真实浏览器，取代 dsh 的 mcp-client 接入）。"""
         config = {
             "mcpServers": {
                 "playwright": {
-                    "command": "mcp-server-playwright",
+                    "command": "playwright-mcp",
                     "env": {"PLAYWRIGHT_MCP_BROWSER": "chromium"},
                 }
             }
