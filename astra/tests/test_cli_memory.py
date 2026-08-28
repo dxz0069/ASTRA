@@ -18,7 +18,7 @@ def _seed_db(db_path: Path) -> None:
     db.configure(db_path)
     with db.get_conn() as conn:
         conn.execute(
-            "INSERT INTO projects VALUES ('p1','demo-target','completed','2026-08-24T10:00',1,NULL,NULL,NULL,NULL)"
+            "INSERT INTO projects VALUES ('p1','demo-target','completed','2026-08-24T10:00',1,NULL,NULL,NULL,NULL,NULL)"
         )
         facts = [
             ("goal", "获取目标系统权限", "regular", "medium", None, 0),

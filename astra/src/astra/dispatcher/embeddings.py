@@ -22,6 +22,7 @@ from urllib import request as _urlrequest
 _DEFAULT_API_URL = "https://open.bigmodel.cn/api/paas/v4/embeddings"
 _cache_lock = threading.Lock()
 _vector_cache: dict[str, list[float]] = {}
+_CACHE_MAX = 8192  # 审计修复②：有界缓存（条），超限整体重建
 _api_failure_count = 0
 _MAX_API_FAILURES = 3  # 连续失败后熔断，本进程不再尝试（避免拖慢调度循环）
 
@@ -71,24 +72,35 @@ def _embed_via_local(texts: list[str]) -> list[list[float]] | None:
 
 
 def embed_texts(texts: list[str]) -> list[list[float]] | None:
-    """批量嵌入；不可用/失败返回 None（调用方降级为纯 token 打分）。"""
+    """批量嵌入；不可用/失败返回 None（调用方降级为纯 token 打分）。
+
+    审计修复①：禁用判定前移——未配置嵌入源时即使缓存命中也返回 None（原实现
+    缓存全命中会绕过禁用语义，行为随进程历史漂移=不可复现）。
+    审计修复②：缓存有界（_CACHE_MAX 条，超限清空重建）——全局字典无界增长在
+    6h 高负载跑分中吃内存。
+    审计修复③：远端失败时已缓存文本仍可用（部分可用优于全量弃用）。
+    """
     if not texts:
         return []
-    missing = [t for t in texts if t not in _vector_cache]
-    if missing:
-        vectors = (
-            _embed_via_api(missing)
-            if os.environ.get("ASTRA_EMBED_API_KEY")
-            else _embed_via_local(missing) if os.environ.get("ASTRA_EMBED_MODEL")
-            else None
-        )
-        if vectors is None or len(vectors) != len(missing):
-            return None
-        with _cache_lock:
-            for text, vec in zip(missing, vectors):
-                _vector_cache[text] = vec
+    api_key = os.environ.get("ASTRA_EMBED_API_KEY")
+    local_model = os.environ.get("ASTRA_EMBED_MODEL")
+    if not api_key and not local_model:
+        return None  # 未配置嵌入源：恒定降级，与进程历史无关
     with _cache_lock:
-        return [_vector_cache[t] for t in texts]
+        cached = {t: _vector_cache[t] for t in texts if t in _vector_cache}
+    missing = [t for t in texts if t not in cached]
+    if missing:
+        vectors = _embed_via_api(missing) if api_key else _embed_via_local(missing)
+        if vectors is not None and len(vectors) == len(missing):
+            with _cache_lock:
+                if len(_vector_cache) + len(missing) > _CACHE_MAX:
+                    _vector_cache.clear()
+                for text, vec in zip(missing, vectors):
+                    _vector_cache[text] = vec
+                cached.update({t: _vector_cache[t] for t in missing})
+    if any(t not in cached for t in texts):
+        return None
+    return [cached[t] for t in texts]
 
 
 def cosine_similarity(a: list[float], b: list[float]) -> float:
