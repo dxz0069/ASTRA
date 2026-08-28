@@ -34,7 +34,7 @@ python3 container/astra_runner/runner.py
 ```
 
 MCP：引擎启动时向每个 worker 的 CLAUDE_CONFIG_DIR 写入 `.claude.json`，注册
-playwright MCP（镜像内全局安装的 `mcp-server-playwright`，Web 类题目真实浏览器）。
+playwright MCP（镜像内全局安装的 `playwright-mcp`，Web 类题目真实浏览器）。
 
 ## 托管模式
 
