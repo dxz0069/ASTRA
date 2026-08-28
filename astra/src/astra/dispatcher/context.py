@@ -136,7 +136,7 @@ def build_focus_fact_ids(project: ProjectDetail, budget: int) -> list[str]:
         recency = index / total  # 0..1，越新越高
         chain = _CHAIN_BONUS.get(chain_depths.get(fact.id, 0), 0.0)
         # V8 负结果一等公民：已穷尽的方向（negative）在焦点中保活——防止
-        # 同类死路被反复开航向（Cairn_X 实测靠关闭账本避免重复劳动）
+        # 同类死路被反复开航向（榜首实测靠关闭账本避免重复劳动）
         if fact.kind == "negative":
             chain += 0.8
         if _is_critical(fact):

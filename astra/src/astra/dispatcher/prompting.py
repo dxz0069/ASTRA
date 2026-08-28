@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 import json
+import re
 from importlib import resources
 from typing import Any
 
 
+_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+
+
 def load_prompt(group: str, name: str) -> str:
-    return resources.files("astra.dispatcher.prompts").joinpath(group).joinpath(name).read_text(encoding="utf-8")
+    """加载 prompt 模板；剥离 HTML 注释——模板头的来源/版本注记是开发者元数据，
+    原样下发会进入 LLM 会话与平台日志（曾泄露对标来源与拆解细节）。"""
+    text = resources.files("astra.dispatcher.prompts").joinpath(group).joinpath(name).read_text(encoding="utf-8")
+    return _HTML_COMMENT_RE.sub("", text).lstrip()
 
 
 def render_prompt(template: str, replacements: dict[str, str]) -> str:
