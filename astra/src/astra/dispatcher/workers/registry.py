@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from astra.dispatcher.workers.adapters import ClaudeCodeDriver, CodexDriver, DshDriver, MockDriver, PiDriver
+from astra.dispatcher.workers.adapters import ClaudeCodeDriver, CodexDriver, MockDriver, PiDriver
 from astra.dispatcher.workers.base import WorkerDriver
 
 
@@ -8,7 +8,6 @@ DRIVERS: dict[str, WorkerDriver] = {
     "claudecode": ClaudeCodeDriver(),
     "codex": CodexDriver(),
     "pi": PiDriver(),
-    "dsh": DshDriver(),
     "mock": MockDriver(),
 }
 

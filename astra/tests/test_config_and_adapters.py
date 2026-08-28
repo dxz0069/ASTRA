@@ -9,7 +9,6 @@ import sys
 
 from astra.dispatcher.config import DispatchConfig, WorkerConfig, validate_prompt_resources
 from astra.dispatcher.workers.adapters.codex import CodexDriver
-from astra.dispatcher.workers.adapters.dsh import DshDriver
 from astra.dispatcher.workers.adapters.pi import PiDriver
 
 from conftest import make_config
@@ -149,27 +148,10 @@ def test_codex_driver_execute_argv_passes_model_endpoint_and_prompt() -> None:
     assert argv[-2:] == ["--", "prompt"]
 
 
-def _dsh_worker(**env_overrides: str) -> WorkerConfig:
-    env: dict[str, str] = {
-        "DSH_MODEL": "deepseek-v4-pro",
-        "DEEPSEEK_API_KEY": "secret",
-        "DSH_PATCH": "/opt/astra/dsh/astra-headless.patch.yml",
-    }
-    env.update(env_overrides)
-    return WorkerConfig.model_validate(
-        {
-            "name": "dsh-worker",
-            "type": "dsh",
-            "task_types": ["bootstrap", "reason", "explore"],
-            "max_running": 1,
-            "priority": 0,
-            "env": env,
-        }
-    )
-
-
-def test_dsh_worker_requires_model_and_api_key() -> None:
-    with pytest.raises(ValidationError, match="missing env keys: DSH_MODEL"):
+def test_dsh_worker_type_removed() -> None:
+    """dsh 适配器已于 2026-08-28 移除（tsecbench 前十 0 家使用）——
+    type=dsh 必须被 schema 直接拒绝，防止旧配置静默降级。"""
+    with pytest.raises(ValidationError):
         WorkerConfig.model_validate(
             {
                 "name": "dsh-worker",
@@ -177,191 +159,68 @@ def test_dsh_worker_requires_model_and_api_key() -> None:
                 "task_types": ["explore"],
                 "max_running": 1,
                 "priority": 0,
-                "env": {},
+                "env": {"DSH_MODEL": "deepseek-v4-flash", "DEEPSEEK_API_KEY": "x"},
             }
         )
 
 
-def test_dsh_worker_anthropic_mode_requires_anthropic_token() -> None:
-    # deepseek 模式缺 DEEPSEEK_API_KEY
-    with pytest.raises(ValidationError, match="missing env keys: DEEPSEEK_API_KEY"):
-        WorkerConfig.model_validate(
-            {
-                "name": "dsh-worker",
-                "type": "dsh",
-                "task_types": ["explore"],
-                "max_running": 1,
-                "priority": 0,
-                "env": {"DSH_MODEL": "k3", "DSH_PROVIDER": "deepseek"},
-            }
-        )
-    # anthropic 模式缺 ANTHROPIC_AUTH_TOKEN
-    with pytest.raises(ValidationError, match="missing env keys: ANTHROPIC_AUTH_TOKEN"):
-        WorkerConfig.model_validate(
-            {
-                "name": "dsh-worker",
-                "type": "dsh",
-                "task_types": ["explore"],
-                "max_running": 1,
-                "priority": 0,
-                "env": {"DSH_MODEL": "k3", "DSH_PROVIDER": "anthropic"},
-            }
-        )
-    # 非法 provider
-    with pytest.raises(ValidationError, match="DSH_PROVIDER must be deepseek, anthropic or zhipu"):
-        WorkerConfig.model_validate(
-            {
-                "name": "dsh-worker",
-                "type": "dsh",
-                "task_types": ["explore"],
-                "max_running": 1,
-                "priority": 0,
-                "env": {"DSH_MODEL": "k3", "DSH_PROVIDER": "moonshot"},
-            }
-        )
-    # anthropic 模式合法配置
+def test_claudecode_worker_healthcheck_and_execute() -> None:
+    """claudecode 是托管唯一舰队：健康检查打 anthropic 端点；execute 用
+    --session-id（原生会话，无自制 patch）。"""
+    from astra.dispatcher.workers.adapters.claudecode import ClaudeCodeDriver
+
     worker = WorkerConfig.model_validate(
         {
-            "name": "dsh-worker",
-            "type": "dsh",
+            "name": "cc-worker",
+            "type": "claudecode",
+            "task_types": ["bootstrap", "explore"],
+            "max_running": 3,
+            "priority": 0,
+            "env": {
+                "ANTHROPIC_MODEL": "deepseek-v4-flash",
+                "ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
+                "ANTHROPIC_AUTH_TOKEN": "sk-test",
+            },
+        }
+    )
+    argv = ClaudeCodeDriver().build_healthcheck(worker)
+    assert "https://api.deepseek.com/anthropic/v1/messages" in argv
+    assert "x-api-key: sk-test" in argv
+    assert "anthropic-version: 2023-06-01" in argv
+    assert '"model":"deepseek-v4-flash"' in argv[-1]
+
+    result = ClaudeCodeDriver().build_execute(worker, "prompt", "session-abc")
+    assert "--session-id" in result.argv
+    assert "session-abc" in result.argv
+    assert "--dangerously-skip-permissions" in result.argv
+
+    conclude = ClaudeCodeDriver().build_conclude(worker, "wrap up", "session-abc")
+    assert "-r" in conclude
+    assert "session-abc" in conclude
+
+
+def test_claudecode_startup_healthcheck_describe_uses_env_expansion() -> None:
+    """startup 健康检查的 describe 版本必须用 $VAR 展示凭据（不泄 key）。"""
+    from astra.dispatcher.workers.adapters.claudecode import ClaudeCodeDriver
+
+    worker = WorkerConfig.model_validate(
+        {
+            "name": "cc-worker",
+            "type": "claudecode",
             "task_types": ["explore"],
             "max_running": 1,
             "priority": 0,
-            "env": {"DSH_MODEL": "k3", "DSH_PROVIDER": "anthropic", "ANTHROPIC_AUTH_TOKEN": "sk-kimi"},
+            "env": {
+                "ANTHROPIC_MODEL": "deepseek-v4-flash",
+                "ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
+                "ANTHROPIC_AUTH_TOKEN": "sk-secret",
+            },
         }
     )
-    assert worker.env["ANTHROPIC_AUTH_TOKEN"] == "sk-kimi"
-
-
-def test_dsh_driver_anthropic_mode_healthcheck() -> None:
-    worker = _dsh_worker(
-        DSH_PROVIDER="anthropic",
-        ANTHROPIC_AUTH_TOKEN="sk-kimi",
-        ANTHROPIC_BASE_URL="https://api.kimi.com/coding/",
-    )
-    argv = DshDriver().build_healthcheck(worker)
-
-    assert "https://api.kimi.com/coding/v1/messages" in argv
-    assert "x-api-key: sk-kimi" in argv
-    assert "anthropic-version: 2023-06-01" in argv
-    assert '"model":"deepseek-v4-pro"' in argv[-1]  # DSH_MODEL 仍是 wire 模型名
-
-
-def test_dsh_driver_anthropic_mode_describe_uses_env_expansion() -> None:
-    worker = _dsh_worker(
-        DSH_PROVIDER="anthropic",
-        ANTHROPIC_AUTH_TOKEN="sk-kimi",
-        ANTHROPIC_BASE_URL="https://api.kimi.com/coding/",
-    )
-    described = DshDriver().describe_startup_healthcheck(worker)
-    assert "x-api-key: $ANTHROPIC_AUTH_TOKEN" in described
-    assert "anthropic-version: 2023-06-01" in described
-
-
-def test_dsh_driver_deepseek_healthcheck_unaffected_by_anthropic_mode() -> None:
-    worker = _dsh_worker(DSH_PROVIDER="deepseek")
-    argv = DshDriver().build_healthcheck(worker)
-    assert "https://api.deepseek.com/chat/completions" in argv
-    assert "Authorization: Bearer secret" in argv
-
-
-def _assert_last_arg_is_prompt(argv: list[str], expected: str) -> None:
-    """Windows 下 prompt 走 @file（由 astra 定制 startup 展开），其余平台直接 argv。"""
-    import sys
-    from pathlib import Path
-
-    last = argv[-1]
-    if sys.platform == "win32":
-        assert last.startswith("@")
-        assert Path(last[1:]).read_text(encoding="utf-8") == expected
-    else:
-        assert last == expected
-
-
-def test_dsh_driver_execute_argv_includes_profile_patch_session_and_prompt() -> None:
-    worker = _dsh_worker()
-    result = DshDriver().build_execute(worker, "prompt", "session-abc")
-
-    assert result.session == "session-abc"
-    # Windows 下 node 直跑 lib/bin.js（.CMD shim 会破坏含换行的长 prompt）；其他平台直接 dsh
-    if sys.platform == "win32":
-        assert result.argv[0] == "node"
-        assert result.argv[1].endswith("bin.js")
-    else:
-        assert result.argv[0] == "dsh"
-    assert result.argv[1:3] == ["--profile", "headless"] if sys.platform != "win32" else result.argv[2:4] == ["--profile", "headless"]
-    patch_idx = result.argv.index("--patch")
-    assert result.argv[patch_idx + 1] == "/opt/astra/dsh/astra-headless.patch.yml"
-    session_idx = result.argv.index("--session")
-    assert result.argv[session_idx + 1] == "session-abc"
-    _assert_last_arg_is_prompt(result.argv, "prompt")
-
-
-def test_dsh_driver_conclude_reuses_same_session() -> None:
-    worker = _dsh_worker()
-    argv = DshDriver().build_conclude(worker, "conclude-prompt", "session-abc")
-
-    _assert_last_arg_is_prompt(argv, "conclude-prompt")
-    session_idx = argv.index("--session")
-    assert argv[session_idx + 1] == "session-abc"
-
-
-def test_dsh_driver_resume_disabled_drops_session_flag() -> None:
-    worker = _dsh_worker(DSH_RESUME="0")
-    argv = DshDriver().build_execute(worker, "prompt", "session-abc").argv
-
-    assert "--session" not in argv
-    _assert_last_arg_is_prompt(argv, "prompt")
-
-
-def test_dsh_driver_prepare_session_uses_dsh_id_shape() -> None:
-    session = DshDriver().prepare_session()
-    assert session.startswith("session-")
-    assert len(session) > len("session-")
-
-
-def test_dsh_driver_healthcheck_hits_chat_completions_with_bearer() -> None:
-    worker = _dsh_worker(DEEPSEEK_BASE_URL="https://gateway.example.com")
-    argv = DshDriver().build_healthcheck(worker)
-
-    assert argv[0] == "curl"
-    assert "https://gateway.example.com/chat/completions" in argv
-    assert "Authorization: Bearer secret" in argv
-    assert '"model":"deepseek-v4-pro"' in argv[-1]
-
-
-def test_dsh_driver_healthcheck_defaults_to_official_base_url() -> None:
-    argv = DshDriver().build_healthcheck(_dsh_worker())
-    assert "https://api.deepseek.com/chat/completions" in argv
-
-
-def test_dsh_driver_startup_healthcheck_and_describe() -> None:
-    worker = _dsh_worker()
-    driver = DshDriver()
-
+    driver = ClaudeCodeDriver()
     startup = driver.build_startup_healthcheck(worker)
     assert "curl" in startup
-    assert "http_status=" in " ".join(startup)
-
     described = driver.describe_startup_healthcheck(worker)
-    assert "Authorization: Bearer $DEEPSEEK_API_KEY" in described
-    assert "https://api.deepseek.com/chat/completions" in described
-
-
-def test_dsh_driver_windows_uses_node_direct_and_atfile_prompt(monkeypatch, tmp_path) -> None:
-    from astra.dispatcher.workers.adapters import dsh as dsh_module
-
-    bin_js = tmp_path / "node_modules" / "@deepseek-ai" / "dsh" / "lib" / "bin.js"
-    bin_js.parent.mkdir(parents=True)
-    bin_js.write_text("", encoding="utf-8")
-    cmd_shim = tmp_path / "dsh.CMD"
-    cmd_shim.write_text("", encoding="utf-8")
-
-    monkeypatch.setattr(dsh_module.sys, "platform", "win32")
-    monkeypatch.setattr(dsh_module.shutil, "which", lambda _name: str(cmd_shim))
-
-    argv = DshDriver().build_execute(_dsh_worker(), "prompt", "session-abc").argv
-
-    assert argv[0] == "node"
-    assert argv[1] == str(bin_js)
-    assert argv[-1].startswith("@")  # prompt 以 @file 传入
+    assert "x-api-key: $ANTHROPIC_AUTH_TOKEN" in described
+    assert "sk-secret" not in described
+    assert "https://api.deepseek.com/anthropic/v1/messages" in described

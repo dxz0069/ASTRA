@@ -87,41 +87,10 @@ workers:
       PI_PROVIDER_API: "openai-completions"
       PI_MODEL_CONTEXT_WINDOW: "262144"
 
-  # ---- DeepSeek Harness（dsh）worker ----
-  # 无头模式：dsh --profile headless "<task>"，等价 claude -p。
-  # 前提：容器内已安装 @deepseek-ai/dsh，且 DSH_PATCH 指向本仓库自带的
-  # astra headless 扩展（container/dsh/astra-headless.patch.yml，提供
-  # --session 会话续接 = 等价 claude 的 --session-id / -r）。
-  # DSH_PERMISSION_MODE=danger-full-access 等价 claude 的 --dangerously-skip-permissions。
-  # DSH_HOME 指向每 worker 独立目录，避免会话/凭据跨项目污染（等价 CLAUDE_CONFIG_DIR）。
-  # DSH_PROVIDER 选择模型路由（默认 deepseek → DEEPSEEK_API_KEY 官方 chat-completions；
-  # anthropic → ANTHROPIC_AUTH_TOKEN/ANTHROPIC_BASE_URL，适配 Kimi / DeepSeek /anthropic 兼容端点）。
-  - name: "dsh_deepseek-v4-pro"
-    type: "dsh"
-    task_types: [bootstrap, reason, explore]
-    max_running: 2
-    priority: 0
-    env:
-      DSH_MODEL: "deepseek-v4-pro"
-      DSH_PROVIDER: "deepseek"
-      DEEPSEEK_API_KEY: "sk-xxx"
-      # DEEPSEEK_BASE_URL: "https://api.deepseek.com"   # 可选，默认官方地址
-      DSH_PATCH: "/opt/astra/dsh/astra-headless.patch.yml"  # 可选；未配置时设 DSH_RESUME=0 走无状态模式
-      DSH_PERMISSION_MODE: "danger-full-access"
-      # DSH_HOME: "/tmp/astra-dsh/dsh_deepseek-v4-pro"   # 可选数据隔离目录
-
-  # dsh worker 的 anthropic 模式示例（用 Anthropic 兼容端点，如 Kimi）：
-  # - name: "dsh_kimi-k3"
-  #   type: "dsh"
-  #   task_types: [bootstrap, reason, explore]
-  #   max_running: 2
-  #   priority: 0
-  #   env:
-  #     DSH_MODEL: "k3"
-  #     DSH_PROVIDER: "anthropic"
-  #     ANTHROPIC_AUTH_TOKEN: "sk-xxx"
-  #     ANTHROPIC_BASE_URL: "https://api.kimi.com/coding/"
-  #     DSH_PATCH: "/opt/astra/dsh/astra-headless.patch.yml"
+  # ---- dsh（DeepSeek Harness）已于 2026-08-28 移除 ----
+  # tsecbench 前十 0 家使用 dsh（6 家 Claude Code/Agent SDK + 3 家自研循环），
+  # 托管舰队统一 claudecode；如需 Kimi/GLM 等其他 anthropic 兼容端点，复制
+  # 上方 claudecode worker 块改 ANTHROPIC_BASE_URL/AUTH_TOKEN/MODEL 即可。
   #     DSH_PERMISSION_MODE: "danger-full-access"
 
   # ---- 混合模型示例（降本：决策用便宜模型、探索用强模型，技术方案 §3.2）----
