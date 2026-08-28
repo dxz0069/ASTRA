@@ -83,6 +83,25 @@ async def body_size_limit_middleware(request: Request, call_next):
     return await call_next(request)
 
 
+@app.middleware("http")
+async def security_headers_middleware(request: Request, call_next):
+    """审计修复（CWE-693）：补关键安全响应头。
+
+    X-Frame-Options/X-Content-Type-Options/Referrer-Policy 全量附加；
+    CSP 只对 /static 之外附加（静态 UI 需要 inline script/样式，API 响应用最严格的
+    default-src 'none'）。HSTS 仅在 TLS 下有意义，本地 http 部署不加。
+    """
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    if not request.url.path.startswith("/static"):
+        response.headers.setdefault(
+            "Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'"
+        )
+    return response
+
+
 app.include_router(settings.router)
 app.include_router(projects.router)
 app.include_router(hints.router)

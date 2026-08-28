@@ -26,7 +26,8 @@ CREATE TABLE IF NOT EXISTS projects (
     reason_worker TEXT,
     reason_trigger TEXT,
     reason_started_at TEXT,
-    reason_last_heartbeat_at TEXT
+    reason_last_heartbeat_at TEXT,
+    reason_token TEXT
 );
 
 CREATE TABLE IF NOT EXISTS facts (
@@ -123,6 +124,9 @@ def _ensure_intent_columns(conn: sqlite3.Connection) -> None:
 
 def _ensure_project_columns(conn: sqlite3.Connection) -> None:
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(projects)")}
+    if "reason_token" not in columns:
+        # 审计修复（租约令牌防冒名）：旧库补列；旧行 token=NULL 时不强制校验（平滑过渡）
+        conn.execute("ALTER TABLE projects ADD COLUMN reason_token TEXT")
     if "bootstrap_enabled" not in columns:
         conn.execute("ALTER TABLE projects ADD COLUMN bootstrap_enabled INTEGER NOT NULL DEFAULT 1")
         if "bootstrap_mode" in columns:

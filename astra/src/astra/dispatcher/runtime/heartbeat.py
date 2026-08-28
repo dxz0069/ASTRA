@@ -67,9 +67,10 @@ class HeartbeatLease:
         project_id: str,
         worker_name: str,
         interval: int,
+        lease_token: str | None = None,
     ) -> "HeartbeatLease":
         return cls(
-            heartbeat=lambda: client.reason_heartbeat(project_id, worker_name),
+            heartbeat=lambda: client.reason_heartbeat(project_id, worker_name, lease_token),
             scope=f"project={project_id} reason",
             worker_name=worker_name,
             interval=interval,

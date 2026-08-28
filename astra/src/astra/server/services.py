@@ -269,7 +269,8 @@ def clear_project_reason(conn: sqlite3.Connection, project_id: str) -> None:
         SET reason_worker = NULL,
             reason_trigger = NULL,
             reason_started_at = NULL,
-            reason_last_heartbeat_at = NULL
+            reason_last_heartbeat_at = NULL,
+            reason_token = NULL
         WHERE id = ?
         """,
         (project_id,),
@@ -302,7 +303,8 @@ def expire_reason_leases(conn: sqlite3.Connection, project_id: str | None = None
         SET reason_worker = NULL,
             reason_trigger = NULL,
             reason_started_at = NULL,
-            reason_last_heartbeat_at = NULL
+            reason_last_heartbeat_at = NULL,
+            reason_token = NULL
         WHERE reason_worker IS NOT NULL
           AND reason_last_heartbeat_at IS NOT NULL
           AND (julianday(?) - julianday(reason_last_heartbeat_at)) * 86400 > ?

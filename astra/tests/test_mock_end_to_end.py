@@ -22,6 +22,8 @@ from astra.server.models import ProjectDetail, ProjectSummary, Settings
 
 
 class InProcessClient:
+    _lease_tokens: dict[str, str | None] = {}
+
     def __init__(self, http: TestClient):
         self.http = http
         self._summaries = TypeAdapter(list[ProjectSummary])
@@ -53,13 +55,30 @@ class InProcessClient:
         return self._post(f"/projects/{project_id}/intents/{intent_id}/heartbeat", {"worker": worker})
 
     def claim_reason(self, project_id: str, worker: str, trigger: str) -> ApiResult:
-        return self._post(f"/projects/{project_id}/reason/claim", {"worker": worker, "trigger": trigger})
+        result = self._post(f"/projects/{project_id}/reason/claim", {"worker": worker, "trigger": trigger})
+        if result.ok and isinstance(result.data, dict):
+            # 真实 server 会下发租约令牌；桩侧记账，后续心跳/释放/完成携带
+            self._lease_tokens[project_id] = result.data.get("reason_token")
+        return result
 
-    def reason_heartbeat(self, project_id: str, worker: str) -> ApiResult:
-        return self._post(f"/projects/{project_id}/reason/heartbeat", {"worker": worker})
+    def _token_of(self, project_id: str, explicit: str | None) -> str | None:
+        return explicit if explicit is not None else self._lease_tokens.get(project_id)
 
-    def release_reason(self, project_id: str, worker: str) -> ApiResult:
-        return self._post(f"/projects/{project_id}/reason/release", {"worker": worker})
+    def reason_heartbeat(self, project_id: str, worker: str, lease_token: str | None = None) -> ApiResult:
+        return self._post(
+            f"/projects/{project_id}/reason/heartbeat",
+            {"worker": worker, "lease_token": self._token_of(project_id, lease_token)},
+        )
+
+    def release_reason(self, project_id: str, worker: str, lease_token: str | None = None) -> ApiResult:
+        token = self._token_of(project_id, lease_token)
+        result = self._post(
+            f"/projects/{project_id}/reason/release",
+            {"worker": worker, "lease_token": token},
+        )
+        if result.ok:
+            self._lease_tokens.pop(project_id, None)
+        return result
 
     def release(self, project_id: str, intent_id: str, worker: str) -> ApiResult:
         return self._post(f"/projects/{project_id}/intents/{intent_id}/release", {"worker": worker})
@@ -86,11 +105,19 @@ class InProcessClient:
             body,
         )
 
-    def complete(self, project_id: str, from_ids: list[str], description: str, worker: str) -> ApiResult:
-        return self._post(
+    def complete(self, project_id: str, from_ids: list[str], description: str, worker: str, lease_token: str | None = None) -> ApiResult:
+        result = self._post(
             f"/projects/{project_id}/complete",
-            {"from": from_ids, "description": description, "worker": worker},
+            {
+                "from": from_ids,
+                "description": description,
+                "worker": worker,
+                "lease_token": self._token_of(project_id, lease_token),
+            },
         )
+        if result.ok:
+            self._lease_tokens.pop(project_id, None)
+        return result
 
     def create_intent(self, project_id: str, from_ids: list[str], description: str, creator: str) -> ApiResult:
         return self._post(
@@ -392,6 +419,12 @@ def test_mock_scheduler_enabled_project_skips_bootstrap_when_worker_does_not_sup
         containers,
     )
     project_id = _create_project(http_client)
+    # 审计修复后 complete 不再接受 from_=["origin"]（系统事实=劫持原语）：
+    # 先种一条真实星记作为完成依据
+    seed = client.create_intent(project_id, ["origin"], "seed", "seed-worker")
+    assert seed.ok
+    assert client.heartbeat(project_id, "i001", "seed-worker").ok
+    assert client.conclude(project_id, "i001", "seed-worker", "seed fact").ok
 
     try:
         _dispatch_and_wait(loop)
@@ -401,5 +434,6 @@ def test_mock_scheduler_enabled_project_skips_bootstrap_when_worker_does_not_sup
 
     assert project.project.status == "completed"
     assert [(intent.description, intent.to) for intent in project.intents] == [
-        ("mock complete from origin", "goal")
+        ("seed", "f001"),
+        ("mock complete from f001", "goal"),
     ]

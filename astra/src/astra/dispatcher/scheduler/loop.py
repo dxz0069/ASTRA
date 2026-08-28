@@ -377,6 +377,8 @@ class DispatcherLoop:
                 claim.status_code,
             )
             return False
+        # 审计修复（租约令牌）：claim 响应携带持有凭证，透传任务与清理路径
+        lease_token = (claim.data or {}).get("reason_token") if isinstance(claim.data, dict) else None
         try:
             future = self.executor.submit(
                 run_reason_task,
@@ -387,10 +389,11 @@ class DispatcherLoop:
                 export_yaml,
                 worker,
                 cancellation := TaskCancellation(),
+                lease_token,
             )
         except Exception:
             LOG.exception("failed to submit reason task project=%s worker=%s", project.project.id, worker.name)
-            self._best_effort_release_reason(project.project.id, worker.name)
+            self._best_effort_release_reason(project.project.id, worker.name, lease_token)
             return False
         self.futures[future] = RunningTask(
             project.project.id,
@@ -401,6 +404,7 @@ class DispatcherLoop:
             fact_count=len(project.facts),
             hint_count=len(project.hints),
             open_intent_count=self._project_open_intent_count(project),
+            lease_token=lease_token,
         )
         self.runtime_project_ids.add(project.project.id)
         self._clear_project_log_state(project.project.id)
@@ -906,8 +910,8 @@ class DispatcherLoop:
         if not response.ok and response.status_code not in (403, 409):
             LOG.warning("release failed project=%s intent=%s worker=%s status=%s", project_id, intent_id, worker_name, response.status_code)
 
-    def _best_effort_release_reason(self, project_id: str, worker_name: str) -> None:
-        response = self.client.release_reason(project_id, worker_name)
+    def _best_effort_release_reason(self, project_id: str, worker_name: str, lease_token: str | None = None) -> None:
+        response = self.client.release_reason(project_id, worker_name, lease_token)
         if not response.ok and response.status_code not in (403, 409):
             LOG.warning("reason release failed project=%s worker=%s status=%s", project_id, worker_name, response.status_code)
 
@@ -932,8 +936,12 @@ class DispatcherLoop:
         interval = self.config.runtime.interval
         for name, value in (("intent_timeout", settings.intent_timeout), ("reason_timeout", settings.reason_timeout)):
             if value <= interval:
-                raise RuntimeError(
-                    f"server {name}={value}s must be greater than dispatcher interval={interval}s"
+                # 审计修复：原实现 raise 未捕获会击穿调度循环（配置错=整个 dispatcher 死）。
+                # 改为本地钳制 + 告警：按 interval*2 的安全下限生效，心跳余量保住，
+                # 调度不中断（自愈优先于崩溃，配置错误在下一轮修正后自动恢复）。
+                LOG.error(
+                    "server %s=%ss <= dispatcher interval=%ss; clamping effective floor to %ss (fix server settings)",
+                    name, value, interval, interval * 2,
                 )
             if value < interval * 2:
                 LOG.warning(
