@@ -62,7 +62,7 @@ class LocalProcess:
         # 禁用其参数转换以保持 Python list2cmdline 的引号语义
         full_env.setdefault("MSYS2_ARG_CONV_EXCL", "*")
         creationflags = 0
-        # P1-3：POSIX 下新建会话/进程组——terminate 时才能 killpg 连同 dsh(node)
+        # P1-3：POSIX 下新建会话/进程组——terminate 时才能 killpg 连同 CLI(node/bun)
         # 派生的孙进程（nmap/curl 等）一并回收；否则只杀直接子进程，孙进程成孤儿
         popen_kwargs: dict = {}
         if sys.platform == "win32":
@@ -137,7 +137,7 @@ class LocalProcess:
             if sys.platform == "win32":
                 self._process.send_signal(signal.CTRL_BREAK_EVENT)
             else:
-                # P1-3：按进程组发 SIGTERM——连同 dsh 派生的孙进程一起回收；
+                # P1-3：按进程组发 SIGTERM——连同 CLI 派生的孙进程一起回收；
                 # 进程恰好已退出（竞态）时忽略 ProcessLookupError
                 try:
                     os.killpg(os.getpgid(self._process.pid), signal.SIGTERM)
