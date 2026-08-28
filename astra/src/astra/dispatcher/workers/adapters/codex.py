@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 from astra.dispatcher.config import WorkerConfig
 from astra.dispatcher.workers.adapters._curl import build_verbose_curl_healthcheck, expand_env, render_curl_command
 from astra.dispatcher.workers.base import DriverResult, RegexSessionDriver
@@ -14,7 +16,7 @@ class CodexDriver(RegexSessionDriver):
             "-sS",
             "--fail",
             "-o",
-            "/dev/null",
+            os.devnull,
             self._healthcheck_url(worker),
             *self._healthcheck_headers(worker),
             "-d",

@@ -92,19 +92,16 @@ COPY ./astra /opt/astra
 RUN cd /opt/astra && pip3 install uv_build --break-system-packages && pip3 install . --break-system-packages
 RUN pip3 install tsec-benchmark --break-system-packages
 COPY ./container/astra_runner /opt/astra-runner
-# ASTRA 定制的 dsh headless 扩展（--session 会话续接，见 container/dsh/README.md）
-COPY ./container/dsh /opt/astra/dsh
 
 # 镜像默认入口：astra-runner（本地模式可手动执行 python3 /opt/astra-runner/runner.py）
 ENTRYPOINT ["python3", "/opt/astra-runner/runner.py"]
 
+# 2026-08-28：dsh 已移除（含 COPY container/dsh——目录已删，旧行会让本文件不可构建）；
+# claude-code 升到与 slim 一致的 2.1.250。托管出包请用 Dockerfile.slim（本文件为本地全量开发镜像）。
 RUN sudo npm install -g @openai/codex@0.118.0
-RUN sudo npm install -g @anthropic-ai/claude-code@2.1.98
+RUN sudo npm install -g @anthropic-ai/claude-code@2.1.250
 RUN sudo npm install -g @mariozechner/pi-coding-agent@0.73.0
-# DeepSeek Harness 无头模式 + ASTRA runner 插件（复制进 dsh 包 lib/，供 --patch 以裸说明符加载）
-RUN sudo npm install -g @deepseek-ai/dsh@0.1.0-rc.6 && \
-    sudo cp /opt/astra/dsh/astra-headless-runner.js "$(sudo npm root -g)/@deepseek-ai/dsh/lib/astra-headless-runner.js"
-# Playwright MCP（headless 通过 mcp-client 接入，Web 类题目用真实浏览器；npx -y 现场下载的替代）
+# Playwright MCP（claudecode worker 经 .claude.json 注入使用，Web 类题目真实浏览器）
 RUN sudo npm install -g @playwright/mcp@latest
 
 RUN sudo chmod +x /usr/local/bin/kerbrute

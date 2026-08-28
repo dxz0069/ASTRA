@@ -1,4 +1,4 @@
-"""astra-runner —— tsecbench 靶场接入编排器（镜像 ENTRYPOINT / 本地模式通用）。
+"""astra-runner —— 评测编排器（benchmark-agnostic，当前内置 tsecbench 适配；平台 SDK/题型知识可替换）。
 
 职责（SDK 五步生命周期 + 逐题 ASTRA 项目编排）：
 1. 读取 BENCHMARK_TOKEN / BENCHMARK_BASE_URL，进入 SDK 上下文（自动 VPN 预检）
@@ -1016,11 +1016,13 @@ def _run_single_challenge(
                 _submit_flag_safely(client, code, flag, result, started_at)
             expected = result.flag_count or 1
             remaining_flags = expected - result.flags_correct
-            if result.flags_found and remaining_flags <= 0:
-                # 旗已收满：正常收尾关闭
+            if result.flags_found and (remaining_flags <= 0 or result.flag_count <= 0):
+                # 旗已收满，或旗数未知（flag_count=0，含"只交了错旗"）——保守收割正常
+                # 关题。修复：此前未知旗数+全错旗（flags_correct=0）会落进多旗 defer
+                # 分支反复回队烧窗口（审计 2026-08-28：注释宣称的保守分支不可达）。
                 LOG.info("challenge closed all flags collected code=%s flags=%s", code, result.flags_found)
                 continue_flag_wait = False
-            elif result.flags_found and remaining_flags > 0 and defer_after_seconds > 0:
+            elif result.flags_found and remaining_flags > 0 and result.flag_count > 0 and defer_after_seconds > 0:
                 # V9 多旗收割：部分得手但旗未收满（b 系 4-6 旗大分题）——原逻辑
                 # 此处直接关题放弃剩余旗（b-02 六旗题单题曾漏上千分）。改为 defer
                 # 保留星图进度回队续攻；预算由 _work 按 flags_correct 扩展。
@@ -1033,7 +1035,7 @@ def _run_single_challenge(
                 status = "deferred"
                 return status
             elif result.flags_found:
-                # 旗数未知（flag_count=0）但有斩获：保守收割——正常关题
+                # 已知多旗但 defer 关闭（defer_after_seconds=0）或多旗条件不满足：关题
                 LOG.info("challenge closed with partial flags code=%s flags=%s", code, result.flags_found)
                 continue_flag_wait = False
             else:
@@ -1752,7 +1754,10 @@ def _self_heal_restart(engine_factory=None) -> None:
     # 注意：engine_factory() 返回 LocalAstraEngine（无 shutdown），必须直接
     # 调 AstraDaemon.instance().shutdown()——审计确认前一版是死代码（D1）。
     try:
-        from astra_runner.astra_runner_engine import AstraDaemon
+        # 平铺导入（与 runner 同目录；镜像 ENTRYPOINT 的 sys.path[0]=/opt/astra-runner）。
+        # 此前用包路径 astra_runner.astra_runner_engine，容器内必 ImportError 被
+        # except 吞掉 → shutdown 从未真正执行（D1 修复形同虚设），2026-08-28 审计修正。
+        from astra_runner_engine import AstraDaemon
         AstraDaemon.instance().shutdown()
         LOG.info("watchdog: engine daemon shutdown complete before execv")
     except Exception as exc:  # noqa: BLE001
@@ -1863,7 +1868,7 @@ def _submit_flag_safely(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="astra-runner: tsecbench 靶场接入编排器")
+    parser = argparse.ArgumentParser(description="astra-runner: 评测编排器（当前接入 tsecbench）")
     parser.add_argument("--token", default=None, help="BENCHMARK_TOKEN（默认读环境变量）")
     parser.add_argument("--base-url", default=None, help="BENCHMARK_BASE_URL（默认读环境变量）")
     parser.add_argument("--challenge-timeout", type=int, default=DEFAULT_CHALLENGE_TIMEOUT_SECONDS)

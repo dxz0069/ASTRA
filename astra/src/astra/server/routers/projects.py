@@ -229,7 +229,12 @@ def claim_project_reason(project_id: str, body: ReasonClaimRequest):
         if current_worker is not None and current_worker != body.worker:
             raise HTTPException(409, f"Project reason is currently claimed by {current_worker}")
         if current_worker == body.worker:
-            return project_meta_from_row(row)
+            # 幂等重认领：回传已持有的租约令牌（否则调用方拿 None token，
+            # 后续 heartbeat/complete 全 403 直到租约过期——审计 2026-08-28）
+            meta = project_meta_from_row(row)
+            stored = row["reason_token"] if "reason_token" in row.keys() else None
+            meta.reason_token = stored or None
+            return meta
 
         now = utcnow()
         # 审计修复（CWE-284 租约令牌）：claim 下发随机持有凭证，心跳/释放/完成须携带

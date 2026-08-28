@@ -352,17 +352,9 @@ workers:
         if removed:
             LOG.info("cleaned stale claude homes root=%s removed=%s", root, removed)
 
-    def shutdown(self) -> None:
-        for process in (self._dispatcher, self._server):
-            if process is not None and process.poll() is None:
-                LOG.info("stopping astra process pid=%s", process.pid)
-                process.terminate()
-                try:
-                    process.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-        self._dispatcher = None
-        self._server = None
+    # 注意：shutdown 只定义一次（类头部的 P0 加固版：killpg+端口等待+含密钥
+    # dispatch yaml 清理）。这里曾残留一个同名的简版 shutdown 把加固版覆盖成
+    # 死代码（Python 类体后定义覆盖前定义），2026-08-28 审计修复删除。
 
 
 _ENGINE_LOG_PREFIX = "astra-engine-"
@@ -468,6 +460,7 @@ class LocalAstraEngine:
             response = requests.put(
                 f"{ASTRA_SERVER_URL}/projects/{project_id}/status",
                 json={"status": "stopped"},
+                headers=_auth_headers(),
                 timeout=15,
             )
             response.raise_for_status()
@@ -475,12 +468,13 @@ class LocalAstraEngine:
         except requests.RequestException as exc:
             LOG.warning("stop_project failed project=%s error=%s", project_id, exc)
 
-    def reactivate_project(self, project_id: str) -> None:
+    def reactivate_project(self, project_id: str) -> bool:
         """defer 回队复用：项目置回 active，恢复调度（星图进度无损）。"""
         try:
             response = requests.put(
                 f"{ASTRA_SERVER_URL}/projects/{project_id}/status",
                 json={"status": "active"},
+                headers=_auth_headers(),
                 timeout=15,
             )
             response.raise_for_status()
