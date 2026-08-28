@@ -91,31 +91,26 @@ workers:
   # tsecbench 前十 0 家使用 dsh（6 家 Claude Code/Agent SDK + 3 家自研循环），
   # 托管舰队统一 claudecode；如需 Kimi/GLM 等其他 anthropic 兼容端点，复制
   # 上方 claudecode worker 块改 ANTHROPIC_BASE_URL/AUTH_TOKEN/MODEL 即可。
-  #     DSH_PERMISSION_MODE: "danger-full-access"
 
   # ---- 混合模型示例（降本：决策用便宜模型、探索用强模型，技术方案 §3.2）----
   # dispatch.yaml 已支持按 task_types 路由 worker：reason/consolidate/审查用便宜
-  # 模型（priority 0 优先），bootstrap/explore 用强模型。每个 dsh worker 独立
-  # DSH_HOME（会话隔离，explore 的 execute→conclude 走同一 worker 不串）。
-  # - name: "dsh_reason_cheap"
-  #   type: "dsh"
+  # 模型，bootstrap/explore 用强模型。每个 claudecode worker 独立
+  # CLAUDE_CONFIG_DIR（会话隔离，explore 的 execute→conclude 走同一 worker 不串）。
+  # - name: "cc_reason_cheap"
+  #   type: "claudecode"
   #   task_types: [reason, consolidate]
   #   max_running: 2
   #   priority: 0
   #   env:
-  #     DSH_MODEL: "deepseek-v4-flash"
-  #     DSH_PROVIDER: "deepseek"
-  #     DEEPSEEK_API_KEY: "sk-xxx"
-  #     DSH_PATCH: "/opt/astra/dsh/astra-headless.patch.yml"
-  #     DSH_PERMISSION_MODE: "danger-full-access"
-  # - name: "dsh_explore_strong"
-  #   type: "dsh"
+  #     ANTHROPIC_MODEL: "deepseek-v4-flash"
+  #     ANTHROPIC_BASE_URL: "https://api.deepseek.com/anthropic"
+  #     ANTHROPIC_AUTH_TOKEN: "sk-xxx"
+  # - name: "cc_explore_strong"
+  #   type: "claudecode"
   #   task_types: [bootstrap, explore]
   #   max_running: 2
   #   priority: 0
   #   env:
-  #     DSH_MODEL: "deepseek-v4-pro"
-  #     DSH_PROVIDER: "deepseek"
-  #     DEEPSEEK_API_KEY: "sk-xxx"
-  #     DSH_PATCH: "/opt/astra/dsh/astra-headless.patch.yml"
-  #     DSH_PERMISSION_MODE: "danger-full-access"
+  #     ANTHROPIC_MODEL: "deepseek-v4-pro"
+  #     ANTHROPIC_BASE_URL: "https://api.deepseek.com/anthropic"
+  #     ANTHROPIC_AUTH_TOKEN: "sk-xxx"
