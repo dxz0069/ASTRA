@@ -18,7 +18,7 @@ docker build -f container/Dockerfile.slim -t astra-runner .   # 托管出包用 
 
 | ASTRA_WORKER_TYPE | 需要的 env | 说明 |
 |---|---|---|
-| `claudecode`（默认） | `ANTHROPIC_MODEL`（默认 deepseek-v4-flash）/ `ANTHROPIC_BASE_URL`（默认 https://api.deepseek.com/anthropic）/ `ANTHROPIC_AUTH_TOKEN` | claude CLI + DeepSeek anthropic 兼容端点；explore×2 + reason×1 |
+| `claudecode`（默认） | `ANTHROPIC_MODEL/BASE_URL/AUTH_TOKEN`（DS 通道）+ 可选 `ZHIPU_API_KEY/ZHIPU_ANTHROPIC_BASE_URL/ZHIPU_MODEL`（GLM 通道，端点默认 https://open.bigmodel.cn/api/anthropic） | 双通道混合：DS explore×2 + GLM explore×2 + GLM reason×2；仅 DS key 时单通道 |
 
 可选 env：`ASTRA_EXPLORE_REPLICAS`（默认 2）、`ASTRA_EXPLORE_MAXRUN`（默认 3）、
 `ASTRA_CLAUDE_HOME`（CC 会话/配置根目录，默认临时目录 astra-claude，worker 子目录

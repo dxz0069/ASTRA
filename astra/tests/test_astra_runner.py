@@ -670,6 +670,35 @@ def test_render_dispatch_config_claudecode_fleet(monkeypatch, tmp_path) -> None:
     assert mcp["mcpServers"]["playwright"]["command"] == "playwright-mcp"
 
 
+def test_render_dispatch_config_dual_channel_fleet(monkeypatch, tmp_path) -> None:
+    """ZHIPU_API_KEY 存在 → 双通道混合舰队（R8 布局 × CC 栈）：DS explore×2 +
+    GLM explore + GLM reason；GLM 走智谱 anthropic 兼容端点。"""
+    from astra.dispatcher.config import DispatchConfig
+    from astra_runner.astra_runner_engine import AstraDaemon
+
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "sk-ds-test")
+    monkeypatch.setenv("ZHIPU_API_KEY", "zk-glm-test")
+    monkeypatch.setenv("ASTRA_CLAUDE_HOME", str(tmp_path / "claude-home"))
+
+    path = AstraDaemon()._render_dispatch_config()
+    config = DispatchConfig.load(path)
+    assert [w.name for w in config.workers] == [
+        "deepseek-explore-0", "deepseek-explore-1", "glm-explore", "glm-reason",
+    ]
+    by = {w.name: w for w in config.workers}
+    # GLM explore 与 DS explore 同优先级（running-count 轮转 → 同题多模型并进）
+    assert by["glm-explore"].priority == 0
+    assert set(by["glm-explore"].task_types) == {"bootstrap", "explore"}
+    assert set(by["glm-reason"].task_types) == {"reason", "consolidate"}
+    # 各通道端点/凭据独立
+    assert by["glm-explore"].env["ANTHROPIC_MODEL"] == "glm-5.3"
+    assert "open.bigmodel.cn/api/anthropic" in by["glm-explore"].env["ANTHROPIC_BASE_URL"]
+    assert by["glm-explore"].env["ANTHROPIC_AUTH_TOKEN"] == "zk-glm-test"
+    assert by["deepseek-explore-0"].env["ANTHROPIC_MODEL"] == "deepseek-v4-flash"
+    # 会话目录按 worker 名隔离（互不串扰）
+    assert by["glm-explore"].env["CLAUDE_CONFIG_DIR"] != by["deepseek-explore-0"].env["CLAUDE_CONFIG_DIR"]
+
+
 def test_render_dispatch_config_claudecode_requires_token(monkeypatch) -> None:
     import pytest
 
