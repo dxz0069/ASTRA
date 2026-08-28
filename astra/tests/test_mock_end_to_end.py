@@ -22,11 +22,11 @@ from astra.server.models import ProjectDetail, ProjectSummary, Settings
 
 
 class InProcessClient:
-    _lease_tokens: dict[str, str | None] = {}
-
     def __init__(self, http: TestClient):
         self.http = http
         self._summaries = TypeAdapter(list[ProjectSummary])
+        # 实例级令牌记账（类属性会被跨测试共享旧令牌 → 心跳 403 的隔离坑）
+        self._lease_tokens: dict[str, str | None] = {}
 
     def close(self) -> None:
         return None

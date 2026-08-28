@@ -80,7 +80,10 @@ if outcome=="invalid_json":
 if phase=="reason":
     fact_ids=prompt.get("fact_ids") or []
     max_i=prompt.get("max_intents",3)
-    from_ids=[random.choice(fact_ids)] if fact_ids else []
+    # 完成依据优先非系统事实（origin/goal）——服务端拒绝纯系统事实完成（审计
+    # 修复），random.choice 撞中 origin 会把集成测试打成掷硬币
+    _real=[f for f in fact_ids if f not in ("origin","goal")]
+    from_ids=[random.choice(_real if _real else fact_ids)] if (_real or fact_ids) else []
     if outcome=="complete":
         print(json.dumps({"accepted":True,"data":{"complete":{"from":from_ids,"description":f"mock complete from {from_ids[0]}"}}}, ensure_ascii=False))
     elif outcome=="intent":
