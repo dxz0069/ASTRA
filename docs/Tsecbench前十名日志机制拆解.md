@@ -78,3 +78,35 @@
 - #1 Cairn_X 本轮详情接口 404（08-27 已深拆：写时治理/无止损/383M cache_read，见 dist/rivals/7082_*）。
 - #10 agent(11649) 同样"不可查看"，仅知分数 87.47。
 - 各家 system prompt 完整体仅抽 3 段（hehua×2、AIforASM×1）；RoundTable 五骑士人格仅见头行。
+
+## 6. 适配器真相（08-28 补勘：模型 ≠ 适配器，前文"flash 主力"不等于 dsh 跑法正确）
+
+每会话的 `protocol` 字段 + title 里的 system-reminder 签名 + 计费头，直接暴露驱动层：
+
+| 名次 | Agent | 驱动 harness（证据） | 协议×模型 |
+|---|---|---|---|
+| 1 | Cairn_X | 自研（Cairn 引擎，pi 系血统） | openai_chat × flash |
+| 2 | Hiveptagi | 自研循环（攻击树 checkpoint+强制CONCLUDE+"接力归档"） | openai_chat × flash/kimi |
+| 3 | 虫洞 | **Claude Code**（skills 签名 73/150；.claude 技能库） | anthropic_messages × flash |
+| 4 | Tyloo | **Claude Code** 系（AsYouAnswer 签名） | anthropic+openai × flash-ga/glm |
+| 5 | ATX | **Claude Code** 系经 openai 代理（currentDate 签名 149/150） | openai_chat × flash |
+| 6 | AI for ASM | **Claude Agent SDK 实锤**（计费头 `cc_version=2.1.218; cc_entrypoint=sdk-cli`） | anthropic_messages × glm-5.2/pro |
+| 7 | hehua | 自研波次（NOTES/STATE/scripts + 限时攻击波） | openai_chat × 四模型 |
+| 8 | RoundTable | **Claude Code + subagent**（五骑士=CC Agent tool 自定义类型） | anthropic_messages × flash/sonnet |
+| 9 | 应龙 | **Claude Code**（AsYouAnswer 签名 113/150） | anthropic_messages × flash |
+
+**结论：前十 0 家用 dsh。Claude Code/Agent SDK 系 6 家，自研薄循环 3 家，#10 不可见。**
+flash 是大家共同选的**模型**；驱动层主流是 Claude Code（走 DeepSeek/GLM 的 anthropic 兼容端点）或自研薄循环。
+我们 dsh+自研 headless patch 是十家外的孤本。
+
+**对我们的影响（2026-08-28 已验证）：**
+- DeepSeek anthropic 兼容端点实测可用：`POST https://api.deepseek.com/anthropic/v1/messages`（x-api-key 认证、
+  返回 thinking 块、usage 带 cache_read 字段）——CC 全特性面成立。
+- 引擎现成路径：`ASTRA_WORKER_TYPE=claudecode` + `ANTHROPIC_AUTH_TOKEN/BASE_URL/MODEL`
+  （`astra_runner_engine.py:284` 默认就是 deepseek-v4-flash + api.deepseek.com/anthropic）。
+- 镜像缺口：Dockerfile.slim:107 在 3GB 瘦身时裁掉了 claude CLI（三 CLI 合计省 ~430MB）——
+  切 claudecode 需重建镜像加回（2.7G→需控制在 3G 内，可 UPX）。
+- 托管网关未知项：`api.deepseek.com.tsecbench.gw/anthropic` 路径是否透传，需平台首跑验证。
+- 技能库已对齐：`container/.agents → /home/kali/workspace/.claude`（CC skills 格式，虫洞同款用法）。
+- 路线：①本轮立即用回滚 env（dsh 去 pro）重启保底；②下一槽位重建 v7 镜像恢复 claude CLI，
+  本地先全链路验证 claudecode worker，再上平台 A/B。
