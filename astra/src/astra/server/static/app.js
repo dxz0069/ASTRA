@@ -103,12 +103,12 @@ function astraApp(){
     projects: [], selectedId: null, current: null,
     tab: 'detail', refreshing: false, modal: null,
     selectedNode: null, cy: null,
-    toasts: [], intentFrom: [], completeFrom: [],
+    toasts: [], stepFrom: [], completeFrom: [],
     filterText: '',
     consoleOpen: false, ui: loadUIPrefs(),
     graphQuery: '', _hits: [],
     createForm: {title:'', origin:'', goal:'', hints:'', bootstrap:true},
-    intentForm: {description:''}, concludeForm: {intentId:'', description:''},
+    stepForm: {description:'', expect:''}, concludeForm: {stepId:'', description:''},
     completeForm: {description:''}, hintForm: {content:''}, settingsForm: {},
     _nodeCount: -1,
 
@@ -163,7 +163,7 @@ function astraApp(){
       const map={active:'var(--accent)', completed:'var(--ok)', stopped:'var(--ink-faint)'};
       return 'background:'+(map[p.status]||'var(--ink-faint)');
     },
-    statusText(s){ return {active:'进行中', completed:'已归航', stopped:'已停航'}[s]||s; },
+    statusText(s){ return {active:'进行中', completed:'已完成', stopped:'已停航'}[s]||s; },
     statusBadgeClass(s){ return {active:'high', completed:'summary', stopped:'medium'}[s]||'medium'; },
 
     filteredProjects(){
@@ -184,7 +184,7 @@ function astraApp(){
         const prev=this.current;
         this.current=p;
         this.renderGraph(p);
-        if(prev && prev.project.id===p.project.id && (prev.facts.length!==p.facts.length || prev.hints.length!==p.hints.length)) this.toast(`星图更新：${p.facts.length} 星记 / ${p.hints.length} 指引`);
+        if(prev && prev.project.id===p.project.id && (prev.facts.length!==p.facts.length || prev.hints.length!==p.hints.length)) this.toast(`图更新：${p.facts.length} 事实 / ${p.hints.length} 指引`);
       }).catch(e=>{ if(!silent) this.toast(e.message,'err'); });
     },
     refreshAll(){
@@ -202,14 +202,14 @@ function astraApp(){
       for(const f of p.facts){
         const type = f.id==='goal' ? 'goal' : f.id==='origin' ? 'origin' : 'fact';
         els.push({data:{id:'f:'+f.id, nodeType:type, label:f.id, description:f.description,
-          confidence:f.confidence, evidence:f.evidence, challenged:f.challenged, kind:f.kind, nodeId:f.id}});
+          kind:f.kind, nodeId:f.id}});
       }
-      for(const it of p.intents){
-        els.push({data:{id:'i:'+it.id, nodeType:'intent', label:it.id, description:it.description,
-          to:it.to, worker:it.worker, concluded:!!it.to, nodeId:it.id}});
-        const fromIds = it.from_ || it.from || [];
-        for(const from of fromIds){ els.push({data:{id:'e:'+it.id+':'+from, source:'f:'+from, target:'i:'+it.id}}); }
-        if(it.to){ els.push({data:{id:'ec:'+it.id+':'+it.to, source:'i:'+it.id, target:'f:'+it.to}}); }
+      for(const s of p.steps){
+        els.push({data:{id:'s:'+s.id, nodeType:'step', label:s.id, description:s.description,
+          expect:s.expect, status:s.status, to:s.to, worker:s.worker, concluded:!!s.to, nodeId:s.id}});
+        const fromIds = s.from_ || s.from || [];
+        for(const from of fromIds){ els.push({data:{id:'e:'+s.id+':'+from, source:'f:'+from, target:'s:'+s.id}}); }
+        if(s.to){ els.push({data:{id:'ec:'+s.id+':'+s.to, source:'s:'+s.id, target:'f:'+s.to}}); }
       }
       return els;
     },
@@ -226,12 +226,11 @@ function astraApp(){
         {selector:'node[nodeType="origin"]', style:{'background-color':NEUTRAL}},
         {selector:'node[nodeType="goal"]', style:{'background-color':GOAL,'shape':'star','width':S*1.4,'height':S*1.4,
           'border-color':'rgba(232,195,53,.8)','border-width':2}},
-        {selector:'node[nodeType="intent"]', style:{'background-color':'#141d2e','shape':'round-rectangle',
+        {selector:'node[nodeType="step"]', style:{'background-color':'#141d2e','shape':'round-rectangle',
           'width':S*1.25,'height':S,'border-color':ACCENT,'border-width':1.5}},
         {selector:'node[?concluded]', style:{'opacity':0.55}},
-        {selector:'node[?challenged]', style:{'border-color':BAD,'border-width':2,'border-style':'dashed'}},
-        {selector:'node[confidence="high"]', style:{'border-color':OK,'border-width':2.5}},
-        {selector:'node[confidence="low"]', style:{'border-color':BAD,'border-width':2,'border-style':'dashed'}},
+        {selector:'node[nodeType="step"][status="closed"]', style:{'opacity':0.35,'border-style':'dashed'}},
+        {selector:'node[kind="negative"]', style:{'border-color':NEUTRAL,'border-style':'dashed'}},
         {selector:':selected', style:{'overlay-color':ACCENT,'overlay-opacity':0.16,'overlay-padding':7}},
         {selector:'node.dim', style:{'opacity':0.15}},
         {selector:'edge.dim', style:{'opacity':0.07}},
@@ -304,7 +303,7 @@ function astraApp(){
       const hits=[];
       cy.nodes().forEach(n=>{
         const d=n.data();
-        const hay=[d.label, d.description, d.evidence, d.worker].filter(Boolean).join('\n').toLowerCase();
+        const hay=[d.label, d.description, d.expect, d.worker].filter(Boolean).join('\n').toLowerCase();
         if(hay.includes(q)){ n.removeClass('dim'); n.addClass('hit'); hits.push(n.id()); }
         else { n.removeClass('hit'); n.addClass('dim'); }
       });
@@ -336,22 +335,14 @@ function astraApp(){
 
     nodeTypeLabel(n){
       const t=n.data.nodeType;
-      return t==='fact'?'星记':t==='intent'?'航向':t==='goal'?'目标':t==='origin'?'起点':'节点';
+      return t==='fact'?'事实':t==='step'?'步骤':t==='goal'?'目标':t==='origin'?'起点':'节点';
     },
     nodeBadgeClass(n){
       return n.data.nodeType==='goal' ? 'medium' : 'summary';
     },
-    confidenceText(c){ return {low:'低置信',medium:'中置信',high:'高置信'}[c]||c; },
-
-    copyEvidence(text){
-      navigator.clipboard.writeText(text||'').then(
-        ()=>this.toast('证据已复制到剪贴板'),
-        ()=>this.toast('复制失败','err'));
-    },
-
     /* ---- 操作 ---- */
     selectableFacts(){ return (this.current?.facts||[]).filter(f=>f.id!=='goal'&&f.id!=='origin'); },
-    toggleIntentFrom(id){ const i=this.intentFrom.indexOf(id); i>=0?this.intentFrom.splice(i,1):this.intentFrom.push(id); },
+    toggleStepFrom(id){ const i=this.stepFrom.indexOf(id); i>=0?this.stepFrom.splice(i,1):this.stepFrom.push(id); },
     toggleCompleteFrom(id){ const i=this.completeFrom.indexOf(id); i>=0?this.completeFrom.splice(i,1):this.completeFrom.push(id); },
 
     openCreate(){ this.createForm={title:'',origin:'',goal:'',hints:'',bootstrap:true}; this.modal='create'; },
@@ -363,24 +354,25 @@ function astraApp(){
         this.modal=null; this.loadProjects(); this.selectProject(p.project.id);
       }).catch(e=>this.toast(e.message,'err'));
     },
-    openCreateIntent(){ this.intentFrom=[]; this.intentForm.description=''; this.modal='intent'; },
-    createIntent(){
-      if(!this.intentFrom.length){ this.toast('至少选择一个源自星记','err'); return; }
-      this.api('POST',`/projects/${this.selectedId}/intents`,{from:this.intentFrom,
-        description:this.intentForm.description, creator:'human', worker:null}).then(()=>{
+    openCreateStep(){ this.stepFrom=[]; this.stepForm={description:'', expect:''}; this.modal='step'; },
+    createStep(){
+      if(!this.stepFrom.length){ this.toast('至少选择一个源自事实','err'); return; }
+      const body={from:this.stepFrom, description:this.stepForm.description, creator:'human', worker:null};
+      if(this.stepForm.expect && this.stepForm.expect.trim()) body.expect=this.stepForm.expect.trim();
+      this.api('POST',`/projects/${this.selectedId}/steps`,body).then(()=>{
         this.modal=null; this.loadProject(this.selectedId);
       }).catch(e=>this.toast(e.message,'err'));
     },
-    openConclude(n){ this.concludeForm={intentId:n.nodeId, description:''}; this.modal='conclude'; },
-    concludeIntent(){
-      this.api('POST',`/projects/${this.selectedId}/intents/${this.concludeForm.intentId}/conclude`,
+    openConclude(n){ this.concludeForm={stepId:n.nodeId, description:''}; this.modal='conclude'; },
+    concludeStep(){
+      this.api('POST',`/projects/${this.selectedId}/steps/${this.concludeForm.stepId}/conclude`,
         {worker:'human', description:this.concludeForm.description}).then(()=>{
         this.modal=null; this.loadProject(this.selectedId);
       }).catch(e=>this.toast(e.message,'err'));
     },
     openComplete(){ this.completeFrom=[]; this.completeForm.description=''; this.modal='complete'; },
     completeProject(){
-      if(!this.completeFrom.length){ this.toast('至少选择一个证据星记','err'); return; }
+      if(!this.completeFrom.length){ this.toast('至少选择一个完成依据事实','err'); return; }
       this.api('POST',`/projects/${this.selectedId}/complete`,{from:this.completeFrom,
         description:this.completeForm.description, worker:'human'}).then(()=>{
         this.modal=null; this.loadProject(this.selectedId);
@@ -413,8 +405,7 @@ function astraApp(){
       const hints=this.current?.hints||[];
       for(const h of hints){
         const c=h.content||'';
-        if(c.includes('[审查否决]')) items.push({cls:'review', text:c.replace('[审查否决]','').trim(), time:h.created_at});
-        else if(c.includes('[失败学习]')) items.push({cls:'learn', text:c.replace('[失败学习]','').trim(), time:h.created_at});
+        if(c.includes('[失败学习]')) items.push({cls:'learn', text:c.replace('[失败学习]','').trim(), time:h.created_at});
         else items.push({cls:'hint', text:c, time:h.created_at});
       }
       return items.slice().reverse();
@@ -423,7 +414,6 @@ function astraApp(){
     /* 指引卡: 识别审查/学习前缀, 剥离为徽章 */
     hintMeta(h){
       const c=h.content||'';
-      if(c.includes('[审查否决]')) return {cls:'review', label:'审查否决', text:c.replace('[审查否决]','').trim()};
       if(c.includes('[失败学习]')) return {cls:'learn', label:'失败学习', text:c.replace('[失败学习]','').trim()};
       return {cls:'', label:'', text:c};
     },
