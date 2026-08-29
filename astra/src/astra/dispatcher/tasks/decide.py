@@ -221,6 +221,17 @@ def run_decide_task(
             )
             return "rejected"
         if kind == "complete":
+            # D2 复查（v0.2 复活修复）：decide 长跑（默认 900s）期间租约可能已过期——
+            # 服务端已清 decide_worker，另一 decide 可并行认领。写图前复查，失效即放弃
+            # 写入（否则与重派 decide 并发双写图；complete 由服务端原子守卫兜底 403）
+            if lease.failure is not None:
+                LOG.warning(
+                    "decide lease lost before complete, aborting write project=%s worker=%s status=%s",
+                    project.project.id,
+                    worker.name,
+                    lease.failure.status_code,
+                )
+                return "failed"
             response = client.complete(project.project.id, data["from"], data["description"], worker.name, lease_token)
             if response.status_code in (403, 404):
                 LOG.info("project became inactive during decide complete project=%s worker=%s", project.project.id, worker.name)
@@ -261,6 +272,15 @@ def run_decide_task(
                         step_data["description"][:120],
                     )
                     continue
+                # D2 复查：每个写操作前租约必须仍有效（长跑期间过期 → 放弃本轮写入）
+                if lease.failure is not None:
+                    LOG.warning(
+                        "decide lease lost during ops, aborting remaining writes project=%s worker=%s created=%s",
+                        project.project.id,
+                        worker.name,
+                        created,
+                    )
+                    return "success" if created else "failed"
                 response = client.create_step(
                     project.project.id,
                     step_data["from"],
@@ -294,6 +314,12 @@ def run_decide_task(
 
             open_step_ids = {step.id for step in project.steps if step.to is None and step.status == "open"}
             for close_data in data["close_steps"]:
+                if lease.failure is not None:
+                    LOG.warning(
+                        "decide lease lost during close ops, aborting project=%s worker=%s closed=%s",
+                        project.project.id, worker.name, closed,
+                    )
+                    break
                 step_id = close_data["id"]
                 if step_id not in open_step_ids:
                     LOG.info(
