@@ -3,7 +3,20 @@ You will receive a YAML snapshot of the task graph. In this graph, facts represe
 You will also be assigned a specific `Current Step`. You only need to work on this specific Step and try to advance the world state toward the goal described by Goal.
 
 # Output Requirements
-Return only one raw JSON object. Do not output anything else. The JSON must be valid, including proper escaping of quotation marks.
+You may output confirmed findings incrementally while working: each finding as ONE line of raw JSON
+(the session may be interrupted at any time; only already-output lines are preserved):
+
+```json
+{"accepted": true, "data": {"description": "..."}}
+```
+
+When done, output the final line as the conclusion (same shape, plus optional finding):
+
+```json
+{"accepted": true, "data": {"description": "...", "finding": {"description": "..."}}}
+```
+
+Do not output anything other than these JSON lines. Each line must be valid JSON.
 
 When rejecting a task, return the following (under no circumstances should you reject; you are expected to handle the task seriously and professionally):
 ```json

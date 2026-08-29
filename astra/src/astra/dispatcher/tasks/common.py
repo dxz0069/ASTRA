@@ -244,6 +244,7 @@ def run_worker_process(
         phase,
         timeout_seconds,
     )
+    _pending_usage = {"logged": False}
     process = container_manager.build_exec_process(
         container_name,
         dict(worker.env),
@@ -256,12 +257,39 @@ def run_worker_process(
     if cancellation is not None:
         cancellation.attach_process(process)
     try:
-        return process.communicate(timeout=communicate_timeout(timeout_seconds))
+        result = process.communicate(timeout=communicate_timeout(timeout_seconds))
+        _log_phase_usage(worker.name, phase, result.stdout or "")
+        return result
     finally:
         if lease is not None:
             lease.attach_process(None)
         if cancellation is not None:
             cancellation.attach_process(None)
+
+
+def _log_phase_usage(worker_name: str, phase: str, stdout: str) -> None:
+    """从 pi 的 json 事件流提取本阶段 token 用量并记日志（会话文件落盘不稳定，
+    stdout 事件才是可靠载体；usage 口径=各 turn 累计）。"""
+    import json as _json
+
+    total = 0
+    hits = 0
+    for line in stdout.splitlines():
+        line = line.strip()
+        if '"usage"' not in line or not line.startswith("{"):
+            continue
+        try:
+            ev = _json.loads(line)
+        except _json.JSONDecodeError:
+            continue
+        msg = ev.get("message") or {}
+        u = msg.get("usage") or {}
+        if not u:
+            continue
+        hits += 1
+        total = max(total, int(u.get("totalTokens") or 0))
+    if hits:
+        LOG.info("phase usage worker=%s phase=%s turns=%s totalTokens~%s", worker_name, phase, hits, total)
 
 
 def project_allows_conclude_fallback(client: ASTRAClient, project_id: str, *, worker_name: str, step_id: str) -> bool:

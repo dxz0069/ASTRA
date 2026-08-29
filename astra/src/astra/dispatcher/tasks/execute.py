@@ -69,6 +69,44 @@ def _should_write_fact(
     return True
 
 
+def _rescue_streamed_facts(client: ASTRAClient, project: ProjectDetail, step: Step, stdout: str) -> int:
+    """超时/解析失败时从 stdout 抢救流式天枢行（pi 会话落盘不稳定，stdout 才是可靠载体）。
+
+    兼容两种行格式：bootstrap 形（{"fact":{"description":...}}）与 execute 形
+    （{"description":...}）。抢救的行直接 create_fact 入图（步骤本体仍走原收束/回队路径）。
+    返回抢救条数。
+    """
+    import json as _json
+
+    rescued = 0
+    for line in (stdout or "").splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            payload = _json.loads(line)
+        except _json.JSONDecodeError:
+            continue
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(data, dict):
+            continue
+        desc = None
+        fact = data.get("fact")
+        if isinstance(fact, dict) and isinstance(fact.get("description"), str):
+            desc = fact["description"]
+        elif isinstance(data.get("description"), str):
+            desc = data["description"]
+        if not desc or not desc.strip() or "flag{" not in desc and len(desc.strip()) < 20:
+            continue  # 抢救只收有分量的确认发现
+        if find_duplicate_fact(project, desc) is not None:
+            continue
+        response = client.create_fact(project.project.id, desc.strip(), kind=_infer_fact_kind(desc), creator="astra.rescue")
+        if response.ok:
+            rescued += 1
+            LOG.info("rescued streamed fact project=%s step=%s desc=%.80s", project.project.id, step.id, desc)
+    return rescued
+
+
 def run_execute_task(
     config: DispatchConfig,
     client: ASTRAClient,
@@ -261,6 +299,13 @@ def run_execute_task(
                 preview(first.stdout),
                 preview(first.stderr),
             )
+            # 流式抢救：超时前已输出的确认发现先入图（不依赖会话续接）
+            try:
+                rescued = _rescue_streamed_facts(client, project, step, first.stdout or "")
+                if rescued:
+                    LOG.info("execute timeout rescue project=%s step=%s rescued_facts=%s", project.project.id, step.id, rescued)
+            except Exception as exc:  # noqa: BLE001 —— 抢救失败不阻塞 fallback
+                LOG.warning("execute rescue failed project=%s error=%s", project.project.id, exc)
             return _try_conclude_fallback(
                 config,
                 client,
