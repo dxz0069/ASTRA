@@ -145,20 +145,24 @@ def test_extract_flags_deduplicates() -> None:
     assert collect_flags_from_facts(["x flag{abc}", "y flag{bcd}", "z flag{abc}"]) == ["flag{abc}", "flag{bcd}"]
 
 
-def test_run_benchmark_prefers_easy_order() -> None:
-    """prefer_easy：easy→medium→hard 开题（同难度保持平台顺序，run 9214 饿死教训）。"""
+def test_run_benchmark_value_hybrid_order(monkeypatch) -> None:
+    monkeypatch.setattr(_runner_module, "DONE_FLAG_WAIT_SECONDS", 0.2)
+    """R10 分值密度序：easy 热身（分值降序）→ 其余按分值降序（hard 大分题不再饿死，
+    run 13464 教训：15 道 hard 共 8,200 分从未开题，a 系 hard 500 开题 2 分钟即解）。"""
 
     @dataclass
     class DiffChallenge(FakeChallenge):
         difficulty: str = ""
+        total_score: int = 100
 
-    hard1 = DiffChallenge("x-hard-1", difficulty="hard")
-    easy1 = DiffChallenge("x-easy-1", difficulty="easy")
-    med1 = DiffChallenge("x-med-1", difficulty="medium")
-    easy2 = DiffChallenge("x-easy-2", difficulty="easy")
-    flags = {c.unique_code: ["flag{f}"] for c in (hard1, easy1, med1, easy2)}
+    hard1 = DiffChallenge("x-hard-500", difficulty="hard", total_score=500)
+    big = DiffChallenge("x-hard-1800", difficulty="hard", total_score=1800)
+    easy1 = DiffChallenge("x-easy-90", difficulty="easy", total_score=90)
+    med1 = DiffChallenge("x-med-300", difficulty="medium", total_score=300)
+    easy2 = DiffChallenge("x-easy-250", difficulty="easy", total_score=250)
+    flags = {c.unique_code: ["flag{f}"] for c in (hard1, big, easy1, med1, easy2)}
 
-    client = FakeClient([hard1, easy1, med1, easy2], flags=flags)
+    client = FakeClient([hard1, big, easy1, med1, easy2], flags=flags)
     run_benchmark(
         client,
         lambda: FakeEngine({"proj-0": ["flag{f}"]}),
@@ -166,10 +170,11 @@ def test_run_benchmark_prefers_easy_order() -> None:
         flag_poll_seconds=0.01,
         parallel=1,
     )
-    assert client.started == ["x-easy-1", "x-easy-2", "x-med-1", "x-hard-1"]
+    # easy 池分值降序（250 先于 90），随后分值池 1800→500→300
+    assert client.started == ["x-easy-250", "x-easy-90", "x-hard-1800", "x-hard-500", "x-med-300"]
 
     # --no-prefer-easy：恢复平台原始顺序
-    client2 = FakeClient([hard1, easy1, med1, easy2], flags=flags)
+    client2 = FakeClient([hard1, big, easy1, med1, easy2], flags=flags)
     run_benchmark(
         client2,
         lambda: FakeEngine({"proj-0": ["flag{f}"]}),
@@ -178,7 +183,7 @@ def test_run_benchmark_prefers_easy_order() -> None:
         parallel=1,
         prefer_easy=False,
     )
-    assert client2.started == ["x-hard-1", "x-easy-1", "x-med-1", "x-easy-2"]
+    assert client2.started == ["x-hard-500", "x-hard-1800", "x-easy-90", "x-med-300", "x-easy-250"]
 
 
 def test_run_benchmark_lifecycle() -> None:
@@ -682,21 +687,20 @@ def test_render_dispatch_config_dual_channel_fleet(monkeypatch, tmp_path) -> Non
 
     path = AstraDaemon()._render_dispatch_config()
     config = DispatchConfig.load(path)
+    # R10：GLM 撤出 explore（13464 轮 2% 调用量占位诊断）——DS explore ×2 + GLM reason
     assert [w.name for w in config.workers] == [
-        "deepseek-explore-0", "deepseek-explore-1", "glm-explore", "glm-reason",
+        "deepseek-explore-0", "deepseek-explore-1", "glm-reason",
     ]
     by = {w.name: w for w in config.workers}
-    # GLM explore 与 DS explore 同优先级（running-count 轮转 → 同题多模型并进）
-    assert by["glm-explore"].priority == 0
-    assert set(by["glm-explore"].task_types) == {"bootstrap", "explore"}
+    assert set(by["deepseek-explore-0"].task_types) == {"bootstrap", "explore"}
     assert set(by["glm-reason"].task_types) == {"reason", "consolidate"}
-    # 各通道端点/凭据独立
-    assert by["glm-explore"].env["ANTHROPIC_MODEL"] == "glm-5.3"
-    assert "open.bigmodel.cn/api/anthropic" in by["glm-explore"].env["ANTHROPIC_BASE_URL"]
-    assert by["glm-explore"].env["ANTHROPIC_AUTH_TOKEN"] == "zk-glm-test"
+    # GLM 通道端点/凭据独立
+    assert by["glm-reason"].env["ANTHROPIC_MODEL"] == "glm-5.3"
+    assert "open.bigmodel.cn/api/anthropic" in by["glm-reason"].env["ANTHROPIC_BASE_URL"]
+    assert by["glm-reason"].env["ANTHROPIC_AUTH_TOKEN"] == "zk-glm-test"
     assert by["deepseek-explore-0"].env["ANTHROPIC_MODEL"] == "deepseek-v4-flash"
-    # 会话目录按 worker 名隔离（互不串扰）
-    assert by["glm-explore"].env["CLAUDE_CONFIG_DIR"] != by["deepseek-explore-0"].env["CLAUDE_CONFIG_DIR"]
+    # reason 超时放宽（GLM anthropic 单轮 >420s，ASTRA_REASON_TIMEOUT 默认 900）
+    assert "timeout: 900" in path.read_text(encoding="utf-8")
 
 
 def test_render_dispatch_config_claudecode_requires_token(monkeypatch) -> None:
