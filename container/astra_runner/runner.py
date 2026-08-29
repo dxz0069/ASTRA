@@ -1,4 +1,5 @@
-"""astra-runner —— 评测编排器（benchmark-agnostic，当前内置 tsecbench 适配；平台 SDK/题型知识可替换）。
+"""astra-runner —— 评测编排器（benchmark-agnostic 内核；靶场适配器可替换，当前内置
+tsecbench_adapter.TsecbenchAdapter——平台 SDK/字段形态/异常语义/经验教训全部收敛在适配器）。
 
 职责（SDK 五步生命周期 + 逐题 ASTRA 项目编排）：
 1. 读取 BENCHMARK_TOKEN / BENCHMARK_BASE_URL，进入 SDK 上下文（自动 VPN 预检）
@@ -32,10 +33,6 @@ from pathlib import Path
 from typing import Any, Protocol
 
 LOG = logging.getLogger("astra-runner")
-
-FLAG_RE = re.compile(r"flag\{[^}\s]{3,}\}", re.IGNORECASE)
-# 排除字面占位符 flag{...}（模型示例诱导）；真实 flag 内容至少 3 字符（flag{...} 占位由专门正则排除）
-PLACEHOLDER_FLAG_RE = re.compile(r"^flag\{\s*\.{3}\s*\}$", re.IGNORECASE)
 
 DEFAULT_CHALLENGE_TIMEOUT_SECONDS = 30 * 60
 DEFAULT_FLAG_POLL_SECONDS = 5
@@ -90,31 +87,36 @@ class ChallengeResult:
     graph_reset_count: int = 0  # V10：整图重置次数（榜首经验：死图清掉重来）
 
 
-class TaskFinishedError(Exception):
-    """跑分任务时限已到（平台 409 already finished），停止整轮。"""
+# 靶场语义异常/flag 工具/重试纪律 —— 全部来自适配器（换靶场即换实现，此处只依赖接口）。
+# 双模式导入：容器内平铺（sys.path[0]=/opt/astra-runner，runner 作 __main__）与
+# 测试/本地的包模式（astra_runner.runner）都要能跑。
+try:
+    from tsecbench_adapter import (  # noqa: E402
+        SlotBusyError,
+        TaskFinishedError,
+        TransientNetError,
+        build_goal_text,
+        call_with_retry,
+        challenge_addr,
+        challenge_code,
+        collect_flags_from_facts,
+        extract_flags,
+        translate_sdk_error,
+    )
+except ImportError:  # pragma: no cover —— 包模式（测试/本地）
+    from astra_runner.tsecbench_adapter import (  # noqa: E402
+        SlotBusyError,
+        TaskFinishedError,
+        TransientNetError,
+        build_goal_text,
+        call_with_retry,
+        challenge_addr,
+        challenge_code,
+        collect_flags_from_facts,
+        extract_flags,
+        translate_sdk_error,
+    )
 
-
-class SlotBusyError(Exception):
-    """平台活跃名额已满（start 409），稍后重试。"""
-
-
-class TransientNetError(Exception):
-    """网络瞬断（平台/LLM 不可达）——题不死，_work 等待后原地重进。"""
-
-
-# 自愈①：网络瞬断特征——只认明确的传输层故障词（request to/getaddrinfo/连接类）。
-# 刻意不含裸 "timed out/timeout"：引擎本地超时与测试超时会误匹配成断网死循环
-# （实测挂死整套回归）；真断网时平台报错必含 "request to <url>" 或 unreachable。
-_NET_SIGNATURES = (
-    "request to", "unreachable", "getaddrinfo", "connect error", "connectionerror",
-    "max retries", "temporary failure", "connection reset",
-    "connection refused", "eof occurred", "remoteendclosed", "broken pipe",
-)
-
-
-def _is_transient_network_error(exc: Exception) -> bool:
-    text = f"{type(exc).__name__} {exc}".lower()
-    return any(sig in text for sig in _NET_SIGNATURES)
 
 
 class BenchmarkClient(Protocol):
@@ -141,71 +143,7 @@ class AstraEngine(Protocol):
     def stop(self) -> None: ...
 
 
-# SDK 业务异常按异常名识别（不重试）；其余（网络/服务错误）重试退避
-KNOWN_BUSINESS_EXC_NAMES = {"InvalidState", "DuplicateSubmit", "TaskFinishedError", "SlotBusyError"}
 
-
-def call_with_retry(fn, name: str, *, retries: int = 3, base_delay: float = 5.0):
-    """SDK 调用重试保护：网络/服务类错误指数退避重试，业务异常（按名）直接抛出。
-
-    连续重试仍失败 → ERROR 告警（可能 VPN 断开/平台不可达），抛出最后一个错误。
-    """
-    import random
-
-    last: Exception | None = None
-    for attempt in range(retries + 1):
-        try:
-            return fn()
-        except Exception as exc:  # noqa: BLE001 —— SDK 异常类型不可控，按名分流
-            if type(exc).__name__ in KNOWN_BUSINESS_EXC_NAMES:
-                raise
-            last = exc
-            if attempt < retries:
-                delay = base_delay * (2**attempt) * (0.5 + random.random() * 0.5)
-                LOG.warning(
-                    "%s failed attempt=%s/%s error=%s（%.0fs 后重试）",
-                    name, attempt + 1, retries + 1, exc, delay,
-                )
-                time.sleep(delay)
-    LOG.error("%s unreachable after %s attempts error=%s（可能 VPN 断开或平台不可达）", name, retries + 1, last)
-    assert last is not None
-    raise last
-
-
-def extract_flags(text: str) -> list[str]:
-    """从文本中提取 flag{...}，去重保序，排除占位符（如 flag{...}）。"""
-    seen: set[str] = set()
-    flags: list[str] = []
-    for match in FLAG_RE.findall(text):
-        flag = match.strip()
-        if PLACEHOLDER_FLAG_RE.match(flag):
-            continue
-        if flag not in seen:
-            seen.add(flag)
-            flags.append(flag)
-    return flags
-
-
-def collect_flags_from_facts(descriptions: list[str], exclude_texts: list[str] | None = None) -> list[str]:
-    """从星记描述收集 flag；exclude_texts（题面/goal 原文）中出现的 flag 串一律剔除。
-
-    a-05 实例：题面示例 flag 格式串被 bootstrap 抄进星记 → 被当发现提交 → 错交两次，
-    且 flags_found 非空触发"部分解出正常收尾"把整题白白关掉。题面里出现过的 flag
-    不可能是答案（答案只存在于靶机实测输出）。
-    """
-    banned: set[str] = set()
-    for text in exclude_texts or []:
-        banned.update(extract_flags(text))
-    flags: list[str] = []
-    for description in descriptions:
-        flags.extend(f for f in extract_flags(description) if f not in banned)
-    seen: set[str] = set()
-    unique: list[str] = []
-    for flag in flags:
-        if flag not in seen:
-            seen.add(flag)
-            unique.append(flag)
-    return unique
 
 
 class ProgressStore:
@@ -816,12 +754,11 @@ def _run_single_challenge(
         engine.start()
         try:
             started = call_with_retry(lambda: client.start_challenge(code), f"start_challenge:{code}")
-        except Exception as exc:  # noqa: BLE001
-            if type(exc).__name__ == "InvalidState" and "already finished" in str(exc):
-                LOG.warning("跑分任务时限已到，停止整轮 code=%s", code)
-                raise TaskFinishedError(str(exc)) from exc
-            if type(exc).__name__ == "InvalidState":
-                raise SlotBusyError(str(exc)) from exc
+        except (TaskFinishedError, SlotBusyError):
+            raise  # 适配器语义异常直接透传
+        except Exception as exc:  # noqa: BLE001 —— 兜底翻译（fake/直连 SDK 均覆盖）
+            LOG.warning("start_challenge 异常翻译 code=%s error=%s", code, exc)
+            translate_sdk_error(exc)
             raise
         result.started = True
         started_this_round = True
@@ -829,7 +766,7 @@ def _run_single_challenge(
             progress.mark(code, "started")
         container_addr = getattr(started, "container_addr", None) or []
         origin = ", ".join(str(addr) for addr in container_addr) or code
-        goal = _build_goal(description, ch)
+        goal = build_goal_text(description, ch)
         # defer 续跑：复用原引擎项目（星图/会话进度保留），否则新建。
         # reactivate 失败（终态/不存在）→ 放弃复用新建项目——丢星图远好于
         # 对着 completed 星图无限空转（resume 死锁，实测一次咬死三题一小时）
@@ -1120,7 +1057,8 @@ def _run_single_challenge(
     except SlotBusyError:
         raise
     except Exception as exc:  # noqa: BLE001 —— 单题失败不阻断整轮
-        if _is_transient_network_error(exc):
+        from tsecbench_adapter import _is_transient_network_error as _is_transient
+        if _is_transient(exc):
             # 自愈①：网络瞬断不杀题——_work 循环等待后原地重进（start 幂等、
             # project_id 复用星图），断网 50 分钟类事故不再丢题
             raise TransientNetError(str(exc)) from exc
@@ -1167,15 +1105,6 @@ def _run_single_challenge(
                 # 关题失败不标 done：close_failed 保留在进度文件里便于事后排查/补关
                 progress.mark(code, "done" if closed else "close_failed")
         engine.stop()
-
-
-def _build_goal(description: str, ch: Any) -> str:
-    flag_count = getattr(ch, "flag_count", None)
-    goal = f"在靶场地址上完成题目并获取全部 flag，目标描述：{description}"
-    if flag_count:
-        goal += f"（共 {flag_count} 个 flag）"
-    goal += "。拿到 flag 后必须以星记形式写回星图，星记描述中必须包含完整 flag{...} 字符串。"
-    return goal
 
 
 # ---------------- V2-5/V2-6/V2-7：知识库 + 期望预算 ----------------
@@ -2003,12 +1932,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.check:
         return _run_environment_check(token, base_url)
 
-    try:
-        from tsec_benchmark import TSecBenchmark  # 进入上下文自动 VPN 预检
-    except ImportError:
-        LOG.error("缺少 tsec-benchmark SDK：pip install tsec-benchmark")
-        return 2
-
+    from tsecbench_adapter import TsecbenchAdapter  # 靶场适配器（SDK 缺失在其内部报错）
     from astra_runner_engine import LocalAstraEngine, shutdown_daemon  # 引擎实现（镜像内置）
 
     watchdog_proc: subprocess.Popen | None = None
@@ -2025,7 +1949,7 @@ def main(argv: list[str] | None = None) -> int:
 
     results: list[ChallengeResult] = []
     try:
-        with TSecBenchmark(base_url=base_url, token=token) as client:
+        with TsecbenchAdapter(base_url=base_url, token=token) as client:
             skip_codes = {c.strip() for c in args.skip_codes.split(",")} if args.skip_codes else None
             results = run_benchmark(
                 client,
@@ -2107,15 +2031,15 @@ def _run_environment_check(token: str, base_url: str) -> int:
     LOG.info("=== 环境自检 ===")
     ok = True
 
-    # 1. 平台 API 连通（带 token 调 list_challenges，不含 VPN 内目标访问）
+    # 1. 平台 API 连通（适配器探针，不含 VPN 内目标访问）
     try:
-        import requests
+        from tsecbench_adapter import check_platform
 
-        resp = requests.get(f"{base_url}/openapi/v1/challenges", headers={"BENCHMARK_TOKEN": token}, timeout=15)
-        if resp.status_code == 200:
-            LOG.info("[PASS] 平台 API 连通 status=200 challenges=%s", len(resp.json() or []))
+        passed, message = check_platform(token, base_url)
+        if passed:
+            LOG.info("[PASS] 平台 API 连通 %s", message)
         else:
-            LOG.error("[FAIL] 平台 API 返回 status=%s body=%s", resp.status_code, resp.text[:200])
+            LOG.error("[FAIL] 平台 API 返回 %s", message)
             ok = False
     except Exception as exc:  # noqa: BLE001
         LOG.error("[FAIL] 平台 API 不可达 error=%s（检查 BENCHMARK_BASE_URL / 网络 / VPN）", exc)

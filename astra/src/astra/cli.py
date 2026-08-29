@@ -117,9 +117,9 @@ def stats(db_path: str, kb_path: Path):
             "SELECT kind, COUNT(*) FROM facts GROUP BY kind ORDER BY COUNT(*) DESC"
         ).fetchall()
         conn.close()
-        click.echo(f"项目数：{projects} ｜ 星记总数：{facts_total}")
+        click.echo(f"项目数：{projects} ｜ 天枢总数：{facts_total}")
         for kind, count in by_kind:
-            label = "摘要星记（Epitome，压缩自旧星记）" if kind == "summary" else kind
+            label = kind  # v0.2 起无 summary kind
             click.echo(f"  - {label}: {count}")
     except sqlite3.Error as exc:
         click.echo(f"  （数据库不可读：{exc}）")
@@ -166,7 +166,7 @@ def stats(db_path: str, kb_path: Path):
 )
 @click.argument("project", required=False, default="")
 def trace(db_path: str, project: str):
-    """决策链回放：该项目的航向（决策）与星记（结论）时间线——"AI 为什么走这条路"可审计。"""
+    """决策链回放：该项目的斗柄（决策）与天枢（结论）时间线——"AI 为什么走这条路"可审计。"""
     import sqlite3
 
     db.configure(Path(db_path))
@@ -205,13 +205,13 @@ def trace(db_path: str, project: str):
             (proj["id"],),
         ).fetchall()
 
-        click.echo(f"\n决策链（航向 {len(steps)} 条）——AI 为什么走这条路：")
+        click.echo(f"\n斗柄轨迹（{len(steps)} 条）——AI 为什么走这条路：")
         for it in steps:
             state = "已归航→" + (it["to_fact_id"] or "?") if it["concluded_at"] else ("已关闭" if it["status"] == "closed" else "未归航")
             desc = (it["description"] or "").replace("\n", " ")[:120]
             click.echo(f"  [{it['created_at']}] {it['worker'] or '?'}: {desc} → {state}")
 
-        click.echo(f"\n星记序列（{len(facts)} 条，按写入序）：")
+        click.echo(f"\n天枢序列（{len(facts)} 条，按写入序）：")
         for f in facts:
             tag = "（负结果）" if f["kind"] == "negative" else ""
             desc = (f["description"] or "").replace("\n", " ")[:120]
@@ -231,7 +231,7 @@ def trace(db_path: str, project: str):
 @click.argument("project", required=False, default="")
 @click.option("--out", type=click.Path(path_type=Path), default=Path("astra-star-map.html"), show_default=True, help="输出 HTML 路径")
 def map_(db_path: str, project: str, out: Path):
-    """星图可视化：生成单文件 HTML（内联 SVG，无外部依赖）——星记为星、航向为轨迹。"""
+    """星图可视化：生成单文件 HTML（内联 SVG，无外部依赖）——天枢为星、斗柄为轨迹。"""
     import html as _html
     import sqlite3
 
@@ -263,7 +263,7 @@ def map_(db_path: str, project: str, out: Path):
             (proj["id"],),
         ).fetchall()
 
-        # 布局：星记按写入序从左到右蛇形铺开，航向画弧线指向归航星记
+        # 布局：天枢按写入序从左到右蛇形铺开，斗柄画弧线指向归航天枢
         cols, node_w, node_h, gap_x, gap_y = 6, 150, 70, 40, 30
         rows = max((len(facts) + cols - 1) // cols, 1)
         width = cols * (node_w + gap_x) + gap_x
@@ -307,12 +307,12 @@ svg{{background:#1e293b;border-radius:12px}} text{{font-family:system-ui}}
 .node:hover rect{{stroke-width:3;cursor:pointer}}
 .legend span{{margin-right:16px;font-size:12px}}</style></head><body>
 <h1>ASTRA 星图 · {_html.escape(proj['title'])}</h1>
-<div class="meta">{proj['id']} ｜ {proj['status']} ｜ 建于 {proj['created_at']} ｜ 星记 {len(facts)} 条 ｜ 航向 {len(steps)} 条</div>
-<div class="legend"><span>🟦 星记</span><span>🟨 北辰</span><span>⬜ 负结果</span><span>绿线=已归航航向</span><span>紫线=未归航</span></div>
+<div class="meta">{proj['id']} ｜ {proj['status']} ｜ 建于 {proj['created_at']} ｜ 天枢 {len(facts)} 条 ｜ 斗柄 {len(steps)} 条</div>
+<div class="legend"><span>🟦 天枢</span><span>🟨 北辰</span><span>⬜ 负结果</span><span>绿线=已归航斗柄</span><span>紫线=未归航</span></div>
 <svg width="{width}" height="{height}">{''.join(links)}{''.join(cells)}</svg>
 </body></html>"""
         out.write_text(doc, encoding="utf-8")
-        click.echo(f"星图已生成：{out.resolve()}（星记 {len(facts)}，航向 {len(steps)}）")
+        click.echo(f"星图已生成：{out.resolve()}（天枢 {len(facts)}，斗柄 {len(steps)}）")
     finally:
         conn.close()
 
@@ -328,7 +328,7 @@ svg{{background:#1e293b;border-radius:12px}} text{{font-family:system-ui}}
 @click.argument("project", required=False, default="")
 @click.option("--out", type=click.Path(path_type=Path), default=None, help="输出 markdown 路径（默认 <project>-report.md）")
 def report(db_path: str, project: str, out: Path):
-    """渗透测试报告：星图渲染为中文报告（概要/风险清单/复现路径/星辉发现）——甲方交付物。"""
+    """渗透测试报告：星图渲染为中文报告（概要/风险清单/复现路径/客星发现）——甲方交付物。"""
     import html as _html
     import re as _re
     import sqlite3
@@ -391,7 +391,7 @@ def report(db_path: str, project: str, out: Path):
         "",
         f"> 生成时间：{__import__('datetime').datetime.now().isoformat(timespec='seconds')} ｜ "
         f"数据来源：ASTRA 星图（{proj['id']}，{proj['status']}） ｜ "
-        f"星辉 {len(all_findings)} 条 / 航向 {len(steps)} 条",
+        f"客星 {len(all_findings)} 条 / 斗柄 {len(steps)} 条",
         "",
         "## 一、测试概要",
         "",
@@ -424,7 +424,7 @@ def report(db_path: str, project: str, out: Path):
     lines.append("")
 
     if all_findings:
-        lines += ["## 四、星辉发现（Finding）", ""]
+        lines += ["## 四、客星发现（Finding）", ""]
         for f in all_findings:
             desc = _html.escape((f["description"] or "").replace("\n", " ")[:400])
             lines.append(f"- **{f['id']}**（{_risk(f['description'])}）：{desc}")
