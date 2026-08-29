@@ -17,7 +17,17 @@
 | 测试迁移 148 全绿 | ✅ | a4a958e |
 | 版本 0.2.0 + note/release | ✅ | 本提交 |
 
-**待验证（发车前必须）**：A1 spike——pi 双网关实测（DS/智谱 anthropic：headless json、会话续接、执行场景稳定性）；镜像重建 + 容器内 pi pong；打包验收。
+**✅ A1 spike 已完成（2026-08-30，本机实测）**，三项实证发现已落码：
+1. pi 0.73 的 anthropic 协议 API id = `anthropic-messages`（非 "anthropic"）——引擎默认值与示例已修（cb84161）
+2. 环境变量 ANTHROPIC_AUTH_TOKEN 会覆盖 models.json 的 apiKey——引擎启动清洗污染 env（cb84161）
+3. pi 会话文件落盘在 dispatcher 语境不稳定（手动直跑可写、Popen 复刻稳定为 0）——执行层已去会话依赖：execute 超时流式天枢抢救（stdout 双格式行解析）+ execute.md 流式条款 + phase usage 事件记账（c713402）；conclude 续接保留为 best-effort
+
+**✅ 本地全链路性能测试三轮全过**（合成靶机 http://127.0.0.1:18765 + 真实模型，tmp/perf_local.py）：
+- 三轮均 42-45s 完整解题（bootstrap 探测→玉衡定航→摇光执行→flag 写回→归航）；引擎冷启 1.6-4.6s；3 worker 启动健康检查全过（3.8-4.1s/个）
+- 单轮 token 记账生效：bootstrap ~10,002 tokens/题（phase usage 日志）
+- 复现性 3/3；测试后已清理含密钥的 spike/agent 目录
+
+**待办**：①平台实弹轮需新 BENCHMARK_TOKEN（旧 token 任务已 finished，需平台开新一轮）②镜像重建+容器冒烟 ③打包 v8（用户指示暂缓）
 
 ---
 
