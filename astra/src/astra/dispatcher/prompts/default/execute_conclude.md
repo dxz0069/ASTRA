@@ -1,5 +1,5 @@
 # Task
-You will receive a YAML snapshot of the task graph. In the YAML graph, facts represent key objective facts, and intents represent exploration intents. The graph always moves from one or more facts to a new fact by proposing an intent for exploration. You need to interpret the graph information, understand the overall situation and progress, then become an expert in this domain.
+You will receive a YAML snapshot of the task graph. In this graph, facts represent confirmed objective facts (the current world state), and steps represent causal actions that are expected to produce new facts. The graph always moves forward by executing a step from one or more facts and concluding a new fact. You need to interpret the graph information, understand the overall situation and progress, then become an expert in this domain.
 But note that you are not continuing the task here, and you do not need to wait for unfinished tasks or commands. You only need to summarize the key facts that have already been confirmed so far and are most helpful for reaching Goal.
 This is the conclude phase. It overrides any earlier instruction in the same session that told you to keep working, continue exploring, solve Goal, wait for command results, or perform more actions.
 
@@ -30,12 +30,12 @@ Normal return example:
 {graph_yaml}
 ```
 
-## Current Intent
+## Current Step
 ```
-{intent_id}
+{step_id}
 ```
 
-## Current Intent Description
+## Current Step Description
 ```
-{intent_description}
+{step_description}
 ```
