@@ -289,8 +289,9 @@ def test_run_benchmark_parallel_window() -> None:
     results = run_benchmark(client, factory, flag_poll_seconds=0, parallel=2)
     assert len(results) == 3
     assert [r.flags_correct for r in results] == [1, 1, 1]
-    assert client.started == ["p-01", "p-02", "p-03"]
-    assert client.closed == ["p-01", "p-02", "p-03"]
+    # 并行下 start/close 的完成顺序由线程调度决定（曾因严格顺序断言在满载下抖动）
+    assert sorted(client.started) == ["p-01", "p-02", "p-03"]
+    assert sorted(client.closed) == ["p-01", "p-02", "p-03"]
 
 
 def test_run_benchmark_auto_expand_to_slot_limit() -> None:
