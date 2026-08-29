@@ -9,7 +9,7 @@ def parse_json_output(stdout: str) -> dict[str, Any]:
     try:
         return extract_json_object(stdout)
     except ValueError as exc:
-        # 降级可观测性（R5 实测）：解析失败附带原始输出前 500 字，定位模型格式漂移
+        # 降级可观测性：解析失败附带原始输出前 500 字，定位模型格式漂移
         snippet = stdout.strip()[:500]
         raise ValueError(f"{exc}; raw_output[:500]={snippet}") from exc
 
@@ -47,19 +47,14 @@ def _is_dict(value: Any) -> bool:
     return isinstance(value, dict)
 
 
-def _looks_like_reason_data(payload: dict[str, Any]) -> bool:
+def _looks_like_decide_data(payload: dict[str, Any]) -> bool:
     if not isinstance(payload, dict):
         return False
     keys = set(payload)
     if keys == {"complete"}:
         complete = payload["complete"]
         return isinstance(complete, dict) and "from" in complete and "description" in complete
-    if keys == {"intents"}:
-        return isinstance(payload["intents"], list)
-    if keys == {"intent"}:
-        intent = payload["intent"]
-        return isinstance(intent, dict) and "from" in intent and "description" in intent
-    return False
+    return bool(keys & {"steps", "close_steps", "subgoals", "drop_subgoals"})
 
 
 def _looks_like_bootstrap_execute_data(payload: dict[str, Any]) -> bool:
@@ -77,50 +72,85 @@ def _looks_like_bootstrap_conclude_data(payload: dict[str, Any]) -> bool:
     return _is_dict(payload.get("fact"))
 
 
-def _looks_like_explore_data(payload: dict[str, Any]) -> bool:
-    return isinstance(payload, dict) and set(payload) == {"description"}
+def _looks_like_execute_data(payload: dict[str, Any]) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    return bool(set(payload) & {"description", "finding"})
 
 
-def validate_reason_payload(
-    payload: dict[str, Any], open_intents_empty: bool, max_intents: int,
+def validate_decide_payload(
+    payload: dict[str, Any], open_steps_empty: bool, max_steps: int,
 ) -> tuple[str, dict[str, Any] | list[dict[str, Any]] | None]:
+    """Decide 输出契约。
+
+    返回 (kind, data)：
+    - ("rejected", None)
+    - ("complete", {"from": [...], "description": "..."})
+    - ("ops", {"steps": [...], "close_steps": [...], "subgoals": [...], "drop_subgoals": [...]})
+      （steps/close_steps/subgoals/drop_subgoals 各字段可选；全空且 open_steps 为空 → 报错，
+       因为无未决步骤时必须有所动作）
+    - ("noop", None)
+    """
     accepted, data = _unwrap_wrapped_payload(payload)
     if accepted is False:
         return "rejected", None
     if accepted is None:
-        if not _looks_like_reason_data(payload):
+        if not _looks_like_decide_data(payload):
             raise ValueError("accepted must be true or false")
         data = payload
     if not isinstance(data, dict):
         raise ValueError("accepted must be true or false")
     complete = data.get("complete")
-    intents = data.get("intents")
-    # backward compat: accept singular "intent" key from LLMs
-    if intents is None:
-        singular = data.get("intent")
+    steps = data.get("steps")
+    # backward compat: accept singular "step" key from LLMs
+    if steps is None:
+        singular = data.get("step")
         if isinstance(singular, dict):
-            intents = [singular]
+            steps = [singular]
     if complete is not None:
-        if intents is not None:
-            raise ValueError("complete and intents cannot coexist")
         if not isinstance(complete, dict) or "from" not in complete or "description" not in complete:
             raise ValueError("invalid complete payload")
         return "complete", complete
-    if intents is not None:
-        if not isinstance(intents, list):
-            raise ValueError("intents must be an array")
-        for i, intent in enumerate(intents):
-            if not isinstance(intent, dict) or "from" not in intent or "description" not in intent:
-                raise ValueError(f"invalid intent at index {i}")
-        if not intents and open_intents_empty:
-            raise ValueError("intents must not be empty when open_intents is empty")
-        intents = intents[:max_intents]
-        if not intents:
-            return "noop", None
-        return "intents", intents
-    if open_intents_empty:
-        raise ValueError("intents is required when open_intents is empty")
-    return "noop", None
+
+    close_steps = data.get("close_steps")
+    subgoals = data.get("subgoals")
+    drop_subgoals = data.get("drop_subgoals")
+
+    if steps is not None:
+        if not isinstance(steps, list):
+            raise ValueError("steps must be an array")
+        for i, step in enumerate(steps):
+            if not isinstance(step, dict) or "from" not in step or "description" not in step:
+                raise ValueError(f"invalid step at index {i}")
+        steps = steps[:max_steps]
+    if close_steps is not None:
+        if not isinstance(close_steps, list):
+            raise ValueError("close_steps must be an array")
+        for i, item in enumerate(close_steps):
+            if isinstance(item, str):
+                close_steps[i] = {"id": item, "reason": ""}
+            elif not isinstance(item, dict) or not item.get("id"):
+                raise ValueError(f"invalid close_steps at index {i}")
+    if subgoals is not None:
+        if not isinstance(subgoals, list):
+            raise ValueError("subgoals must be an array")
+        subgoals = [str(s) for s in subgoals if str(s).strip()]
+    if drop_subgoals is not None:
+        if not isinstance(drop_subgoals, list):
+            raise ValueError("drop_subgoals must be an array")
+        drop_subgoals = [str(s) for s in drop_subgoals if str(s).strip()]
+
+    has_ops = bool(steps or close_steps or subgoals or drop_subgoals)
+    if not has_ops:
+        if open_steps_empty:
+            raise ValueError("steps is required when open_steps is empty")
+        return "noop", None
+    return "ops", {
+        "steps": steps or [],
+        "close_steps": close_steps or [],
+        "subgoals": subgoals or [],
+        "drop_subgoals": drop_subgoals or [],
+    }
 
 
 def validate_bootstrap_execute_payload(payload: dict[str, Any]) -> tuple[str, dict[str, str] | None]:
@@ -155,12 +185,10 @@ def validate_bootstrap_execute_payload(payload: dict[str, Any]) -> tuple[str, di
 
 
 def validate_bootstrap_stream(stdout: str) -> tuple[list[str], str | None]:
-    """增量输出解析：逐行 JSON（每行一条星记，末行可带 complete），超时不丢中间产物。
+    """增量输出解析：逐行 JSON（每行一条事实，末行可带 complete），超时不丢中间产物。
 
     返回 (facts: list[str], complete: str | None)。兼容旧的单对象格式。
     """
-    from astra.dispatcher.output_parser import extract_json_object
-
     facts: list[str] = []
     complete: str | None = None
     raw_lines = [ln for ln in stdout.splitlines() if ln.strip()]
@@ -227,12 +255,13 @@ def validate_bootstrap_conclude_payload(payload: dict[str, Any]) -> tuple[str, s
     return "fact", fact_description.strip()
 
 
-def validate_explore_payload(payload: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
+def validate_execute_payload(payload: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
+    """Execute 输出契约：description 必填，finding 可选（沿途发现）。"""
     accepted, data = _unwrap_wrapped_payload(payload)
     if accepted is False:
         return "rejected", None
     if accepted is None:
-        if not _looks_like_explore_data(payload):
+        if not _looks_like_execute_data(payload):
             raise ValueError("accepted must be true or false")
         data = payload
     if not isinstance(data, dict):
@@ -240,67 +269,12 @@ def validate_explore_payload(payload: dict[str, Any]) -> tuple[str, dict[str, An
     description = data.get("description")
     if not isinstance(description, str) or not description.strip():
         raise ValueError("description is required")
-    confidence = data.get("confidence", "medium")
-    if confidence not in ("low", "medium", "high"):
-        confidence = "medium"
-    evidence = data.get("evidence")
-    if not isinstance(evidence, str) or not evidence.strip():
-        evidence = None
-    return "fact", {"description": description.strip(), "confidence": confidence, "evidence": evidence}
-
-
-def validate_consolidate_payload(payload: dict[str, Any]) -> tuple[str, str | None]:
-    """记忆整理：接受一条摘要星记描述。"""
-    accepted, data = _unwrap_wrapped_payload(payload)
-    if accepted is False:
-        return "rejected", None
-    if accepted is None:
-        if not _looks_like_explore_data(payload):
-            raise ValueError("accepted must be true or false")
-        data = payload
-    if not isinstance(data, dict):
-        raise ValueError("accepted must be true or false")
-    description = data.get("description")
-    if not isinstance(description, str) or not description.strip():
-        raise ValueError("description is required")
-    return "fact", description.strip()
-
-
-def validate_challenge_payload(payload: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
-    """质询输出：{accepted, objections[], confidence}——质询结果不包装在 data 中。"""
-    if not isinstance(payload, dict):
-        raise ValueError("payload must be an object")
-    if payload.get("accepted") is False:
-        return "rejected", None
-    if payload.get("accepted") is not True:
-        raise ValueError("accepted must be true or false")
-    objections = payload.get("objections", [])
-    if not isinstance(objections, list):
-        raise ValueError("objections must be an array")
-    confidence = payload.get("confidence", "medium")
-    if confidence not in ("low", "medium", "high"):
-        raise ValueError("confidence must be one of low/medium/high")
-    return "accepted", {"objections": [str(o) for o in objections], "confidence": confidence}
-
-
-def validate_verdict_payload(payload: dict[str, Any], expected_kind: str) -> tuple[str, dict[str, Any] | None]:
-    """裁决输出：accepted=true 且 data 与提案类型一致（complete dict / intents list）。"""
-    accepted, data = _unwrap_wrapped_payload(payload)
-    if accepted is False:
-        return "rejected", None
-    if accepted is None:
-        raise ValueError("accepted must be true or false")
-    if not isinstance(data, dict):
-        raise ValueError("accepted must be true or false")
-    if expected_kind == "complete":
-        complete = data.get("complete")
-        if not isinstance(complete, dict) or "from" not in complete or "description" not in complete:
-            raise ValueError("invalid verdict complete payload")
-        return "complete", complete
-    intents = data.get("intents")
-    if not isinstance(intents, list) or not intents:
-        raise ValueError("invalid verdict intents payload")
-    for intent in intents:
-        if not isinstance(intent, dict) or "from" not in intent or "description" not in intent:
-            raise ValueError(f"invalid verdict intent: {intent}")
-    return "intents", intents
+    finding = data.get("finding")
+    finding_description: str | None = None
+    if isinstance(finding, dict):
+        fd = finding.get("description")
+        if isinstance(fd, str) and fd.strip():
+            finding_description = fd.strip()
+    elif isinstance(finding, str) and finding.strip():
+        finding_description = finding.strip()
+    return "fact", {"description": description.strip(), "finding": finding_description}

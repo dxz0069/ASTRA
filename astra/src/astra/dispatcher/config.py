@@ -10,24 +10,14 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
-TaskType = Literal["reason", "explore", "bootstrap", "consolidate"]
-# dsh（DeepSeek Harness）适配器已于 2026-08-28 移除：tsecbench 前十 0 家使用
-# （6 家 Claude Code/Agent SDK + 3 家自研），托管舰队统一 claudecode。
-WorkerType = Literal["claudecode", "codex", "pi", "mock"]
+TaskType = Literal["decide", "execute", "bootstrap"]
+# cairn-y（2026-08-29）：执行底座只留 pi（最原始、完全可控——Less is More）；
+# claudecode/codex/dsh 适配器全部移除。
+WorkerType = Literal["pi", "mock"]
 CompletedAction = Literal["remove", "stop"]
 WorkerHealthcheckMode = Literal["startup_and_task", "startup_only", "disabled"]
 
 WORKER_ENV_KEYS: dict[WorkerType, tuple[str, ...]] = {
-    "claudecode": (
-        "ANTHROPIC_MODEL",
-        "ANTHROPIC_BASE_URL",
-        "ANTHROPIC_AUTH_TOKEN",
-    ),
-    "codex": (
-        "CODEX_MODEL",
-        "CODEX_BASE_URL",
-        "OPENAI_API_KEY",
-    ),
     "pi": (
         "PI_MODEL",
         "PI_BASE_URL",
@@ -38,37 +28,30 @@ WORKER_ENV_KEYS: dict[WorkerType, tuple[str, ...]] = {
 }
 
 DEFAULT_PROMPT_REQUIRED_TOKENS: dict[str, tuple[str, ...]] = {
-    "reason.md": ("{graph_yaml}", "{fact_ids}", "{open_intents}", "{max_intents}"),
-    "explore.md": ("{graph_yaml}", "{intent_id}", "{intent_description}"),
-    "explore_conclude.md": ("{graph_yaml}", "{intent_id}", "{intent_description}"),
+    "decide.md": ("{graph_yaml}", "{fact_ids}", "{open_steps}", "{max_steps}"),
+    "execute.md": ("{graph_yaml}", "{step_id}", "{step_description}"),
+    "execute_conclude.md": ("{graph_yaml}", "{step_id}", "{step_description}"),
     "bootstrap.md": ("{origin}", "{goal}", "{hints}"),
     "bootstrap_conclude.md": ("{origin}", "{goal}", "{hints}"),
-    "consolidate.md": ("{goal}", "{stale_facts}"),
-    "challenge.md": ("{graph_yaml}", "{goal}", "{proposal}"),
-    "verdict.md": ("{graph_yaml}", "{goal}", "{proposal}", "{challenge}"),
 }
 
 PROMPT_REQUIRED_TOKENS_BY_GROUP: dict[str, dict[str, tuple[str, ...]]] = {
     "mock": {
-        "reason.md": ("{fact_ids}", "{open_intents}", "{max_intents}"),
-        "explore.md": ("{intent_id}",),
-        "explore_conclude.md": ("{intent_id}",),
+        "decide.md": ("{fact_ids}", "{open_steps}", "{max_steps}"),
+        "execute.md": ("{step_id}",),
+        "execute_conclude.md": ("{step_id}",),
         "bootstrap.md": ("{origin}", "{goal}", "{hints}"),
         "bootstrap_conclude.md": ("{origin}", "{goal}", "{hints}"),
-        "consolidate.md": ("{goal}", "{stale_facts}"),
-        "challenge.md": ("{proposal}",),
-        "verdict.md": ("{proposal}", "{challenge}"),
     }
 }
 
 MOCK_ALLOWED_OUTCOMES: dict[str, frozenset[str]] = {
     "healthcheck": frozenset({"ok", "fail"}),
-    "reason": frozenset({"complete", "intent", "noop", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
-    "explore_execute": frozenset({"fact", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
-    "explore_conclude": frozenset({"fact", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
+    "decide": frozenset({"complete", "ops", "noop", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
+    "execute_execute": frozenset({"fact", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
+    "execute_conclude": frozenset({"fact", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
     "bootstrap": frozenset({"complete", "fact", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
     "bootstrap_conclude": frozenset({"fact", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
-    "consolidate": frozenset({"fact", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
 }
 
 MOCK_DEFAULT_BEHAVIOR: dict[str, dict[str, Any]] = {
@@ -76,11 +59,11 @@ MOCK_DEFAULT_BEHAVIOR: dict[str, dict[str, Any]] = {
         "delay": [0.05, 0.15],
         "outcomes": {"ok": "1.0", "fail": "0.0"},
     },
-    "reason": {
+    "decide": {
         "delay": [0.05, 0.3],
         "outcomes": {
             "complete": "0.0",
-            "intent": "1.0",
+            "ops": "1.0",
             "noop": "0.0",
             "rejected": "0.0",
             "invalid_json": "0.0",
@@ -88,7 +71,7 @@ MOCK_DEFAULT_BEHAVIOR: dict[str, dict[str, Any]] = {
             "command_fail": "0.0",
         },
     },
-    "explore_execute": {
+    "execute_execute": {
         "delay": [0.05, 0.3],
         "outcomes": {
             "fact": "1.0",
@@ -98,7 +81,7 @@ MOCK_DEFAULT_BEHAVIOR: dict[str, dict[str, Any]] = {
             "command_fail": "0.0",
         },
     },
-    "explore_conclude": {
+    "execute_conclude": {
         "delay": [0.05, 0.3],
         "outcomes": {
             "fact": "1.0",
@@ -129,16 +112,6 @@ MOCK_DEFAULT_BEHAVIOR: dict[str, dict[str, Any]] = {
             "command_fail": "0.0",
         },
     },
-    "consolidate": {
-        "delay": [0.05, 0.3],
-        "outcomes": {
-            "fact": "1.0",
-            "rejected": "0.0",
-            "invalid_json": "0.0",
-            "invalid_payload": "0.0",
-            "command_fail": "0.0",
-        },
-    },
 }
 
 MOCK_ALLOWED_ENV_KEYS = frozenset(
@@ -146,12 +119,12 @@ MOCK_ALLOWED_ENV_KEYS = frozenset(
 )
 
 
-class ReasonTaskConfig(BaseModel):
+class DecideTaskConfig(BaseModel):
     timeout: int = Field(gt=0)
-    max_intents: int = Field(gt=0, default=3)
+    max_steps: int = Field(gt=0, default=3)
 
 
-class ExploreTaskConfig(BaseModel):
+class ExecuteTaskConfig(BaseModel):
     timeout: int = Field(gt=0)
     conclude_timeout: int = Field(gt=0)
 
@@ -161,20 +134,10 @@ class BootstrapTaskConfig(BaseModel):
     conclude_timeout: int = Field(gt=0)
 
 
-class ConsolidateTaskConfig(BaseModel):
-    timeout: int = Field(gt=0)
-
-
-class ChallengeTaskConfig(BaseModel):
-    timeout: int = Field(gt=0, default=120)
-
-
 class TasksConfig(BaseModel):
     bootstrap: BootstrapTaskConfig
-    reason: ReasonTaskConfig
-    explore: ExploreTaskConfig
-    consolidate: ConsolidateTaskConfig = Field(default_factory=lambda: ConsolidateTaskConfig(timeout=180))
-    challenge: ChallengeTaskConfig = Field(default_factory=lambda: ChallengeTaskConfig(timeout=120))
+    decide: DecideTaskConfig
+    execute: ExecuteTaskConfig
 
 
 class ContainerConfig(BaseModel):
@@ -185,10 +148,10 @@ class ContainerConfig(BaseModel):
 
 
 class ContextBudget(BaseModel):
-    """星尘记忆：prompt 内联上下文的硬上限（完整星图仍以文件引用提供）。"""
+    """prompt 内联上下文的硬上限（完整图仍以文件引用提供）。"""
 
     max_inline_facts: int = Field(default=60, ge=1)
-    max_inline_intents: int = Field(default=12, ge=1)
+    max_inline_steps: int = Field(default=12, ge=1)
     max_inline_hints: int = Field(default=8, ge=1)
 
 
@@ -382,11 +345,11 @@ def resolve_mock_behavior(worker_name: str, env: dict[str, str]) -> dict[str, di
                     if not isinstance(value, int) or value < 0:
                         raise ValueError(f"worker {worker_name} {prefix}.rules[{index}].fact_ids_lte must be a non-negative integer")
                     entry["fact_ids_lte"] = value
-                if "open_intents_empty" in rule:
-                    value = rule["open_intents_empty"]
+                if "open_steps_empty" in rule:
+                    value = rule["open_steps_empty"]
                     if not isinstance(value, bool):
-                        raise ValueError(f"worker {worker_name} {prefix}.rules[{index}].open_intents_empty must be boolean")
-                    entry["open_intents_empty"] = value
+                        raise ValueError(f"worker {worker_name} {prefix}.rules[{index}].open_steps_empty must be boolean")
+                    entry["open_steps_empty"] = value
                 normalized_rules.append(entry)
             behavior[phase]["rules"] = normalized_rules
     return behavior
