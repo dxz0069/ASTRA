@@ -764,7 +764,7 @@ def _run_single_challenge(
         started_this_round = True
         if progress is not None:
             progress.mark(code, "started")
-        container_addr = getattr(started, "container_addr", None) or []
+        container_addr = challenge_addr(started)
         origin = ", ".join(str(addr) for addr in container_addr) or code
         goal = build_goal_text(description, ch)
         # defer 续跑：复用原引擎项目（星图/会话进度保留），否则新建。

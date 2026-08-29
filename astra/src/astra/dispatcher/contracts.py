@@ -14,6 +14,11 @@ def parse_json_output(stdout: str) -> dict[str, Any]:
         raise ValueError(f"{exc}; raw_output[:500]={snippet}") from exc
 
 
+# 单轮 decide 的图操作封顶（防幻觉/恶意输出倾倒；正常轮次远低于此）
+MAX_CLOSE_STEPS_PER_DECIDE = 20
+MAX_SUBGOALS_PER_DECIDE = 5
+
+
 def _coerce_accepted(value: Any) -> bool | None:
     """模型偶发把 accepted 写成字符串（"true"/"True"/"yes"）——统一收敛为布尔。"""
     if isinstance(value, bool):
@@ -131,14 +136,15 @@ def validate_decide_payload(
                 close_steps[i] = {"id": item, "reason": ""}
             elif not isinstance(item, dict) or not item.get("id"):
                 raise ValueError(f"invalid close_steps at index {i}")
+        close_steps = close_steps[:MAX_CLOSE_STEPS_PER_DECIDE]
     if subgoals is not None:
         if not isinstance(subgoals, list):
             raise ValueError("subgoals must be an array")
-        subgoals = [str(s) for s in subgoals if str(s).strip()]
+        subgoals = [str(s) for s in subgoals if str(s).strip()][:MAX_SUBGOALS_PER_DECIDE]
     if drop_subgoals is not None:
         if not isinstance(drop_subgoals, list):
             raise ValueError("drop_subgoals must be an array")
-        drop_subgoals = [str(s) for s in drop_subgoals if str(s).strip()]
+        drop_subgoals = [str(s) for s in drop_subgoals if str(s).strip()][:MAX_SUBGOALS_PER_DECIDE]
 
     has_ops = bool(steps or close_steps or subgoals or drop_subgoals)
     if not has_ops:
