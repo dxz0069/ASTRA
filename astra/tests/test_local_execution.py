@@ -116,8 +116,8 @@ def test_local_execution_end_to_end(http_client: TestClient) -> None:
     """local execution + mock worker 跑完整调度链路（bootstrap→complete）。"""
     config = _config(
         bootstrap='{"delay":[0,0],"outcomes":{"complete":"1.0","fact":"0.0","rejected":"0.0","invalid_json":"0.0","invalid_payload":"0.0","command_fail":"0.0"}}',
-        reason='{"delay":[0,0],"outcomes":{"complete":"1.0","intent":"0.0","noop":"0.0","rejected":"0.0","invalid_json":"0.0","invalid_payload":"0.0","command_fail":"0.0"}}',
-        explore='{"delay":[0,0],"outcomes":{"fact":"1.0","rejected":"0.0","invalid_json":"0.0","invalid_payload":"0.0","command_fail":"0.0"}}',
+        decide='{"delay":[0,0],"outcomes":{"complete":"1.0","ops":"0.0","noop":"0.0","rejected":"0.0","invalid_json":"0.0","invalid_payload":"0.0","command_fail":"0.0"}}',
+        execute='{"delay":[0,0],"outcomes":{"fact":"1.0","rejected":"0.0","invalid_json":"0.0","invalid_payload":"0.0","command_fail":"0.0"}}',
     )
     # 注入 local execution（mock 端到端 harness 的 config 无 execution 字段，默认 docker；这里显式 local）
     config.runtime.execution = "local"

@@ -328,7 +328,7 @@ svg{{background:#1e293b;border-radius:12px}} text{{font-family:system-ui}}
 @click.argument("project", required=False, default="")
 @click.option("--out", type=click.Path(path_type=Path), default=None, help="输出 markdown 路径（默认 <project>-report.md）")
 def report(db_path: str, project: str, out: Path):
-    """渗透测试报告：星图渲染为中文报告（概要/风险清单/复现路径/证据链）——甲方交付物。"""
+    """渗透测试报告：FGS 图渲染为中文报告（概要/风险清单/复现路径/沿途发现）——甲方交付物。"""
     import html as _html
     import re as _re
     import sqlite3
@@ -351,50 +351,54 @@ def report(db_path: str, project: str, out: Path):
             click.echo("未匹配到项目")
             return
         facts = conn.execute(
-            "SELECT id, description, kind, confidence, evidence, challenged "
-            "FROM facts WHERE project_id = ? ORDER BY rowid",
+            "SELECT id, description, kind FROM facts WHERE project_id = ? ORDER BY rowid",
             (proj["id"],),
         ).fetchall()
-        intents = conn.execute(
-            "SELECT id, description, worker, to_fact_id, created_at, concluded_at, challenged "
-            "FROM intents WHERE project_id = ? ORDER BY created_at",
+        steps = conn.execute(
+            "SELECT id, description, worker, to_fact_id, created_at, concluded_at, status "
+            "FROM steps WHERE project_id = ? ORDER BY created_at",
+            (proj["id"],),
+        ).fetchall()
+        findings = conn.execute(
+            "SELECT id, description, created_at FROM findings WHERE project_id = ? ORDER BY created_at",
             (proj["id"],),
         ).fetchall()
     finally:
         conn.close()
 
-    # 风险评级启发式：关键词 + 置信度（high 置信的 RCE/凭据/注入类发现升高危）
+    # 风险评级启发式：关键词命中即评级（FGS 无置信度字段，发现均已由执行者实测自证）
     HIGH_KWS = ("rce", "远程命令", "任意命令", "凭据", "密码", "私钥", "ak/sk", "token", "getshell", "webshell", "反弹")
     MED_KWS = ("注入", "ssrf", "xss", "越权", "上传", "反序列化", "穿越", "泄露", "sqli")
 
-    def _risk(desc: str, confidence: str) -> str:
+    def _risk(desc: str) -> str:
         low = desc.lower()
-        if any(k in low for k in HIGH_KWS) and confidence == "high":
+        if any(k in low for k in HIGH_KWS):
             return "高危"
-        if any(k in low for k in HIGH_KWS) or (any(k in low for k in MED_KWS) and confidence == "high"):
-            return "中危"
         if any(k in low for k in MED_KWS):
+            return "中危"
+        if low:
             return "低危"
         return "信息"
 
-    findings = [f for f in facts if f["id"] != "goal" and f["kind"] != "summary"]
+    vuln_findings = [f for f in findings if _risk(f["description"]) in ("高危", "中危", "低危")]
+    all_findings = [f for f in findings if f["id"] != "goal"]
     risk_counts = {"高危": 0, "中危": 0, "低危": 0, "信息": 0}
-    for f in findings:
-        risk_counts[_risk(f["description"], f["confidence"])] += 1
+    for f in (vuln_findings or [f for f in all_findings if f["id"] != "origin"]):
+        risk_counts[_risk(f["description"])] += 1
 
     lines = [
         f"# 渗透测试报告 · {_html.escape(proj['title'])}",
         "",
         f"> 生成时间：{__import__('datetime').datetime.now().isoformat(timespec='seconds')} ｜ "
-        f"数据来源：ASTRA 星图（{proj['id']}，{proj['status']}） ｜ "
-        f"证据链：星记 {len(facts)} 条 / 航向 {len(intents)} 条",
+        f"数据来源：ASTRA FGS 图（{proj['id']}，{proj['status']}） ｜ "
+        f"沿途发现 {len(all_findings)} 条 / 步骤 {len(steps)} 条",
         "",
         "## 一、测试概要",
         "",
         "| 项 | 值 |",
         "|---|---|",
         f"| 测试目标 | {_html.escape(proj['title'])} |",
-        f"| 发现总数 | {len(findings)} |",
+        f"| 发现总数 | {len(all_findings)} |",
         f"| 高危 / 中危 / 低危 / 信息 | {risk_counts['高危']} / {risk_counts['中危']} / {risk_counts['低危']} / {risk_counts['信息']} |",
         "",
     ]
@@ -402,27 +406,29 @@ def report(db_path: str, project: str, out: Path):
     if goal:
         lines += ["**测试任务**：" + _html.escape(goal[:200]), ""]
 
-    lines += ["## 二、风险发现清单", "", "| 编号 | 风险等级 | 置信度 | 描述 |", "|---|---|---|---|"]
-    for i, f in enumerate(findings, 1):
+    lines += ["## 二、风险发现清单", "", "| 编号 | 风险等级 | 描述 |", "|---|---|---|"]
+    for f in (vuln_findings or all_findings):
         desc = _html.escape((f["description"] or "").replace("\n", " ")[:160])
-        mark = " ⚠被质询" if f["challenged"] else ""
-        lines.append(f"| {f['id']} | {_risk(f['description'], f['confidence'])} | {f['confidence']}{mark} | {desc} |")
+        lines.append(f"| {f['id']} | {_risk(f['description'])} | {desc} |")
     lines.append("")
 
     lines += ["## 三、攻击路径（决策链回放）", ""]
-    for it in intents:
-        state = "已归航→" + (it["to_fact_id"] or "?") if it["concluded_at"] else "探索中"
-        mark = " 〖被质询否决〗" if it["challenged"] else ""
+    for it in steps:
+        state = (
+            "已收束→" + (it["to_fact_id"] or "?")
+            if it["concluded_at"]
+            else ("已关闭" if it["status"] == "closed" else "执行中")
+        )
         desc = _html.escape((it["description"] or "").replace("\n", " ")[:140])
-        lines.append(f"- `[{it['created_at']}]` {desc} → {state}{mark}")
+        lines.append(f"- `[{it['created_at']}]` {desc} → {state}")
     lines.append("")
 
-    evidenced = [f for f in findings if (f["evidence"] or "").strip()]
-    if evidenced:
-        lines += ["## 四、证据链", ""]
-        for f in evidenced:
-            ev = _html.escape(f["evidence"][:400])
-            lines += [f"**{f['id']}**：", "", "```", ev, "```", ""]
+    if all_findings:
+        lines += ["## 四、沿途发现（Finding）", ""]
+        for f in all_findings:
+            desc = _html.escape((f["description"] or "").replace("\n", " ")[:400])
+            lines.append(f"- **{f['id']}**（{_risk(f['description'])}）：{desc}")
+        lines.append("")
     lines += [
         "## 五、修复建议",
         "",
@@ -431,9 +437,9 @@ def report(db_path: str, project: str, out: Path):
         "- 建议针对本次攻击路径中未授权访问的入口做专项加固，并复测验证。",
         "",
         "---",
-        "*本报告由 ASTRA 星尘记忆系统自动生成，星记均经实测验证（被质询项已标注）。*",
+        "*本报告由 ASTRA FGS 图自动生成，发现均由执行者实测确认。*",
     ]
 
     out = out or Path(f"{_re.sub(r'[^a-zA-Z0-9_-]+', '-', proj['title']).strip('-') or 'astra'}-report.md")
     out.write_text("\n".join(lines), encoding="utf-8")
-    click.echo(f"报告已生成：{out.resolve()}（发现 {len(findings)} 项：高危 {risk_counts['高危']}/中危 {risk_counts['中危']}）")
+    click.echo(f"报告已生成：{out.resolve()}（发现 {len(all_findings)} 项：高危 {risk_counts['高危']}/中危 {risk_counts['中危']}）")

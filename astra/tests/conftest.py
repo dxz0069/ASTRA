@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from astra.dispatcher.config import DispatchConfig
 from astra.dispatcher.protocol.client import ApiResult
 from astra.dispatcher.workers.base import DriverResult
-from astra.server.models import Fact, Hint, Intent, ProjectDetail, ProjectMeta
+from astra.server.models import Fact, Finding, Hint, ProjectDetail, ProjectMeta, Step, SubGoal
 
 
 def make_config() -> DispatchConfig:
@@ -22,8 +22,8 @@ def make_config() -> DispatchConfig:
             },
             "tasks": {
                 "bootstrap": {"timeout": 10, "conclude_timeout": 5},
-                "reason": {"timeout": 10, "max_intents": 3},
-                "explore": {"timeout": 10, "conclude_timeout": 5},
+                "decide": {"timeout": 10, "max_steps": 3},
+                "execute": {"timeout": 10, "conclude_timeout": 5},
             },
             "container": {
                 "image": "test-image",
@@ -34,7 +34,7 @@ def make_config() -> DispatchConfig:
                 {
                     "name": "test-worker",
                     "type": "mock",
-                    "task_types": ["bootstrap", "reason", "explore"],
+                    "task_types": ["bootstrap", "decide", "execute"],
                     "max_running": 1,
                     "priority": 0,
                 }
@@ -43,7 +43,7 @@ def make_config() -> DispatchConfig:
     )
 
 
-def make_project(*, intents: list[Intent] | None = None) -> ProjectDetail:
+def make_project(*, steps: list[Step] | None = None) -> ProjectDetail:
     return ProjectDetail(
         project=ProjectMeta(
             id="proj_001",
@@ -57,7 +57,7 @@ def make_project(*, intents: list[Intent] | None = None) -> ProjectDetail:
             Fact(id="goal", description="finish"),
             Fact(id="f001", description="known fact"),
         ],
-        intents=intents or [],
+        steps=steps or [],
         hints=[
             Hint(
                 id="h001",
@@ -66,17 +66,36 @@ def make_project(*, intents: list[Intent] | None = None) -> ProjectDetail:
                 created_at="2026-01-01T00:00:01Z",
             )
         ],
+        findings=[],
+        subgoals=[],
     )
 
 
-def make_intent(intent_id: str = "i001") -> Intent:
-    return Intent(
-        id=intent_id,
+def make_step(step_id: str = "s001") -> Step:
+    return Step(
+        id=step_id,
         from_=["f001"],
         description="investigate",
-        creator="reasoner",
+        creator="decider",
         worker="test-worker",
         created_at="2026-01-01T00:00:02Z",
+    )
+
+
+def make_finding() -> Finding:
+    return Finding(
+        id="fnd001",
+        description="a finding",
+        created_at="2026-01-01T00:00:03Z",
+    )
+
+
+def make_subgoal() -> SubGoal:
+    return SubGoal(
+        id="sg001",
+        description="milestone",
+        status="active",
+        created_at="2026-01-01T00:00:03Z",
     )
 
 
@@ -112,12 +131,14 @@ class FakeClient:
     project: ProjectDetail
     concluded: list[tuple[str, str, str, str]] = field(default_factory=list)
     completed: list[tuple[str, list[str], str, str]] = field(default_factory=list)
-    created_intents: list[tuple[str, list[str], str, str]] = field(default_factory=list)
+    created_steps: list[tuple[str, list[str], str, str]] = field(default_factory=list)
     created_facts: list[tuple[str, str, str, str]] = field(default_factory=list)
     created_hints: list[tuple[str, str, str]] = field(default_factory=list)
-    archived_facts: list[tuple[str, list[str]]] = field(default_factory=list)
+    created_findings: list[tuple[str, str]] = field(default_factory=list)
+    created_subgoals: list[tuple[str, str]] = field(default_factory=list)
+    closed_steps: list[tuple[str, str, str]] = field(default_factory=list)
     released: list[tuple[str, str, str]] = field(default_factory=list)
-    released_reasons: list[tuple[str, str]] = field(default_factory=list)
+    released_decides: list[tuple[str, str]] = field(default_factory=list)
 
     def get_project(self, _project_id: str) -> ProjectDetail:
         return self.project
@@ -125,49 +146,60 @@ class FakeClient:
     def conclude(
         self,
         project_id: str,
-        intent_id: str,
+        step_id: str,
         worker: str,
         description: str,
-        confidence: str = "medium",
-        evidence: str | None = None,
-        challenged: bool = False,
         kind: str = "regular",
+        finding: str | None = None,
     ) -> ApiResult:
-        self.concluded.append((project_id, intent_id, worker, description))
-        return ApiResult(200, {"fact": {"id": "f002", "confidence": confidence, "evidence": evidence, "challenged": challenged, "kind": kind}})
+        self.concluded.append((project_id, step_id, worker, description))
+        if finding:
+            self.created_findings.append((project_id, finding))
+        return ApiResult(200, {"fact": {"id": "f002", "kind": kind}})
 
     def complete(self, project_id: str, from_ids: list[str], description: str, worker: str, lease_token: str | None = None) -> ApiResult:
         self.completed.append((project_id, from_ids, description, worker))
         return ApiResult(200, {})
 
-    def create_intent(self, project_id: str, from_ids: list[str], description: str, creator: str) -> ApiResult:
-        self.created_intents.append((project_id, from_ids, description, creator))
+    def create_step(self, project_id: str, from_ids: list[str], description: str, creator: str, expect: str | None = None) -> ApiResult:
+        self.created_steps.append((project_id, from_ids, description, creator))
         return ApiResult(201, {})
+
+    def close_step(self, project_id: str, step_id: str, reason: str) -> ApiResult:
+        self.closed_steps.append((project_id, step_id, reason))
+        return ApiResult(200, {})
 
     def create_fact(self, project_id: str, description: str, kind: str = "regular", creator: str = "system") -> ApiResult:
         self.created_facts.append((project_id, description, kind, creator))
         return ApiResult(201, {})
 
+    def create_finding(self, project_id: str, description: str) -> ApiResult:
+        self.created_findings.append((project_id, description))
+        return ApiResult(201, {})
+
+    def create_subgoal(self, project_id: str, description: str) -> ApiResult:
+        self.created_subgoals.append((project_id, description))
+        return ApiResult(201, {})
+
+    def update_subgoal_status(self, project_id: str, subgoal_id: str, status: str) -> ApiResult:
+        return ApiResult(200, {})
+
     def create_hint(self, project_id: str, content: str, creator: str = "human") -> ApiResult:
         self.created_hints.append((project_id, content, creator))
         return ApiResult(201, {})
 
-    def archive_facts(self, project_id: str, fact_ids: list[str]) -> ApiResult:
-        self.archived_facts.append((project_id, fact_ids))
-        return ApiResult(200, {"deleted": len(fact_ids)})
-
-    def release(self, project_id: str, intent_id: str, worker: str) -> ApiResult:
-        self.released.append((project_id, intent_id, worker))
+    def release(self, project_id: str, step_id: str, worker: str) -> ApiResult:
+        self.released.append((project_id, step_id, worker))
         return ApiResult(200, {})
 
-    def release_reason(self, project_id: str, worker: str, lease_token: str | None = None) -> ApiResult:
-        self.released_reasons.append((project_id, worker))
+    def release_decide(self, project_id: str, worker: str, lease_token: str | None = None) -> ApiResult:
+        self.released_decides.append((project_id, worker))
         return ApiResult(200, {})
 
-    def heartbeat(self, _project_id: str, _intent_id: str, _worker: str) -> ApiResult:
+    def heartbeat(self, _project_id: str, _step_id: str, _worker: str) -> ApiResult:
         return ApiResult(200, {})
 
-    def reason_heartbeat(self, _project_id: str, _worker: str, _lease_token: str | None = None) -> ApiResult:
+    def decide_heartbeat(self, _project_id: str, _worker: str, _lease_token: str | None = None) -> ApiResult:
         return ApiResult(200, {})
 
 

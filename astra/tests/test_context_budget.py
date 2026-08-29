@@ -6,14 +6,14 @@ from astra.dispatcher.context import (
     _open_chain_depths,
     build_focus_fact_ids,
     build_focus_hints,
-    build_focus_open_intents,
+    build_focus_open_steps,
 )
-from astra.server.models import Fact, Hint, Intent, ProjectDetail, ProjectMeta
+from astra.server.models import Fact, Hint, Step, ProjectDetail, ProjectMeta
 
 
 def _project(
     facts: list[Fact],
-    intents: list[Intent] | None = None,
+    steps: list[Step] | None = None,
     hints: list[Hint] | None = None,
     goal: str = "find the flag on target",
 ) -> ProjectDetail:
@@ -21,8 +21,10 @@ def _project(
     return ProjectDetail(
         project=meta,
         facts=[Fact(id="goal", description=goal), Fact(id="origin", description="http://target:8080"), *facts],
-        intents=intents or [],
+        steps=steps or [],
         hints=hints or [],
+        findings=[],
+        subgoals=[],
     )
 
 
@@ -30,8 +32,8 @@ def _fact(fid: str, description: str) -> Fact:
     return Fact(id=fid, description=description)
 
 
-def _intent(iid: str, description: str, created_at: str) -> Intent:
-    return Intent(
+def _intent(iid: str, description: str, created_at: str) -> Step:
+    return Step(
         id=iid,
         from_=["origin"],
         to=None,
@@ -74,7 +76,7 @@ def test_focus_fact_ids_prefers_relevant_and_recent() -> None:
             _fact("f3", "mysql on 3306 with weak password"),
             _fact("f4", "wordpress 5.2 detected"),
         ],
-        intents=[_intent("i1", "exploit sqli on login page", "2026-01-01T00:00:01Z")],
+        steps=[_intent("i1", "exploit sqli on login page", "2026-01-01T00:00:01Z")],
     )
     # 预算 2：与未完成航向重叠最深的 f3（sqli/login）必选
     ids = build_focus_fact_ids(project, 2)
@@ -85,13 +87,13 @@ def test_focus_fact_ids_prefers_relevant_and_recent() -> None:
 def test_focus_open_intents_keeps_newest_within_budget() -> None:
     project = _project(
         [],
-        intents=[
+        steps=[
             _intent("i1", "old direction", "2026-01-01T00:00:01Z"),
             _intent("i2", "new direction", "2026-01-01T00:00:02Z"),
             _intent("i3", "newest direction", "2026-01-01T00:00:03Z"),
         ],
     )
-    focused = build_focus_open_intents(project, 2)
+    focused = build_focus_open_steps(project, 2)
     assert [item["id"] for item in focused] == ["i3", "i2"]
 
 
@@ -121,7 +123,7 @@ def test_critical_fact_is_pinned_despite_zero_lexical_relevance() -> None:
             _fact("f4", "robots.txt parsed"),
             _fact("f5", "gobuster finished"),
         ],
-        intents=[_intent("i1", "enumerate attack surface", "2026-01-01T00:00:01Z")],
+        steps=[_intent("i1", "enumerate attack surface", "2026-01-01T00:00:01Z")],
     )
     # 预算 1：凭据级发现词面上与航向毫无重叠，仍被钉住保留
     ids = build_focus_fact_ids(project, 1)
@@ -151,8 +153,8 @@ def test_graph_distance_beats_lexical_similarity() -> None:
             _fact("f3", "directory brute force with common wordlist"),
             _fact("f4", "robots.txt and sitemap parsed"),
         ],
-        intents=[
-            Intent(
+        steps=[
+            Step(
                 id="i1", from_=["f1"], to=None,
                 description="continue exploiting the artifact chain",
                 creator="worker", worker="w", created_at="2026-01-01T00:00:01Z",
@@ -170,13 +172,13 @@ def test_second_hop_via_concluded_intent_gets_lesser_boost() -> None:
             _fact("f2", "totally unrelated notes about formatting"),
             _fact("f3", "downstream finding grew out of f1 conclusion"),
         ],
-        intents=[
-            Intent(
+        steps=[
+            Step(
                 id="i1", from_=["f1"], to="f3",
                 description="verify chain", creator="worker", worker="w",
                 created_at="2026-01-01T00:00:01Z", concluded_at="2026-01-01T00:00:02Z",
             ),
-            Intent(
+            Step(
                 id="i2", from_=["f1"], to=None,
                 description="keep pushing on f1", creator="worker", worker="w",
                 created_at="2026-01-01T00:00:03Z",

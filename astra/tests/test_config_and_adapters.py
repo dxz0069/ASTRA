@@ -8,7 +8,6 @@ from pydantic import ValidationError
 import sys
 
 from astra.dispatcher.config import DispatchConfig, WorkerConfig, validate_prompt_resources
-from astra.dispatcher.workers.adapters.codex import CodexDriver
 from astra.dispatcher.workers.adapters.pi import PiDriver
 
 from conftest import make_config
@@ -54,7 +53,7 @@ def test_pi_worker_rejects_invalid_context_window() -> None:
             {
                 "name": "pi",
                 "type": "pi",
-                "task_types": ["explore"],
+                "task_types": ["execute"],
                 "max_running": 1,
                 "priority": 0,
                 "env": {
@@ -74,7 +73,7 @@ def test_mock_worker_rejects_unknown_phase_configuration() -> None:
             {
                 "name": "mock",
                 "type": "mock",
-                "task_types": ["explore"],
+                "task_types": ["execute"],
                 "max_running": 1,
                 "priority": 0,
                 "env": {"MOCK_UNKNOWN": "{}"},
@@ -95,7 +94,7 @@ def test_pi_driver_models_json_and_execute_argv_include_context_window_and_tools
         {
             "name": "pi-worker",
             "type": "pi",
-            "task_types": ["explore"],
+            "task_types": ["execute"],
             "max_running": 1,
             "priority": 0,
             "env": {
@@ -122,105 +121,3 @@ def test_pi_driver_models_json_and_execute_argv_include_context_window_and_tools
         assert models["providers"]["astra"]["models"][0]["contextWindow"] == 131072
         assert "--tools" in result.argv
         assert result.argv[-2:] == ["-p", "prompt"]
-
-
-def test_codex_driver_execute_argv_passes_model_endpoint_and_prompt() -> None:
-    worker = WorkerConfig.model_validate(
-        {
-            "name": "codex",
-            "type": "codex",
-            "task_types": ["reason"],
-            "max_running": 1,
-            "priority": 0,
-            "env": {
-                "CODEX_MODEL": "gpt-test",
-                "CODEX_BASE_URL": "http://api/v1",
-                "OPENAI_API_KEY": "secret",
-            },
-        }
-    )
-
-    argv = CodexDriver().build_execute(worker, "prompt", None).argv
-
-    assert "--model" in argv
-    assert "gpt-test" in argv
-    assert 'model_providers.astra.base_url="http://api/v1"' in argv
-    assert argv[-2:] == ["--", "prompt"]
-
-
-def test_dsh_worker_type_removed() -> None:
-    """dsh 适配器已于 2026-08-28 移除（tsecbench 前十 0 家使用）——
-    type=dsh 必须被 schema 直接拒绝，防止旧配置静默降级。"""
-    with pytest.raises(ValidationError):
-        WorkerConfig.model_validate(
-            {
-                "name": "dsh-worker",
-                "type": "dsh",
-                "task_types": ["explore"],
-                "max_running": 1,
-                "priority": 0,
-                "env": {"DSH_MODEL": "deepseek-v4-flash", "DEEPSEEK_API_KEY": "x"},
-            }
-        )
-
-
-def test_claudecode_worker_healthcheck_and_execute() -> None:
-    """claudecode 是托管唯一舰队：健康检查打 anthropic 端点；execute 用
-    --session-id（原生会话，无自制 patch）。"""
-    from astra.dispatcher.workers.adapters.claudecode import ClaudeCodeDriver
-
-    worker = WorkerConfig.model_validate(
-        {
-            "name": "cc-worker",
-            "type": "claudecode",
-            "task_types": ["bootstrap", "explore"],
-            "max_running": 3,
-            "priority": 0,
-            "env": {
-                "ANTHROPIC_MODEL": "deepseek-v4-flash",
-                "ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
-                "ANTHROPIC_AUTH_TOKEN": "sk-test",
-            },
-        }
-    )
-    argv = ClaudeCodeDriver().build_healthcheck(worker)
-    assert "https://api.deepseek.com/anthropic/v1/messages" in argv
-    assert "x-api-key: sk-test" in argv
-    assert "anthropic-version: 2023-06-01" in argv
-    assert '"model":"deepseek-v4-flash"' in argv[-1]
-
-    result = ClaudeCodeDriver().build_execute(worker, "prompt", "session-abc")
-    assert "--session-id" in result.argv
-    assert "session-abc" in result.argv
-    assert "--dangerously-skip-permissions" in result.argv
-
-    conclude = ClaudeCodeDriver().build_conclude(worker, "wrap up", "session-abc")
-    assert "-r" in conclude
-    assert "session-abc" in conclude
-
-
-def test_claudecode_startup_healthcheck_describe_uses_env_expansion() -> None:
-    """startup 健康检查的 describe 版本必须用 $VAR 展示凭据（不泄 key）。"""
-    from astra.dispatcher.workers.adapters.claudecode import ClaudeCodeDriver
-
-    worker = WorkerConfig.model_validate(
-        {
-            "name": "cc-worker",
-            "type": "claudecode",
-            "task_types": ["explore"],
-            "max_running": 1,
-            "priority": 0,
-            "env": {
-                "ANTHROPIC_MODEL": "deepseek-v4-flash",
-                "ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
-                "ANTHROPIC_AUTH_TOKEN": "sk-secret",
-            },
-        }
-    )
-    driver = ClaudeCodeDriver()
-    startup = driver.build_startup_healthcheck(worker)
-    assert "curl" in startup
-    described = driver.describe_startup_healthcheck(worker)
-    assert "x-api-key: $ANTHROPIC_AUTH_TOKEN" in described
-    assert "sk-secret" not in described
-    assert "https://api.deepseek.com/anthropic/v1/messages" in described
