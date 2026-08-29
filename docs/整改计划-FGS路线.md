@@ -117,3 +117,9 @@
 ## 附录：A1 spike 记录（待填）
 
 （pi 双网关实测结果写这里）
+
+## 审计记录（v0.2 后持续）
+
+- **第七轮（aa50542）**：网络面——全部客户端可写字段 max_length（新端点 finding/subgoal/expect 全缺）；调度闭合——open 步骤计数漏 status 过滤（关闭死路误计未决→decide 假重触发）；流式抢救去重改新鲜快照；closed_at 落库导出；decide ops 单轮封顶（close≤20/subgoal≤5 防倾倒）。
+- **第八轮（f4a3c76）**：并发竞态——认领协议 TOCTOU 根治（SELECT-检查-UPDATE 三步非原子→守卫式原子 UPDATE 写时重估；step heartbeat/conclude + decide claim）；收束败者请求级事务回滚防孤儿 fact；+3 竞态回归。
+- **第九轮（本提交）**：长跑泄漏——Windows prompt @file 每任务一文件从不清理（已加写前 1h 清理）；高频压力实证——200 并发混合负载（读/认领/finding/恶意超长）零 5xx、findings 计数守恒 50/50、原子认领不变量保持。
