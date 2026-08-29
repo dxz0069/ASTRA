@@ -134,6 +134,12 @@ class AstraDaemon:
                     LOG.warning("daemon %s stop failed: %s", name, exc)
         self._server = None
         self._dispatcher = None
+        # 审计十二轮：回收全部日志句柄（execv 换血前防句柄泄漏累积）
+        while _open_log_handles:
+            try:
+                _open_log_handles.pop(0).close()
+            except OSError:
+                pass
         # 等 8000 端口真正释放（新进程才能绑定）
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
@@ -396,8 +402,16 @@ def _auth_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"} if token else {}
 
 
+_open_log_handles: list = []  # 审计十二轮：持有句柄防 GC 关闭 + 关停旧句柄
+
+
 def _popen(argv: list[str]) -> subprocess.Popen:
+    """子进程日志落盘。句柄登记在模块级（旧句柄由 shutdown 统一回收——
+    watchdog 每次重启产生 2 个新句柄，不回收则长跑进程句柄无限累积）。"""
     log_file = open(_engine_log_path(), "ab", buffering=0)
+    _open_log_handles.append(log_file)
+    while len(_open_log_handles) > 6:  # 保留最近 3 轮重启的 server+dispatcher
+        _open_log_handles.pop(0).close()
     return subprocess.Popen(
         argv,
         stdout=log_file,
