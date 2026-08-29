@@ -6,10 +6,10 @@
 FAIL_THRESHOLD 次失败 → 写告警文件 + 打印醒目日志；同时扫描最近 CC 会话
 尾部是否全是配额/权限错误（双保险）。
 
-2026-08-28：随 dsh 移除改探 anthropic 兼容端点（claudecode 舰队唯一通道）。
+2026-08-29：cairn-y 随 pi 底座改读 PI_* env（anthropic 兼容端点不变）。
 
 用法：BENCHMARK_TOKEN 不需要；需注入与 runner 相同的模型 env
-（ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL / ANTHROPIC_MODEL）。
+（PI_API_KEY / PI_BASE_URL / PI_MODEL）。
 """
 import glob
 import json
@@ -54,12 +54,12 @@ def _probe_anthropic(url: str, headers: dict[str, str], model: str) -> tuple[boo
 
 
 def probe_model() -> tuple[bool, str]:
-    """探活 anthropic 兼容端点（claudecode 舰队唯一模型通道）。"""
-    token = os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
+    """探活 anthropic 兼容端点（pi 舰队唯一模型通道）。"""
+    token = os.environ.get("PI_API_KEY", "")
     if not token:
-        return False, "缺少 ANTHROPIC_AUTH_TOKEN"
-    base = os.environ.get("ANTHROPIC_BASE_URL", "https://api.deepseek.com/anthropic").rstrip("/")
-    model = os.environ.get("ANTHROPIC_MODEL", "deepseek-v4-flash")
+        return False, "缺少 PI_API_KEY"
+    base = os.environ.get("PI_BASE_URL", "https://api.deepseek.com/anthropic").rstrip("/")
+    model = os.environ.get("PI_MODEL", "deepseek-v4-flash")
     return _probe_anthropic(
         f"{base}/v1/messages",
         {"x-api-key": token, "anthropic-version": "2023-06-01", "content-type": "application/json"},
@@ -68,14 +68,12 @@ def probe_model() -> tuple[bool, str]:
 
 
 def scan_recent_sessions_403() -> int:
-    """扫描最近 5 个 CC 会话 jsonl 尾部是否全是配额/权限错误；返回命中数。
+    """扫描最近 5 个 pi 会话 jsonl 尾部是否全是配额/权限错误；返回命中数。
 
-    CC 会话在 <astra-claude>/<worker>/projects/**/*.jsonl（纯 jsonl，无压缩）。
-    修复备注：dsh 时代此函数的计数器从未初始化（NameError 被 except 吞掉，
-    计数恒 0 的死代码），CC 版重写时一并修正。
+    pi 会话在 <astra-pi>/<worker>/sessions/**/*.jsonl。
     """
-    root = os.environ.get("ASTRA_CLAUDE_HOME") or os.path.join(_tempfile.gettempdir(), "astra-claude")
-    sessions = glob.glob(os.path.join(root, "*", "projects", "**", "*.jsonl"), recursive=True)
+    root = os.environ.get("ASTRA_PI_HOME") or os.path.join(_tempfile.gettempdir(), "astra-pi")
+    sessions = glob.glob(os.path.join(root, "*", "sessions", "**", "*.jsonl"), recursive=True)
     sessions.sort(key=os.path.getmtime, reverse=True)
     count = 0
     for path in sessions[:5]:

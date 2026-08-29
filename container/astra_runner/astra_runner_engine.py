@@ -1,8 +1,8 @@
 """LocalAstraEngine —— 本地模式 ASTRA 引擎封装（server + dispatcher 进程管理 + API）。
 
 - server/dispatcher 为进程级共享单例（幂等启动，最后 shutdown）
-- dispatch.yaml 由环境变量动态生成：execution=local，DeepSeek 主力（claudecode +
-  ANTHROPIC 兼容端点），reason 任务与双星审查复用同一 worker 配置
+- dispatch.yaml 由环境变量动态生成：execution=local，PI 唯一执行底座
+  （cairn-y：Less is More——最原始、完全可控的 Agent Loop），Decide/Execute 双活动
 - 每个题目一个 ASTRA 项目，origin=靶场地址，goal=题目描述
 """
 
@@ -31,15 +31,15 @@ ASTRA_DISPATCH_CMD = os.environ.get("ASTRA_DISPATCH_CMD", "astra dispatch")
 PROJECT_COMPLETED_STATUSES = {"completed", "stopped"}
 
 
-def _claude_home_root() -> str:
-    """claudecode worker 的 CLAUDE_CONFIG_DIR 根目录（ASTRA_CLAUDE_HOME 可覆盖）。
-    按 worker 稳定命名（不加 uuid）：引擎崩溃重启后 `claude -r <session>` 仍能
-    找回会话，defer 续跑跨重启存活（R5 会话丢失税教训）；同时不读宿主 ~/.claude。"""
-    return os.environ.get("ASTRA_CLAUDE_HOME") or str(Path(tempfile.gettempdir()) / "astra-claude")
+def _pi_agent_root() -> str:
+    """pi worker 的 PI_CODING_AGENT_DIR 根目录（ASTRA_PI_HOME 可覆盖）。
+    按 worker 稳定命名（不加 uuid）：引擎崩溃重启后 pi --session <id> 仍能
+    找回会话，defer 续跑跨重启存活（R5 会话丢失税教训）。"""
+    return os.environ.get("ASTRA_PI_HOME") or str(Path(tempfile.gettempdir()) / "astra-pi")
 
 
-def _claude_home(worker_name: str) -> Path:
-    return Path(_claude_home_root()) / worker_name
+def _pi_agent_dir(worker_name: str) -> Path:
+    return Path(_pi_agent_root()) / worker_name
 
 
 def _cleanup_stale_engine_files(keep_dbs: int = 5) -> None:
@@ -152,7 +152,7 @@ class AstraDaemon:
 
     def _start_locked(self) -> None:
         _cleanup_stale_engine_files()
-        self._cleanup_claude_homes()
+        self._cleanup_pi_agent_dirs()
         db_path = Path(tempfile.gettempdir()) / f"astra-runner-{uuid.uuid4().hex[:8]}.db"
         LOG.info("starting astra server db=%s", db_path)
         self._server = _popen([*ASTRA_SERVER_CMD.split(), "--db-path", str(db_path), "--no-access-log"])
@@ -179,23 +179,26 @@ class AstraDaemon:
     def _render_dispatch_config(self) -> Path:
         """由环境变量生成 dispatch.yaml（local 执行）。
 
-        ASTRA_WORKER_TYPE=claudecode（默认，2026-08-28 起）：claude CLI +
-        DeepSeek Anthropic 兼容端点（ANTHROPIC_*）。tsecbench 前十实测主流栈
-        （6/9 家 Claude Code/Agent SDK，0 家 dsh）——见
-        docs/Tsecbench前十名日志机制拆解.md §6。dsh 路线已整体移除。
+        cairn-y（2026-08-29）：执行底座只留 pi——最原始、完全可控的 Agent Loop
+        （Less is More）。任务面收敛为 bootstrap（首次 Execute）/ execute /
+        decide 三类；审查与 consolidate 已随 FGS 化移除。
         """
-        worker_type = os.environ.get("ASTRA_WORKER_TYPE", "claudecode")
-        if worker_type != "claudecode":
+        worker_type = os.environ.get("ASTRA_WORKER_TYPE", "pi")
+        if worker_type != "pi":
             raise RuntimeError(
-                f"不支持的 ASTRA_WORKER_TYPE: {worker_type}（dsh 已于 2026-08-28 移除，仅 claudecode）"
+                f"不支持的 ASTRA_WORKER_TYPE: {worker_type}（cairn-y 起仅 pi）"
             )
         common_env = {
             "BENCHMARK_TOKEN": os.environ.get("BENCHMARK_TOKEN", ""),
             "BENCHMARK_BASE_URL": os.environ.get("BENCHMARK_BASE_URL", ""),
         }
         common_env = {k: v for k, v in common_env.items() if v}
-        worker_block = self._render_claudecode_fleet()
-        _reason_timeout = max(60, int(os.environ.get("ASTRA_REASON_TIMEOUT", "900")))
+        worker_block = self._render_pi_fleet()
+        # ASTRA_DECIDE_TIMEOUT 新名；ASTRA_REASON_TIMEOUT 旧名回读（env 平滑迁移）
+        _decide_timeout = max(
+            60,
+            int(os.environ.get("ASTRA_DECIDE_TIMEOUT") or os.environ.get("ASTRA_REASON_TIMEOUT", "900")),
+        )
         yaml = f"""server: "{ASTRA_SERVER_URL}"
 runtime:
   interval: 3
@@ -208,22 +211,18 @@ runtime:
   execution: "local"
   context_budget:
     max_inline_facts: 60
-    max_inline_intents: 12
+    max_inline_steps: 12
     max_inline_hints: 8
 tasks:
   bootstrap:
     timeout: 600
     conclude_timeout: 120
-  reason:
-    timeout: {_reason_timeout}
-    max_intents: 2
-  explore:
+  decide:
+    timeout: {_decide_timeout}
+    max_steps: 2
+  execute:
     timeout: 600
     conclude_timeout: 120
-  consolidate:
-    timeout: 240
-  challenge:
-    timeout: 600
 container:
   image: "unused"
   network_mode: "host"
@@ -240,60 +239,62 @@ workers:
         self._dispatch_config = path
         return path
 
-    def _render_claudecode_fleet(self) -> str:
-        """claudecode 舰队（2026-08-29 恢复双通道混合，R8 实证布局 × CC 栈）：
-          - deepseek-explore-{i}  p0 bootstrap/explore ×N（ASTRA_EXPLORE_REPLICAS，
-            默认 2）每副本 max_running=3（ASTRA_EXPLORE_MAXRUN）——DS 快攻主力
-          - glm-explore           p0 bootstrap/explore ×2（ZHIPU_API_KEY 存在时）——
-            GLM 深挖路，同优先级轮转 → 同题多路不同模型并进（多agent协同探索）
-          - glm-reason            p1 reason/consolidate ×2 —— R8 实证决策层（GLM-5.3）
-          - deepseek-reason       p1 兜底（无 GLM key 时的单通道决策位）
-        GLM 走智谱 anthropic 兼容端点（2026-08-29 实测可用：
-        open.bigmodel.cn/api/anthropic，coding-plan key，glm-5.3 带 thinking）；
-        此前"CC 无法接 GLM"的退役理由不成立，已恢复。
+    def _render_pi_fleet(self) -> str:
+        """pi 舰队（cairn-y 对齐 Cairn_Y 双活动架构）：
+          - deepseek-execute-{i}  p0 bootstrap/execute ×N（ASTRA_EXECUTE_REPLICAS，
+            默认 2）每副本 max_running=3（ASTRA_EXECUTE_MAXRUN）——DS 快攻主力
+          - glm-decide            p1 decide —— GLM-5.3 深思考决策（ZHIPU_API_KEY
+            存在时）；无 GLM key 时 deepseek-decide 兜底
+        Decide 串行性由服务端 decide 租约保证（同图同时只有一个 Decide 在跑）；
+        max_running=2 只用于跨项目并行决策，不破坏单图串行。
         """
-        model = os.environ.get("ANTHROPIC_MODEL", "deepseek-v4-flash")
-        base_url = os.environ.get("ANTHROPIC_BASE_URL", "https://api.deepseek.com/anthropic")
-        auth_token = os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
-        if not auth_token:
-            raise RuntimeError("缺少 ANTHROPIC_AUTH_TOKEN（DeepSeek anthropic 兼容端点密钥）")
+        ds_model = os.environ.get("PI_MODEL", "deepseek-v4-flash")
+        ds_base = os.environ.get("PI_BASE_URL", "https://api.deepseek.com/anthropic")
+        ds_key = os.environ.get("PI_API_KEY", "")
+        if not ds_key:
+            raise RuntimeError("缺少 PI_API_KEY（DeepSeek 端点密钥）")
+        ds_provider_api = os.environ.get("PI_PROVIDER_API", "anthropic")
         glm_key = os.environ.get("ZHIPU_API_KEY", "")
-        glm_model = os.environ.get("ZHIPU_MODEL", "glm-5.3")
-        glm_base = os.environ.get("ZHIPU_ANTHROPIC_BASE_URL", "https://open.bigmodel.cn/api/anthropic")
-        explore_replicas = max(1, int(os.environ.get("ASTRA_EXPLORE_REPLICAS", "2")))
-        explore_maxrun = max(1, int(os.environ.get("ASTRA_EXPLORE_MAXRUN", "3")))
+        glm_model = os.environ.get("ZHIPU_PI_MODEL", "glm-5.3")
+        glm_base = os.environ.get("ZHIPU_PI_BASE_URL", "https://open.bigmodel.cn/api/anthropic")
+        glm_provider_api = os.environ.get("ZHIPU_PI_PROVIDER_API", "anthropic")
+        execute_replicas = max(
+            1,
+            int(os.environ.get("ASTRA_EXECUTE_REPLICAS") or os.environ.get("ASTRA_EXPLORE_REPLICAS", "2")),
+        )
+        execute_maxrun = max(
+            1,
+            int(os.environ.get("ASTRA_EXECUTE_MAXRUN") or os.environ.get("ASTRA_EXPLORE_MAXRUN", "3")),
+        )
         fleet: list[str] = []
-        for i in range(explore_replicas):
-            name = "deepseek-explore" if explore_replicas == 1 else f"deepseek-explore-{i}"
+        for i in range(execute_replicas):
+            name = "deepseek-execute" if execute_replicas == 1 else f"deepseek-execute-{i}"
             fleet.append(
-                self._render_claudecode_worker(
-                    name, ["bootstrap", "explore"],
-                    max_running=explore_maxrun, priority=0,
-                    model=model, base_url=base_url, auth_token=auth_token,
+                self._render_pi_worker(
+                    name, ["bootstrap", "execute"],
+                    max_running=execute_maxrun, priority=0,
+                    model=ds_model, base_url=ds_base, api_key=ds_key, provider_api=ds_provider_api,
                 )
             )
         if glm_key:
-            # R9 修复（run 13464 诊断）：GLM 撤出 explore——CC 全量上下文 × 深思考单轮
-            # 10-20min，explore 位只占并发不产出（平台级 2% 调用量）。GLM 专注
-            # reason/consolidate（低频高价值，深度思考是资产）。
             fleet.append(
-                self._render_claudecode_worker(
-                    "glm-reason", ["reason", "consolidate"],
+                self._render_pi_worker(
+                    "glm-decide", ["decide"],
                     max_running=2, priority=1,
-                    model=glm_model, base_url=glm_base, auth_token=glm_key,
+                    model=glm_model, base_url=glm_base, api_key=glm_key, provider_api=glm_provider_api,
                 )
             )
         else:
             fleet.append(
-                self._render_claudecode_worker(
-                    "deepseek-reason", ["reason", "consolidate"],
+                self._render_pi_worker(
+                    "deepseek-decide", ["decide"],
                     max_running=2, priority=1,
-                    model=model, base_url=base_url, auth_token=auth_token,
+                    model=ds_model, base_url=ds_base, api_key=ds_key, provider_api=ds_provider_api,
                 )
             )
         return "\n".join(fleet)
 
-    def _render_claudecode_worker(
+    def _render_pi_worker(
         self,
         worker_name: str,
         task_types: list[str],
@@ -302,59 +303,40 @@ workers:
         priority: int,
         model: str,
         base_url: str,
-        auth_token: str,
+        api_key: str,
+        provider_api: str,
     ) -> str:
-        """单个 claudecode worker 的 YAML 块。
-
-        ANTHROPIC_SMALL_FAST_MODEL / CLAUDE_CODE_SUBAGENT_MODEL 钉到主模型：
-        CC 的标题生成/子代理调用不会尝试不存在的 haiku 端点（anthropic 兼容端点
-        只有主模型），子代理可用（RoundTable#8 的 CC subagent 打法）。
-        """
-        claude_dir = _claude_home(worker_name)
-        claude_dir.mkdir(parents=True, exist_ok=True)
-        self._write_claude_mcp_config(claude_dir)
-        claude_dir_yaml = str(claude_dir).replace("\\", "/")  # YAML 双引号内反斜杠是转义符
+        """单个 pi worker 的 YAML 块（models.json 由 pi 适配器按 env 注入）。"""
+        agent_dir = _pi_agent_dir(worker_name)
+        agent_dir.mkdir(parents=True, exist_ok=True)
+        agent_dir_yaml = str(agent_dir).replace("\\", "/")  # YAML 双引号内反斜杠是转义符
         types_line = ", ".join(task_types)
+        context_window = os.environ.get("PI_MODEL_CONTEXT_WINDOW", "131072")
+        max_tokens = os.environ.get("PI_MODEL_MAX_TOKENS", "16384")
         return f"""  - name: "{worker_name}"
-    type: "claudecode"
+    type: "pi"
     task_types: [{types_line}]
     max_running: {max_running}
     priority: {priority}
     env:
-      ANTHROPIC_MODEL: "{model}"
-      ANTHROPIC_BASE_URL: "{base_url}"
-      ANTHROPIC_AUTH_TOKEN: "{auth_token}"
-      ANTHROPIC_API_KEY: "{auth_token}"
-      ANTHROPIC_SMALL_FAST_MODEL: "{model}"
-      CLAUDE_CODE_SUBAGENT_MODEL: "{model}"
-      CLAUDE_CONFIG_DIR: "{claude_dir_yaml}"
-      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
-      CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT: "1"
+      PI_MODEL: "{model}"
+      PI_BASE_URL: "{base_url}"
+      PI_API_KEY: "{api_key}"
+      PI_PROVIDER_API: "{provider_api}"
+      PI_MODEL_CONTEXT_WINDOW: "{context_window}"
+      PI_MODEL_MAX_TOKENS: "{max_tokens}"
+      PI_CODING_AGENT_DIR: "{agent_dir_yaml}"
 """
 
     @staticmethod
-    def _write_claude_mcp_config(claude_dir: Path) -> None:
-        """写 .claude.json 注册 playwright MCP（镜像内全局安装的
-        playwright-mcp；Web 类题目真实浏览器，取代 dsh 的 mcp-client 接入）。"""
-        config = {
-            "mcpServers": {
-                "playwright": {
-                    "command": "playwright-mcp",
-                    "env": {"PLAYWRIGHT_MCP_BROWSER": "chromium"},
-                }
-            }
-        }
-        (claude_dir / ".claude.json").write_text(json.dumps(config), encoding="utf-8")
-
-    @staticmethod
-    def _cleanup_claude_homes(max_age_hours: float = 72.0) -> None:
-        """启动时清理陈旧的 claude 配置目录（CC 会话 jsonl 不自动删除，长跑累积）。
+    def _cleanup_pi_agent_dirs(max_age_hours: float = 72.0) -> None:
+        """启动时清理陈旧的 pi agent 目录（会话文件不自动删除，长跑累积）。
 
         只在**新一轮引擎启动**时执行；worker 目录按名稳定复用，conclude/defer
-        续跑依赖的近期会话（mtime 新于 max_age_hours）绝不清理——与 dsh 时代
-        的 R5 会话丢失教训同一纪律。
+        续跑依赖的近期会话（mtime 新于 max_age_hours）绝不清理——R5 会话丢失
+        教训同一纪律。
         """
-        root = Path(_claude_home_root())
+        root = Path(_pi_agent_root())
         if not root.is_dir():
             return
         cutoff = time.time() - max_age_hours * 3600
@@ -369,7 +351,7 @@ workers:
             except OSError:
                 continue
         if removed:
-            LOG.info("cleaned stale claude homes root=%s removed=%s", root, removed)
+            LOG.info("cleaned stale pi agent dirs root=%s removed=%s", root, removed)
 
     # 注意：shutdown 只定义一次（类头部的 P0 加固版：killpg+端口等待+含密钥
     # dispatch yaml 清理）。这里曾残留一个同名的简版 shutdown 把加固版覆盖成
@@ -538,8 +520,9 @@ class LocalAstraEngine:
         hints = payload.get("hints", [])
         return {
             "facts": len(payload.get("facts", [])),
+            "steps": len(payload.get("steps", [])),
+            "findings": len(payload.get("findings", [])),
             "hints": len(hints),
-            "review_hints": sum(1 for h in hints if "[审查否决]" in h.get("content", "")),
             "failure_hints": sum(1 for h in hints if "[失败学习]" in h.get("content", "")),
         }
 
