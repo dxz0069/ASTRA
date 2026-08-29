@@ -1,4 +1,4 @@
-"""memory 观测命令测试：trace 决策链回放 / map 星图可视化 / report 渗透报告。"""
+"""memory 观测命令测试：trace 决策链回放 / map 图可视化 / report 渗透报告。"""
 
 from __future__ import annotations
 
@@ -18,23 +18,27 @@ def _seed_db(db_path: Path) -> None:
     db.configure(db_path)
     with db.get_conn() as conn:
         conn.execute(
-            "INSERT INTO projects VALUES ('p1','demo-target','completed','2026-08-24T10:00',1,NULL,NULL,NULL,NULL,NULL)"
+            "INSERT INTO projects (id, title, status, bootstrap_enabled, created_at) "
+            "VALUES ('p1','demo-target','completed',1,'2026-08-24T10:00')"
         )
         facts = [
-            ("goal", "获取目标系统权限", "regular", "medium", None, 0),
-            ("f001", "登录接口存在 SQL 注入，可 union 拖库", "regular", "high", "sqlmap banner", 0),
-            ("f002", "后台存在任意命令执行 RCE", "regular", "high", None, 0),
-            ("f003", "旧发现摘要", "summary", "medium", None, 0),
+            ("goal", "获取目标系统权限", "regular"),
+            ("origin", "http://target:8080", "regular"),
+            ("f001", "登录接口存在 SQL 注入，可 union 拖库", "regular"),
+            ("f002", "后台存在任意命令执行 RCE", "regular"),
         ]
-        for fid, desc, kind, conf, ev, ch in facts:
+        for fid, desc, kind in facts:
             conn.execute(
-                "INSERT INTO facts (id,project_id,description,kind,confidence,evidence,challenged) "
-                "VALUES (?,?,?,?,?,?,?)",
-                (fid, "p1", desc, kind, conf, ev, ch),
+                "INSERT INTO facts (id, project_id, description, kind) VALUES (?,?,?,?)",
+                (fid, "p1", desc, kind),
             )
         conn.execute(
-            "INSERT INTO intents (id,project_id,to_fact_id,description,creator,created_at,concluded_at,challenged) "
-            "VALUES ('i1','p1','f002','由注入升级为 RCE','scout','10:00','10:30',1)"
+            "INSERT INTO steps (id, project_id, to_fact_id, description, status, creator, worker, created_at, concluded_at) "
+            "VALUES ('s1','p1','f002','由注入升级为 RCE','open','scout','scout','10:00','10:30')"
+        )
+        conn.execute(
+            "INSERT INTO findings (id, project_id, description, created_at) "
+            "VALUES ('fnd001','p1','SQL injection at /login allows union-based dump','10:30')"
         )
 
 
@@ -48,8 +52,7 @@ def test_memory_trace_outputs_decision_chain(tmp_path):
     result, _ = _invoke(tmp_path, ["memory", "trace", "demo"])
     assert result.exit_code == 0, result.output
     assert "SQL 注入" in result.output
-    assert "已归航→f002" in result.output
-    assert "被质询" in result.output
+    assert "已收束→f002" in result.output
 
 
 def test_memory_map_writes_standalone_html(tmp_path):
@@ -58,17 +61,15 @@ def test_memory_map_writes_standalone_html(tmp_path):
     assert result.exit_code == 0, result.output
     html = out.read_text(encoding="utf-8")
     assert "<svg" in html and "f001" in html
-    assert "stroke-dasharray" in html  # 摘要星记虚线框
-    assert "质询" in html  # 被质询标记
+    assert "事实" in html  # FGS 术语
 
 
-def test_report_renders_risk_table_and_evidence(tmp_path):
+def test_report_renders_risk_table_and_findings(tmp_path):
     out = tmp_path / "report.md"
     result, _ = _invoke(tmp_path, ["report", "--out", str(out), "demo"])
     assert result.exit_code == 0, result.output
     md = out.read_text(encoding="utf-8")
     assert "渗透测试报告" in md
-    assert "| 高危 / 中危 / 低危 / 信息 | 1 / 1 / 0 / 0 |" in md  # RCE=高危(高置信), 注入+高置信=中危
-    assert "## 三、攻击路径" in md and "被质询否决" in md
-    assert "## 四、证据链" in md and "sqlmap banner" in md
+    assert "## 三、攻击路径" in md and "已收束" in md
+    assert "## 四、沿途发现" in md and "SQL injection at /login" in md
     assert "修复建议" in md

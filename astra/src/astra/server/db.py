@@ -153,6 +153,14 @@ def _migrate_legacy(conn: sqlite3.Connection) -> None:
     for old, new in renames.items():
         if old in project_cols:
             conn.execute(f"ALTER TABLE projects RENAME COLUMN {old} TO {new}")
+    # 更老的库：bootstrap_enabled / bootstrap_mode 列补齐
+    project_cols = _columns(conn, "projects")
+    if "bootstrap_enabled" not in project_cols:
+        conn.execute("ALTER TABLE projects ADD COLUMN bootstrap_enabled INTEGER NOT NULL DEFAULT 1")
+        if "bootstrap_mode" in project_cols:
+            conn.execute(
+                "UPDATE projects SET bootstrap_enabled = CASE WHEN bootstrap_mode = 'disabled' THEN 0 ELSE 1 END"
+            )
 
     # facts：丢弃审查链字段；summary kind 并入 regular（consolidate 已移除）
     fact_cols = _columns(conn, "facts")

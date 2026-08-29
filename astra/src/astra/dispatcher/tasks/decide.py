@@ -99,7 +99,7 @@ def run_decide_task(
                 )
                 return "unhealthy"
         budget = config.runtime.context_budget
-        open_steps = build_focus_open_steps(project, budget.max_inline_intents)
+        open_steps = build_focus_open_steps(project, budget.max_inline_steps)
         allowed_fact_ids = build_focus_fact_ids(project, budget.max_inline_facts)
         LOG.debug(
             "decide context prepared project=%s worker=%s facts=%s focus_facts=%s hints=%s focus_open_steps=%s",
