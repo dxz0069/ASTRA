@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS steps (
     expect TEXT,
     status TEXT NOT NULL DEFAULT 'open',
     close_reason TEXT,
+    closed_at TEXT,
     creator TEXT NOT NULL,
     worker TEXT,
     dispatch_count INTEGER NOT NULL DEFAULT 0,
@@ -199,6 +200,8 @@ def _migrate_legacy(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE steps ADD COLUMN status TEXT NOT NULL DEFAULT 'open'")
     if "close_reason" not in step_cols:
         conn.execute("ALTER TABLE steps ADD COLUMN close_reason TEXT")
+    if "closed_at" not in step_cols:
+        conn.execute("ALTER TABLE steps ADD COLUMN closed_at TEXT")
 
 
 @contextmanager

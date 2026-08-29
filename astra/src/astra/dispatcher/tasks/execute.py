@@ -299,9 +299,11 @@ def run_execute_task(
                 preview(first.stdout),
                 preview(first.stderr),
             )
-            # 流式抢救：超时前已输出的确认发现先入图（不依赖会话续接）
+            # 流式抢救：超时前已输出的确认发现先入图（不依赖会话续接）。
+            # 去重必须对新鲜快照做——派发时的 project 快照可能已落后于并行 worker 的写入
             try:
-                rescued = _rescue_streamed_facts(client, project, step, first.stdout or "")
+                fresh = client.get_project(project.project.id)
+                rescued = _rescue_streamed_facts(client, fresh, step, first.stdout or "")
                 if rescued:
                     LOG.info("execute timeout rescue project=%s step=%s rescued_facts=%s", project.project.id, step.id, rescued)
             except Exception as exc:  # noqa: BLE001 —— 抢救失败不阻塞 fallback

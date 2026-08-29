@@ -31,6 +31,7 @@ class Step(BaseModel):
     expect: str | None = None
     status: Literal["open", "closed"] = "open"
     close_reason: str | None = None
+    closed_at: str | None = None
     creator: str
     worker: str | None = None
     last_heartbeat_at: str | None = None
@@ -102,8 +103,8 @@ class ProjectDetail(BaseModel):
 
 
 class CreateHintInline(BaseModel):
-    content: str
-    creator: str
+    content: str = Field(max_length=65536)
+    creator: str = Field(max_length=256)
 
     @field_validator("content", "creator")
     @classmethod
@@ -115,9 +116,9 @@ class CreateHintInline(BaseModel):
 
 
 class CreateFactRequest(BaseModel):
-    description: str
+    description: str = Field(max_length=65536)
     kind: Literal["regular", "negative"] = "regular"
-    creator: str = "system"
+    creator: str = Field(default="system", max_length=256)
 
     @field_validator("description")
     @classmethod
@@ -145,8 +146,8 @@ class CreateProjectRequest(BaseModel):
 
 
 class CreateHintRequest(BaseModel):
-    content: str
-    creator: str
+    content: str = Field(max_length=65536)
+    creator: str = Field(max_length=256)
 
     @field_validator("content", "creator")
     @classmethod
@@ -158,11 +159,11 @@ class CreateHintRequest(BaseModel):
 
 
 class CreateStepRequest(BaseModel):
-    from_: list[str] = Field(alias="from", min_length=1)
-    description: str
-    expect: str | None = None
-    creator: str
-    worker: str | None = None
+    from_: list[str] = Field(alias="from", min_length=1, max_length=500)
+    description: str = Field(max_length=65536)
+    expect: str | None = Field(default=None, max_length=8192)
+    creator: str = Field(max_length=256)
+    worker: str | None = Field(default=None, max_length=256)
 
     model_config = {"populate_by_name": True}
 
@@ -184,13 +185,15 @@ class CreateStepRequest(BaseModel):
             text = item.strip()
             if not text:
                 raise ValueError("fact ids must not be empty")
+            if len(text) > 128:
+                raise ValueError("fact id too long")
             cleaned.append(text)
         # 去重保序：LLM 输出可能带重复 id，step_sources 主键冲突会抛 500
         return list(dict.fromkeys(cleaned))
 
 
 class CreateFindingRequest(BaseModel):
-    description: str
+    description: str = Field(max_length=65536)
 
     @field_validator("description")
     @classmethod
@@ -202,7 +205,7 @@ class CreateFindingRequest(BaseModel):
 
 
 class CreateSubGoalRequest(BaseModel):
-    description: str
+    description: str = Field(max_length=65536)
 
     @field_validator("description")
     @classmethod
@@ -230,7 +233,7 @@ class CloseStepRequest(BaseModel):
 
 
 class HeartbeatRequest(BaseModel):
-    worker: str
+    worker: str = Field(max_length=256)
     # 审计修复（租约令牌）：claim 下发的持有凭证；旧租约（token NULL）不强制
     lease_token: str | None = Field(default=None, max_length=128)
 
@@ -244,8 +247,8 @@ class HeartbeatRequest(BaseModel):
 
 
 class DecideClaimRequest(BaseModel):
-    worker: str
-    trigger: str
+    worker: str = Field(max_length=256)
+    trigger: str = Field(max_length=256)
 
     @field_validator("worker", "trigger")
     @classmethod
@@ -276,9 +279,9 @@ class ConcludeRequest(BaseModel):
 
 
 class CompleteRequest(BaseModel):
-    from_: list[str] = Field(alias="from", min_length=1)
-    description: str
-    worker: str
+    from_: list[str] = Field(alias="from", min_length=1, max_length=500)
+    description: str = Field(max_length=65536)
+    worker: str = Field(max_length=256)
     lease_token: str | None = Field(default=None, max_length=128)
 
     model_config = {"populate_by_name": True}
@@ -315,7 +318,7 @@ class UpdateProjectStatusRequest(BaseModel):
 
 
 class UpdateProjectTitleRequest(BaseModel):
-    title: str
+    title: str = Field(max_length=4096)
 
     @field_validator("title")
     @classmethod
@@ -327,8 +330,8 @@ class UpdateProjectTitleRequest(BaseModel):
 
 
 class ReopenRequest(BaseModel):
-    description: str
-    creator: str
+    description: str = Field(max_length=65536)
+    creator: str = Field(max_length=256)
 
     @field_validator("description", "creator")
     @classmethod

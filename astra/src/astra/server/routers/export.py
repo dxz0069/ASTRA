@@ -112,6 +112,7 @@ def _export_yaml(conn, project_id: str) -> str:
             entry["expect"] = s["expect"]
         if s["close_reason"]:
             entry["close_reason"] = s["close_reason"]
+            entry["closed_at"] = format_export_timestamp(s["closed_at"])
         step_list.append(entry)
 
     if step_list:
@@ -184,9 +185,9 @@ def _export_timeline(conn, project_id: str) -> str:
         order += 1
 
         if s["status"] == "closed" and s["close_reason"] and not s["to_fact_id"]:
-            ts = format_export_timestamp(s["created_at"] or "") or ""
+            ts = format_export_timestamp(s["closed_at"] or s["created_at"] or "") or ""
             block = f"[{ts}] STEP CLOSED {s['id']}\n  reason: {s['close_reason']}"
-            events.append((s["created_at"] or "", order, block))
+            events.append((s["closed_at"] or s["created_at"] or "", order, block))
             order += 1
 
         if not s["concluded_at"] or not s["to_fact_id"]:

@@ -578,7 +578,8 @@ class DispatcherLoop:
         return len(self.runtime_project_ids & active_ids)
 
     def _project_open_step_count(self, project: ProjectDetail) -> int:
-        return sum(1 for step in project.steps if step.to is None)
+        # 只数真正可认领的步骤：已收束（to 非空）与已关闭（status=closed 的死路账本）都不算
+        return sum(1 for step in project.steps if step.to is None and step.status == "open")
 
     def _is_bootstrap_step(self, step: Step) -> bool:
         return (

@@ -71,6 +71,7 @@ def create_step(project_id: str, body: CreateStepRequest):
             description=body.description,
             expect=body.expect,
             status="open",
+            closed_at=None,
             creator=body.creator,
             worker=body.worker,
             last_heartbeat_at=now if claimed else None,
@@ -186,9 +187,10 @@ def close_step(project_id: str, step_id: str, body: CloseStepRequest):
         if row["status"] == "closed":
             return step_to_model(conn, row, project_id)
 
+        now = utcnow()
         conn.execute(
-            "UPDATE steps SET status = 'closed', close_reason = ?, worker = NULL WHERE id = ? AND project_id = ?",
-            (body.reason, step_id, project_id),
+            "UPDATE steps SET status = 'closed', close_reason = ?, closed_at = ?, worker = NULL WHERE id = ? AND project_id = ?",
+            (body.reason, now, step_id, project_id),
         )
         updated = conn.execute(
             "SELECT * FROM steps WHERE id = ? AND project_id = ?",

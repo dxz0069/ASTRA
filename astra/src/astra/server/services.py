@@ -197,6 +197,7 @@ def step_to_model(conn: sqlite3.Connection, row: sqlite3.Row, project_id: str) -
         expect=row["expect"],
         status=row["status"],
         close_reason=row["close_reason"],
+        closed_at=row["closed_at"],
         creator=row["creator"],
         worker=row["worker"],
         last_heartbeat_at=row["last_heartbeat_at"],
