@@ -1,18 +1,18 @@
-# Cairn_Y 公众号文章逐字解读与架构提炼
+# 榜首闭源方案 公众号文章逐字解读与架构提炼
 
-> 2026-08-29 整理。信息源：l3yx（淚笑）微信公众号文章《AI 自动化渗透架构 Cairn 满分登顶 TsecBench Cybench —— 众人向左，我偏向右》
+> 2026-08-29 整理。信息源：l3yx（淚笑）微信公众号文章《AI 自动化渗透架构 原版 满分登顶 TsecBench Cybench —— 众人向左，我偏向右》
 > https://mp.weixin.qq.com/s/ZzKF_0MOb0cak9izhHqCUQ
 >
-> 任务：① 确认作者新版本（Cairn_Y）是否开源；② 未开源则基于文章提炼其架构。
+> 任务：① 确认作者新版本（榜首闭源方案）是否开源；② 未开源则基于文章提炼其架构。
 > 纪律：全文严格区分**【原文】**（文章原话摘录）、**【核实】**（GitHub 实勘）、**【推断】**（我方分析），未披露处一律标"未披露"，不编造。
 
 ---
 
 ## 〇、结论速览
 
-1. **Cairn_Y 未开源，且没有任何公开代码痕迹。** oritera 组织名下唯一公开仓库仍是 Python 版 Cairn（main 最后提交 2026-07-15，即我们早已对过 diff 的 3 个运维提交）；dev-0.3.0 分支全是社区 PR（用户认证前端/CI）；作者个人账号 24 个仓库、个人博客均无 Cairn_Y。文章描述的 Node + PI Agent Loop 重写版完全闭源。
+1. **榜首闭源方案 未开源，且没有任何公开代码痕迹。** oritera 组织名下唯一公开仓库仍是 Python 版 原上游（main 最后提交 2026-07-15，即我们早已对过 diff 的 3 个运维提交）；dev-0.3.0 分支全是社区 PR（用户认证前端/CI）；作者个人账号 24 个仓库、个人博客均无 榜首闭源方案。文章描述的 Node + PI Agent Loop 重写版完全闭源。
 2. **榜首差距的真相**：我们此前"与上游对比"的 288 文件分歧之外，作者实际参赛跑的是一个**闭源重写版**，不是公开仓库的增量。追公开仓库 commit 永远追不上他——差距不在那 3 个提交里。
-3. **Cairn_Y 架构（文章披露部分）**：FGS 图（Fact-Goal-Step，append-only，唯一共享状态）+ 只有两类活动 **Decide**（串行、事件触发、干净上下文、只操作图）与 **Execute**（世界工具 + submit_fact）+ **Finding**（搜索过程产物的一等公民）+ 自控极简 Agent Loop（PI 库只取 loop，Python→Node，提示词极短且不与安全任务耦合）。
+3. **榜首闭源方案 架构（文章披露部分）**：FGS 图（Fact-Goal-Step，append-only，唯一共享状态）+ 只有两类活动 **Decide**（串行、事件触发、干净上下文、只操作图）与 **Execute**（世界工具 + submit_fact）+ **Finding**（搜索过程产物的一等公民）+ 自控极简 Agent Loop（PI 库只取 loop，Python→Node，提示词极短且不与安全任务耦合）。
 4. **经济学信号最强的一条**：Tsecbench v1（63 题 74 旗）全解成本从 TCH 时期约 ¥7000 降到最低**不到 ¥50（约 140 倍）**。他的优化主轴是**调用与 token 经济学**，不是加机制。
 5. 对我们的意义：explore/reason 双活动结构上与他的 Execute/Decide 意外同构；真正差距在**重量级**（双星审查环/consolidate/KB/playbook 注入——全是他明确不用的东西）与**运行时成本**（CC SDK 系统开销 vs 自控 loop）。
 
@@ -22,15 +22,15 @@
 
 | # | 检查点 | 结果 | 链接 |
 |---|---|---|---|
-| 1 | oritera 组织仓库列表 | **仅 1 个公开仓库：Cairn**（Python，AGPL-3.0，约 2.4k stars / 332 forks，Updated Jul 15, 2026） | https://github.com/orgs/oritera/repositories |
-| 2 | Cairn main 分支提交史 | 最后提交 **2026-07-15**：`8f702c5` merge code-based-healthcheck、`0060a44` local execution mode、`5a065ff` 注释掉 qwen3.6-plus 的 codex/pi 示例 worker——**正是我们 fork 后已知的 3 个运维提交，无新内容** | https://github.com/oritera/Cairn/commits/main |
-| 3 | Cairn 全部分支 | 仅 4 个：`main`、`dev-0.3.0`、`feat/code-based-healthcheck`、`feat/local-execution-mode`。**无 Node 分支、无重写分支** | https://github.com/oritera/Cairn/branches |
-| 4 | dev-0.3.0 分支 | 最后提交 2026-06-30（`add535a`），内容为社区 PR：用户认证（React 前端）、ruff/pyright CI、issue 模板。**社区驱动，与 Cairn_Y 无关** | https://github.com/oritera/Cairn/commits/dev-0.3.0 |
-| 5 | 作者个人账号 l3yx（24 仓库） | 最新：l3yx.github.io（2026-08-27 更新，仅博客）、intentlang（2026-01，AI-native 语言实验）、Chocky/jdwp-codeifier 等老项目。**无 Cairn_Y** | https://github.com/l3yx?tab=repositories |
-| 6 | 作者博客 | 最新文章停在 2026-01-11（IntentLang hack CPython 的 str），无 Cairn_Y 文章或代码 | https://l3yx.github.io/ |
-| 7 | 文章自述 | 作者文中明说近期未正式更新过代码；且 Cairn_Y 基于 PI 的库用 **Node** 重写——公开仓库是 Python，二者对不上，反向证明重写版未发布 | 文章原文 |
+| 1 | oritera 组织仓库列表 | **仅 1 个公开仓库（即原上游，链接见下）**（Python，AGPL-3.0，约 2.4k stars / 332 forks，Updated Jul 15, 2026） | https://github.com/orgs/oritera/repositories |
+| 2 | 原上游 main 分支提交史 | 最后提交 **2026-07-15**：`8f702c5` merge code-based-healthcheck、`0060a44` local execution mode、`5a065ff` 注释掉 qwen3.6-plus 的 codex/pi 示例 worker——**正是我们 fork 后已知的 3 个运维提交，无新内容** | https://github.com/oritera/Cairn/commits/main |
+| 3 | 原上游全部分支 | 仅 4 个：`main`、`dev-0.3.0`、`feat/code-based-healthcheck`、`feat/local-execution-mode`。**无 Node 分支、无重写分支** | https://github.com/oritera/Cairn/branches |
+| 4 | dev-0.3.0 分支 | 最后提交 2026-06-30（`add535a`），内容为社区 PR：用户认证（React 前端）、ruff/pyright CI、issue 模板。**社区驱动，与 榜首闭源方案 无关** | https://github.com/oritera/Cairn/commits/dev-0.3.0 |
+| 5 | 作者个人账号 l3yx（24 仓库） | 最新：l3yx.github.io（2026-08-27 更新，仅博客）、intentlang（2026-01，AI-native 语言实验）、Chocky/jdwp-codeifier 等老项目。**无 榜首闭源方案** | https://github.com/l3yx?tab=repositories |
+| 6 | 作者博客 | 最新文章停在 2026-01-11（IntentLang hack CPython 的 str），无 榜首闭源方案 文章或代码 | https://l3yx.github.io/ |
+| 7 | 文章自述 | 作者文中明说近期未正式更新过代码；且 榜首闭源方案 基于 PI 的库用 **Node** 重写——公开仓库是 Python，二者对不上，反向证明重写版未发布 | 文章原文 |
 
-**结论：Cairn_Y 闭源。** 公开的 https://github.com/oritera/Cairn 就是我们 fork 时对过 diff 的那个版本（+dev-0.3.0 社区 PR）。此前榜单考证"Cairn_X=作者本人参赛号"，本文的 Cairn_Y 命名顺延，是其新一代。
+**结论：榜首闭源方案 闭源。** 公开的原上游仓库（github.com/oritera/Cairn，见附）就是我们 fork 时对过 diff 的那个版本（+dev-0.3.0 社区 PR）。此前榜单考证"Cairn_X=作者本人参赛号"，本文的 榜首闭源方案 命名顺延，是其新一代。
 
 ---
 
@@ -38,23 +38,23 @@
 
 ### 1. 标题《…满分登顶 TsecBench Cybench —— 众人向左，我偏向右》
 
-**【原文】**（前言）Cairn_Y 基于 Cairn 架构演进；目前**以满分登顶 Cybench 评测基准第一**，同时**以绝对高分优势登顶 Tsecbench v1 第一**，以及 XBOW Validation Benchmarks 第一。Cairn_Y「没有针对靶场赛题定向优化提示词，更不会内嵌答案或携带跨轮记忆，仅仅是围绕 Harness 工程的迭代」。排行榜公布选手全部 LLM 记录、且有作弊举报功能。
+**【原文】**（前言）榜首闭源方案 基于 原版 架构演进；目前**以满分登顶 Cybench 评测基准第一**，同时**以绝对高分优势登顶 Tsecbench v1 第一**，以及 XBOW Validation Benchmarks 第一。榜首闭源方案「没有针对靶场赛题定向优化提示词，更不会内嵌答案或携带跨轮记忆，仅仅是围绕 Harness 工程的迭代」。排行榜公布选手全部 LLM 记录、且有作弊举报功能。
 
 **解读**：
 - 三个第一各有含义：Cybench 是**满分**；Tsecbench v1 是"绝对高分优势"第一（措辞 ≠ 满分，但 63 题 74 旗的全解成本都能压到 ¥50，说明接近全解）；XBOW Validation Benchmarks（自动化攻防厂商的公开验证榜）也第一。
 - 主动声明"无定向提示词/无内嵌答案/无跨轮记忆"是**对榜单公信力的正面回应**：他的满分在"全量日志公开+可举报"的规则下站得住。
 - 对我们最重的一句：**登顶不需要跨题学习、不需要记忆复利**——纯 Harness 工程。我们"跨 run 复利=0 是差距根因"的假设被他证伪为必要条件。
 
-### 2. 「从 Cairn 架构说起」
+### 2. 「从 原版 架构说起」
 
-**【原文】** Cairn 是其参加 TCH（腾讯云黑客松智能渗透挑战赛）的方案；**意图工程、黑板架构、间接协调、Fact-Intent 有向无环图、状态空间搜索**是他在这套架构里首创的概念；设计哲学 **Less Is More**——极简、减少约束释放模型能力、**0 Skill / 0 RAG / 0 MCP**、反对多角色 SubAgent、无预置渗透流程。开源仓库定位不是一个功能齐全的渗透项目，而是极简主义/黑板架构/Fact-Intent 图的工程实践。并观察：榜首选手提示词频繁出现 Fact/Intent 词汇与 Cairn 的 DAG 数据结构，出现大量基于 Cairn 的二开。
+**【原文】** 原版 是其参加 TCH（腾讯云黑客松智能渗透挑战赛）的方案；**意图工程、黑板架构、间接协调、Fact-Intent 有向无环图、状态空间搜索**是他在这套架构里首创的概念；设计哲学 **Less Is More**——极简、减少约束释放模型能力、**0 Skill / 0 RAG / 0 MCP**、反对多角色 SubAgent、无预置渗透流程。开源仓库定位不是一个功能齐全的渗透项目，而是极简主义/黑板架构/Fact-Intent 图的工程实践。并观察：榜首选手提示词频繁出现 Fact/Intent 词汇与 原版 的 DAG 数据结构，出现大量基于 原版 的二开。
 
 **解读**：
 - 这段是"认领发明权"：Fact/Intent、黑板、间接协调这些我们习以为常的概念，源头在此。我们整个星图协议就是这一谱系。
-- 注意他对开源仓库的**降格定位**：公开的 Cairn 是"概念验证工程实践"，不是他的主力。这与第一节核实结果互证——主力（Cairn_Y）另有其身，闭源。
-- "大量基于 Cairn 的二开"指的就是我们这类项目（以及榜单上其他 Fact/Intent 系选手）。
+- 注意他对开源仓库的**降格定位**：公开的 原版 是"概念验证工程实践"，不是他的主力。这与第一节核实结果互证——主力（榜首闭源方案）另有其身，闭源。
+- "大量基于 原版 的二开"指的就是我们这类项目（以及榜单上其他 Fact/Intent 系选手）。
 
-### 3. 「Cairn_Y 方案」总述
+### 3. 「榜首闭源方案 方案」总述
 
 **【原文】** 设计上依然克制，Less Is More；改进方向与社区的几个热门方向——**跨题学习、幻觉门控、数百工具集成、多类专业 Subagent、数十内置 Security Skill——完全无关**。
 
@@ -68,7 +68,7 @@
 - **Step**：下一步做什么——描述**如何从既有事实产出新事实的因果过程**，驱动世界状态演进。
 
 **解读**：
-- 相对旧 Cairn 的 Fact-Intent 二元，是把 Intent 拆成了两个语义更纯的节点：**Goal 管"何时停"，Step 管"怎么走"**。旧 Intent 混合了方向与行动两层含义，FGS 把它们解耦。
+- 相对旧版 的 Fact-Intent 二元，是把 Intent 拆成了两个语义更纯的节点：**Goal 管"何时停"，Step 管"怎么走"**。旧 Intent 混合了方向与行动两层含义，FGS 把它们解耦。
 - Step 的定义里有明确的认识论要求："从既有事实产出新事实的因果过程"——即每个 Step 必须回答"我预期它产出什么 Fact"。这是很强的结构约束，等价于给每步行动定义了**可验收的产出**。
 - **append-only + 无压缩**：与我们星图的 consolidate（星尘压缩/归档）路线相反。他的答案不是压缩历史，而是让 Decide 每次只看图的结构化现状（见下），上下文规模由图的摘要视图控制，而非对话历史。
 - Goal 支持动态 Sub Goal：阶段性里程碑（如"拿下 webshell"）可作为子目标挂上/摘除——对应我们航向的阶段性子目标，但他把它归入 Goal 语义（终止条件树），不是行动清单。
@@ -118,7 +118,7 @@
 
 ### 8. 最后（成本与判断）
 
-**【原文】** 全文手写未用 AI。Tsecbench v1 共 **63 题、74 个 flag**；半年前的 TCH 比赛中想全解需要 **7000 元左右**成本，目前 Cairn_Y 最低只需**不到 50 元**，仍有很大优化空间。正在研究**本地模型**方案，未来渗透一个网站成本可能以分计算，安全攻防的成本结构将被颠覆。最后：「**大多数看起来很厉害很有道理的 Agent 架构设计其实并没有用，甚至会起反效果；真正厉害的是模型，不是外层臃肿的 Agent 架构，也不是那一堆冗余的 Skill**」。
+**【原文】** 全文手写未用 AI。Tsecbench v1 共 **63 题、74 个 flag**；半年前的 TCH 比赛中想全解需要 **7000 元左右**成本，目前 榜首闭源方案 最低只需**不到 50 元**，仍有很大优化空间。正在研究**本地模型**方案，未来渗透一个网站成本可能以分计算，安全攻防的成本结构将被颠覆。最后：「**大多数看起来很厉害很有道理的 Agent 架构设计其实并没有用，甚至会起反效果；真正厉害的是模型，不是外层臃肿的 Agent 架构，也不是那一堆冗余的 Skill**」。
 
 **解读**：
 - **¥7000 → ¥50（≈140×）** 是全文最重要的数字。降本来源【推断】：①Decide 干净上下文（决策成本 O(图) 而非 O(史)）；②去掉 CC/Codex SDK 固定开销；③无审查/压缩等额外模型调用；④极短提示词；⑤无 Skill/RAG 的提示词膨胀。具体模型与单价**未披露**。
@@ -127,7 +127,7 @@
 
 ---
 
-## 三、提炼：Cairn_Y 架构全景
+## 三、提炼：榜首闭源方案 架构全景
 
 ```
                  ┌──────────────────────────────────────┐
@@ -152,7 +152,7 @@
 
 ### 机制要点表
 
-| 机制 | Cairn_Y 做法 | 设计意图 |
+| 机制 | 榜首闭源方案 做法 | 设计意图 |
 |---|---|---|
 | 状态载体 | FGS 图，append-only，唯一共享状态 | 状态外置：进程可死可换，上下文不腐烂 |
 | 决策 | Decide：串行、事件触发、干净上下文、只有图工具 | 单写者无竞态；决策成本 O(图规模)；无历史包袱 |
@@ -162,9 +162,9 @@
 | 运行时 | PI 库只取 Agent Loop；Node；未来自写/Go/Rust | 每分钱花在模型推理上 |
 | 明确不用 | Skill/RAG/MCP/角色SubAgent/预置流程/跨轮记忆/定向提示词/审查压缩 | Less Is More，减少约束释放模型能力 |
 
-### 三方对照：Cairn_Y vs 开源 Cairn（我们的 fork 基线）vs ASTRA（我们）
+### 三方对照：榜首闭源方案 vs 开源 原上游（我们的 fork 基线）vs ASTRA（我们）
 
-| 维度 | Cairn_Y（闭源，文章披露） | 开源 Cairn | ASTRA（我们） |
+| 维度 | 榜首闭源方案（闭源，文章披露） | 开源原版 | ASTRA（我们） |
 |---|---|---|---|
 | 图/状态 | FGS（Fact-Goal-Step+Finding），append-only 无压缩 | Fact-Intent DAG 黑板 | 星图 Fact/Intent/Hint + consolidate 压缩归档 |
 | 活动类型 | 仅 2 种，同一 runner 两种注入 | dispatcher + 多类型 worker 池 | dispatcher + 多类型 worker 池（explore/reason） |
@@ -182,7 +182,7 @@
 
 ## 四、关键数字与未披露清单
 
-**披露的数字**：Tsecbench v1 = 63 题 74 旗；全解成本 TCH 期 ≈¥7000 → Cairn_Y 最低 <¥50（≈140×）；正在研究本地模型。
+**披露的数字**：Tsecbench v1 = 63 题 74 旗；全解成本 TCH 期 ≈¥7000 → 榜首闭源方案 最低 <¥50（≈140×）；正在研究本地模型。
 
 **未披露（防止编造，全部存疑待考）**：
 - Execute 并发实例数；Decide/Execute 各用什么模型、是否分档、深度思考开关；
@@ -232,4 +232,4 @@ explore/reason 双活动 ≈ Execute/Decide 二分；我们的 worker 舰队并�
 - Cairn 分支列表：https://github.com/oritera/Cairn/branches
 - l3yx 个人仓库：https://github.com/l3yx?tab=repositories
 - l3yx 博客：https://l3yx.github.io/
-- 背景关联（此前研究）：Tsecbench 榜单考证 Cairn_X=作者本人；与上游对比 288 文件分歧见 docs/与上游Cairn对比.md
+- 背景关联（此前研究）：Tsecbench 榜单考证 原版_X=作者本人；与上游对比 288 文件分歧见 docs/与上游原版对比.md

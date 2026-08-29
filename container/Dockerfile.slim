@@ -101,7 +101,7 @@ COPY ./container/knowledge /opt/knowledge
 # 镜像默认入口：astra-runner（本地模式可手动执行 python3 /opt/astra-runner/runner.py）
 ENTRYPOINT ["python3", "/opt/astra-runner/runner.py"]
 
-# 2026-08-29 cairn-y：执行底座只留 pi（@mariozechner/pi-coding-agent）——
+# 2026-08-29 v0.2 FGS 重建：执行底座只留 pi（@mariozechner/pi-coding-agent）——
 # 最原始、完全可控的 Agent Loop（Less is More）。claude-code 与 playwright-mcp
 # （CC 经 .claude.json 注入）整体移除；浏览器类需求由 worker 经 bash 直驱。
 # 硬失败纪律：双镜像源装不上直接断构建；装完必须能输出版本号。

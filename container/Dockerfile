@@ -96,7 +96,7 @@ COPY ./container/astra_runner /opt/astra-runner
 # 镜像默认入口：astra-runner（本地模式可手动执行 python3 /opt/astra-runner/runner.py）
 ENTRYPOINT ["python3", "/opt/astra-runner/runner.py"]
 
-# 2026-08-29 cairn-y：执行底座只留 pi（最原始、完全可控——Less is More）；
+# 2026-08-29 v0.2 FGS 重建：执行底座只留 pi（最原始、完全可控——Less is More）；
 # codex / claude-code / playwright-mcp 全部移除。托管出包请用 Dockerfile.slim（本文件为本地全量开发镜像）。
 RUN sudo npm install -g @mariozechner/pi-coding-agent@0.73.0
 

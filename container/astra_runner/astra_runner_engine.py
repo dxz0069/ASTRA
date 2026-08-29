@@ -2,7 +2,7 @@
 
 - server/dispatcher 为进程级共享单例（幂等启动，最后 shutdown）
 - dispatch.yaml 由环境变量动态生成：execution=local，PI 唯一执行底座
-  （cairn-y：Less is More——最原始、完全可控的 Agent Loop），Decide/Execute 双活动
+  （v0.2 FGS 重建：Less is More——最原始、完全可控的 Agent Loop），Decide/Execute 双活动
 - 每个题目一个 ASTRA 项目，origin=靶场地址，goal=题目描述
 """
 
@@ -179,14 +179,14 @@ class AstraDaemon:
     def _render_dispatch_config(self) -> Path:
         """由环境变量生成 dispatch.yaml（local 执行）。
 
-        cairn-y（2026-08-29）：执行底座只留 pi——最原始、完全可控的 Agent Loop
+        v0.2 FGS 重建（2026-08-29）：执行底座只留 pi——最原始、完全可控的 Agent Loop
         （Less is More）。任务面收敛为 bootstrap（首次 Execute）/ execute /
         decide 三类；审查与 consolidate 已随 FGS 化移除。
         """
         worker_type = os.environ.get("ASTRA_WORKER_TYPE", "pi")
         if worker_type != "pi":
             raise RuntimeError(
-                f"不支持的 ASTRA_WORKER_TYPE: {worker_type}（cairn-y 起仅 pi）"
+                f"不支持的 ASTRA_WORKER_TYPE: {worker_type}（v0.2 起仅 pi）"
             )
         common_env = {
             "BENCHMARK_TOKEN": os.environ.get("BENCHMARK_TOKEN", ""),
@@ -240,7 +240,7 @@ workers:
         return path
 
     def _render_pi_fleet(self) -> str:
-        """pi 舰队（cairn-y 对齐 Cairn_Y 双活动架构）：
+        """pi 舰队（FGS 双活动架构）：
           - deepseek-execute-{i}  p0 bootstrap/execute ×N（ASTRA_EXECUTE_REPLICAS，
             默认 2）每副本 max_running=3（ASTRA_EXECUTE_MAXRUN）——DS 快攻主力
           - glm-decide            p1 decide —— GLM-5.3 深思考决策（ZHIPU_API_KEY

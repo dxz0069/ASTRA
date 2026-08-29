@@ -2121,9 +2121,9 @@ def _run_environment_check(token: str, base_url: str) -> int:
         LOG.error("[FAIL] 平台 API 不可达 error=%s（检查 BENCHMARK_BASE_URL / 网络 / VPN）", exc)
         ok = False
 
-    # 2. 模型 CLI / 舰队配置（cairn-y：pi 唯一执行底座）
+    # 2. 模型 CLI / 舰队配置（v0.2：pi 唯一执行底座）
     if os.environ.get("ASTRA_WORKER_TYPE", "pi") != "pi":
-        LOG.error("[FAIL] ASTRA_WORKER_TYPE=%s 不受支持（cairn-y 起仅 pi）",
+        LOG.error("[FAIL] ASTRA_WORKER_TYPE=%s 不受支持（v0.2 起仅 pi）",
                   os.environ.get("ASTRA_WORKER_TYPE"))
         ok = False
     pi = shutil.which("pi")

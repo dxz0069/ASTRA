@@ -55,7 +55,7 @@ container:
 workers:
   # Worker priority is ascending: lower numbers are preferred first.
   # max_running is per-worker concurrency. Slower backends such as Pi usually benefit from lower values.
-  # cairn-y（2026-08-29）：执行底座只留 pi（claudecode/codex/dsh 已移除）
+  # v0.2（2026-08-29）：执行底座只留 pi（旧适配器已移除）
   - name: "pi_deepseek-execute"
     type: "pi"
     task_types: [bootstrap, execute]
@@ -79,7 +79,7 @@ workers:
       PI_API_KEY: "sk-xxx"
       PI_PROVIDER_API: "anthropic"
 
-  # ---- dsh / claudecode / codex 适配器已于 2026-08-29（cairn-y）全部移除，底座仅 pi ----
+  # ---- 旧执行适配器已于 2026-08-29（v0.2）全部移除，底座仅 pi ----
   # 如需 Kimi/GLM 等其他 anthropic 兼容端点：复制上方 pi worker 块，
   # 改 PI_BASE_URL / PI_API_KEY / PI_MODEL 即可。
   # 每个 pi worker 独立 PI_CODING_AGENT_DIR（会话隔离，execute→conclude 走同一 worker 不串）。
