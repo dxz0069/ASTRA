@@ -177,12 +177,28 @@ class PiDriver(WorkerDriver):
 
     @staticmethod
     def _prompt_arg(prompt: str) -> str:
-        """Windows 下 prompt 写入临时文件并以 @file 传入（命令行长度/转义安全）。"""
+        """Windows 下 prompt 写入临时文件并以 @file 传入（命令行长度/转义安全）。
+
+        写前顺手清理 1 小时前的旧 prompt 文件（长跑防泄漏：Windows 每任务一个文件，
+        24h 高频跑可积累上万；pi 不负责回收，只能生产者自理）。清理失败静默。
+        """
         if sys.platform != "win32":
             return prompt
         import tempfile
+        import time
 
-        path = Path(tempfile.gettempdir()) / f"astra-pi-prompt-{uuid.uuid4().hex[:8]}.txt"
+        root = Path(tempfile.gettempdir())
+        try:
+            cutoff = time.time() - 3600
+            for stale in root.glob("astra-pi-prompt-*.txt"):
+                try:
+                    if stale.stat().st_mtime < cutoff:
+                        stale.unlink(missing_ok=True)
+                except OSError:
+                    continue
+        except OSError:
+            pass
+        path = root / f"astra-pi-prompt-{uuid.uuid4().hex[:8]}.txt"
         path.write_text(prompt, encoding="utf-8")
         return "@" + str(path)
 
