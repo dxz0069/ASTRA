@@ -52,7 +52,7 @@ def test_memory_trace_outputs_decision_chain(tmp_path):
     result, _ = _invoke(tmp_path, ["memory", "trace", "demo"])
     assert result.exit_code == 0, result.output
     assert "SQL 注入" in result.output
-    assert "已收束→f002" in result.output
+    assert "已归航→f002" in result.output
 
 
 def test_memory_map_writes_standalone_html(tmp_path):
@@ -61,7 +61,7 @@ def test_memory_map_writes_standalone_html(tmp_path):
     assert result.exit_code == 0, result.output
     html = out.read_text(encoding="utf-8")
     assert "<svg" in html and "f001" in html
-    assert "事实" in html  # FGS 术语
+    assert "星记" in html  # ASTRA 术语
 
 
 def test_report_renders_risk_table_and_findings(tmp_path):
@@ -70,6 +70,6 @@ def test_report_renders_risk_table_and_findings(tmp_path):
     assert result.exit_code == 0, result.output
     md = out.read_text(encoding="utf-8")
     assert "渗透测试报告" in md
-    assert "## 三、攻击路径" in md and "已收束" in md
-    assert "## 四、沿途发现" in md and "SQL injection at /login" in md
+    assert "## 三、攻击路径" in md and "已归航" in md
+    assert "## 四、星辉发现" in md and "SQL injection at /login" in md
     assert "修复建议" in md
