@@ -1,4 +1,3 @@
-import secrets
 import sqlite3
 from fastapi import APIRouter, HTTPException
 
@@ -28,6 +27,7 @@ from astra.server.models import (
 )
 from astra.server.services import (
     build_steps,
+    claim_decide_atomic,
     check_project_active,
     check_project_completed,
     clear_project_decide,
@@ -288,10 +288,7 @@ def claim_project_decide(project_id: str, body: DecideClaimRequest):
         check_project_active(conn, project_id)
         expire_decide_leases(conn, project_id)
         row = get_project_or_404(conn, project_id)
-        current_worker = row["decide_worker"]
-        if current_worker is not None and current_worker != body.worker:
-            raise HTTPException(409, f"Project decide is currently claimed by {current_worker}")
-        if current_worker == body.worker:
+        if row["decide_worker"] == body.worker:
             # 幂等重认领：回传已持有的租约令牌（否则调用方拿 None token，
             # 后续 heartbeat/complete 全 403 直到租约过期）
             meta = project_meta_from_row(row)
@@ -299,21 +296,8 @@ def claim_project_decide(project_id: str, body: DecideClaimRequest):
             meta.decide_token = stored or None
             return meta
 
-        now = utcnow()
-        # 租约令牌：claim 下发随机持有凭证，心跳/释放/完成须携带
-        lease_token = secrets.token_hex(16)
-        conn.execute(
-            """
-            UPDATE projects
-            SET decide_worker = ?,
-                decide_trigger = ?,
-                decide_started_at = ?,
-                decide_last_heartbeat_at = ?,
-                decide_token = ?
-            WHERE id = ?
-            """,
-            (body.worker, body.trigger, now, now, lease_token, project_id),
-        )
+        # 原子认领（守卫 UPDATE）：并发穿透时败者 409；胜者下发新令牌
+        lease_token = claim_decide_atomic(conn, project_id, body.worker, body.trigger)
         updated = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
         meta = project_meta_from_row(updated)
         meta.decide_token = lease_token  # 仅 claim 响应下发；其余端点不回显

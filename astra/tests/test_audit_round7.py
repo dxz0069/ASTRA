@@ -203,3 +203,59 @@ def test_decide_ops_capped_against_dump() -> None:
     assert kind == "ops"
     assert len(data["close_steps"]) == MAX_CLOSE_STEPS_PER_DECIDE
     assert len(data["subgoals"]) == MAX_SUBGOALS_PER_DECIDE
+
+
+def test_concurrent_claim_race_only_one_wins(client: TestClient) -> None:
+    """并发竞态：两 worker 同时认领同一步骤，只有守卫 UPDATE 的胜者生效。
+
+    模拟方式：worker-a 持有未过期租约时 worker-b 认领必须 409；
+    且 409 事务回滚后不留下任何副作用（dispatch_count 不变）。
+    """
+    pid = _create_project(client)
+    client.post(
+        f"/projects/{pid}/steps",
+        json={"from": ["origin"], "description": "race", "creator": "a", "worker": None},
+    )
+    # a 首次认领（NULL→a 跃迁计一次派发）
+    assert client.post(f"/projects/{pid}/steps/s001/heartbeat", json={"worker": "a"}).status_code == 200
+    # a 持有新鲜租约 → b 原子认领必须败且无副作用
+    r = client.post(f"/projects/{pid}/steps/s001/heartbeat", json={"worker": "b"})
+    assert r.status_code == 409
+    detail = client.get(f"/projects/{pid}").json()
+    step = detail["steps"][0]
+    assert step["worker"] == "a"
+    assert step["dispatch_count"] == 1  # 败者不 inflate 计数
+    # 同 worker 幂等续租不重复计数
+    assert client.post(f"/projects/{pid}/steps/s001/heartbeat", json={"worker": "a"}).status_code == 200
+    detail = client.get(f"/projects/{pid}").json()
+    assert detail["steps"][0]["dispatch_count"] == 1
+
+
+def test_concurrent_decide_claim_race_only_one_wins(client: TestClient) -> None:
+    """并发竞态：decide 认领同图串行——活跃租约下第二个 worker 必须 409 且无副作用。"""
+    pid = _create_project(client)
+    first = client.post(f"/projects/{pid}/decide/claim", json={"worker": "w1", "trigger": "t"})
+    assert first.status_code == 200
+    token1 = first.json()["decide_token"]
+    r = client.post(f"/projects/{pid}/decide/claim", json={"worker": "w2", "trigger": "t"})
+    assert r.status_code == 409
+    # w1 幂等重认领拿回自己的令牌
+    again = client.post(f"/projects/{pid}/decide/claim", json={"worker": "w1", "trigger": "t"})
+    assert again.status_code == 200
+    assert again.json()["decide_token"] == token1
+
+
+def test_conclude_lost_race_no_orphan_fact(client: TestClient) -> None:
+    """并发竞态：收束败者（他 worker 持有租约）不得留下孤儿 fact。"""
+    pid = _create_project(client)
+    client.post(
+        f"/projects/{pid}/steps",
+        json={"from": ["origin"], "description": "c", "creator": "a", "worker": "a"},
+    )
+    r = client.post(
+        f"/projects/{pid}/steps/s001/conclude",
+        json={"worker": "intruder", "description": "raced fact"},
+    )
+    assert r.status_code == 409
+    facts = client.get(f"/projects/{pid}").json()["facts"]
+    assert not any("raced fact" in f["description"] for f in facts)  # 事务回滚无孤儿

@@ -144,6 +144,93 @@ def get_step_or_404(
     return row
 
 
+def claim_step_atomic(
+    conn: sqlite3.Connection, project_id: str, step_id: str, worker: str
+) -> None:
+    """守卫式原子认领：WHERE 条件在写入时重估，消灭 SELECT-检查-UPDATE 的 TOCTOU 窗口。
+
+    高并发下两个请求同时通过预检查时，只有第一个 UPDATE 生效（rowcount=1）；
+    第二个 rowcount=0 → 重读行产出精确 409。认领即登记派发计数（CASE 原子判定）。
+    """
+    expire_workers(conn, project_id)  # 过期租约先清（语义与旧 get_claimable 对齐）
+    now = utcnow()
+    cursor = conn.execute(
+        """
+        UPDATE steps
+        SET worker = ?,
+            last_heartbeat_at = ?,
+            dispatch_count = dispatch_count + (CASE WHEN worker IS NULL OR worker != ? THEN 1 ELSE 0 END)
+        WHERE id = ? AND project_id = ?
+          AND status = 'open'
+          AND to_fact_id IS NULL
+          AND (worker IS NULL OR worker = ?)
+        """,
+        (worker, now, worker, step_id, project_id, worker),
+    )
+    if cursor.rowcount == 0:
+        row = get_step_or_404(conn, project_id, step_id)
+        if row["status"] == "closed":
+            raise HTTPException(409, "Step is closed")
+        if row["to_fact_id"] is not None:
+            raise HTTPException(409, "Step already concluded")
+        raise HTTPException(409, f"Step is currently claimed by {row['worker']}")
+
+
+def conclude_step_atomic(
+    conn: sqlite3.Connection, project_id: str, step_id: str, worker: str
+) -> str:
+    """原子收束预留：抢到写权（worker 钉为本请求）后返回 utcnow；失败抛 409。
+
+    后续 fact 插入 + to_fact_id 终写与本预留同处一个请求事务（get_conn 统一
+    commit/rollback），不存在孤儿数据。
+    """
+    expire_workers(conn, project_id)  # 过期租约先清（语义与旧 get_claimable 对齐）
+    now = utcnow()
+    cursor = conn.execute(
+        """
+        UPDATE steps
+        SET worker = ?, last_heartbeat_at = ?
+        WHERE id = ? AND project_id = ?
+          AND status = 'open'
+          AND to_fact_id IS NULL
+          AND (worker IS NULL OR worker = ?)
+        """,
+        (worker, now, step_id, project_id, worker),
+    )
+    if cursor.rowcount == 0:
+        row = get_step_or_404(conn, project_id, step_id)
+        if row["status"] == "closed":
+            raise HTTPException(409, "Step is closed")
+        if row["to_fact_id"] is not None:
+            raise HTTPException(409, "Step already concluded")
+        raise HTTPException(409, f"Step is currently claimed by {row['worker']}")
+    return now
+
+
+def claim_decide_atomic(
+    conn: sqlite3.Connection, project_id: str, worker: str, trigger: str
+) -> str:
+    """原子 decide 认领（同图串行保证）：返回租约令牌；失败抛 409。"""
+    now = utcnow()
+    lease_token = __import__("secrets").token_hex(16)
+    cursor = conn.execute(
+        """
+        UPDATE projects
+        SET decide_worker = ?, decide_trigger = ?, decide_started_at = ?,
+            decide_last_heartbeat_at = ?, decide_token = ?
+        WHERE id = ? AND status = 'active'
+          AND (decide_worker IS NULL OR decide_worker = ?)
+        """,
+        (worker, trigger, now, now, lease_token, project_id, worker),
+    )
+    if cursor.rowcount == 0:
+        row = get_project_or_404(conn, project_id)
+        if row["status"] != "active":
+            raise HTTPException(403, f"Project is {row['status']}")
+        raise HTTPException(409, f"Project decide is currently claimed by {row['decide_worker']}")
+    return lease_token
+
+
 def get_claimable_open_step_or_404(
     conn: sqlite3.Connection, project_id: str, step_id: str, worker: str
 ) -> sqlite3.Row:
