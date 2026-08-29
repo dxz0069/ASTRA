@@ -1,0 +1,235 @@
+# Cairn_Y 公众号文章逐字解读与架构提炼
+
+> 2026-08-29 整理。信息源：l3yx（淚笑）微信公众号文章《AI 自动化渗透架构 Cairn 满分登顶 TsecBench Cybench —— 众人向左，我偏向右》
+> https://mp.weixin.qq.com/s/ZzKF_0MOb0cak9izhHqCUQ
+>
+> 任务：① 确认作者新版本（Cairn_Y）是否开源；② 未开源则基于文章提炼其架构。
+> 纪律：全文严格区分**【原文】**（文章原话摘录）、**【核实】**（GitHub 实勘）、**【推断】**（我方分析），未披露处一律标"未披露"，不编造。
+
+---
+
+## 〇、结论速览
+
+1. **Cairn_Y 未开源，且没有任何公开代码痕迹。** oritera 组织名下唯一公开仓库仍是 Python 版 Cairn（main 最后提交 2026-07-15，即我们早已对过 diff 的 3 个运维提交）；dev-0.3.0 分支全是社区 PR（用户认证前端/CI）；作者个人账号 24 个仓库、个人博客均无 Cairn_Y。文章描述的 Node + PI Agent Loop 重写版完全闭源。
+2. **榜首差距的真相**：我们此前"与上游对比"的 288 文件分歧之外，作者实际参赛跑的是一个**闭源重写版**，不是公开仓库的增量。追公开仓库 commit 永远追不上他——差距不在那 3 个提交里。
+3. **Cairn_Y 架构（文章披露部分）**：FGS 图（Fact-Goal-Step，append-only，唯一共享状态）+ 只有两类活动 **Decide**（串行、事件触发、干净上下文、只操作图）与 **Execute**（世界工具 + submit_fact）+ **Finding**（搜索过程产物的一等公民）+ 自控极简 Agent Loop（PI 库只取 loop，Python→Node，提示词极短且不与安全任务耦合）。
+4. **经济学信号最强的一条**：Tsecbench v1（63 题 74 旗）全解成本从 TCH 时期约 ¥7000 降到最低**不到 ¥50（约 140 倍）**。他的优化主轴是**调用与 token 经济学**，不是加机制。
+5. 对我们的意义：explore/reason 双活动结构上与他的 Execute/Decide 意外同构；真正差距在**重量级**（双星审查环/consolidate/KB/playbook 注入——全是他明确不用的东西）与**运行时成本**（CC SDK 系统开销 vs 自控 loop）。
+
+---
+
+## 一、开源状态核实（证据链）
+
+| # | 检查点 | 结果 | 链接 |
+|---|---|---|---|
+| 1 | oritera 组织仓库列表 | **仅 1 个公开仓库：Cairn**（Python，AGPL-3.0，约 2.4k stars / 332 forks，Updated Jul 15, 2026） | https://github.com/orgs/oritera/repositories |
+| 2 | Cairn main 分支提交史 | 最后提交 **2026-07-15**：`8f702c5` merge code-based-healthcheck、`0060a44` local execution mode、`5a065ff` 注释掉 qwen3.6-plus 的 codex/pi 示例 worker——**正是我们 fork 后已知的 3 个运维提交，无新内容** | https://github.com/oritera/Cairn/commits/main |
+| 3 | Cairn 全部分支 | 仅 4 个：`main`、`dev-0.3.0`、`feat/code-based-healthcheck`、`feat/local-execution-mode`。**无 Node 分支、无重写分支** | https://github.com/oritera/Cairn/branches |
+| 4 | dev-0.3.0 分支 | 最后提交 2026-06-30（`add535a`），内容为社区 PR：用户认证（React 前端）、ruff/pyright CI、issue 模板。**社区驱动，与 Cairn_Y 无关** | https://github.com/oritera/Cairn/commits/dev-0.3.0 |
+| 5 | 作者个人账号 l3yx（24 仓库） | 最新：l3yx.github.io（2026-08-27 更新，仅博客）、intentlang（2026-01，AI-native 语言实验）、Chocky/jdwp-codeifier 等老项目。**无 Cairn_Y** | https://github.com/l3yx?tab=repositories |
+| 6 | 作者博客 | 最新文章停在 2026-01-11（IntentLang hack CPython 的 str），无 Cairn_Y 文章或代码 | https://l3yx.github.io/ |
+| 7 | 文章自述 | 作者文中明说近期未正式更新过代码；且 Cairn_Y 基于 PI 的库用 **Node** 重写——公开仓库是 Python，二者对不上，反向证明重写版未发布 | 文章原文 |
+
+**结论：Cairn_Y 闭源。** 公开的 https://github.com/oritera/Cairn 就是我们 fork 时对过 diff 的那个版本（+dev-0.3.0 社区 PR）。此前榜单考证"Cairn_X=作者本人参赛号"，本文的 Cairn_Y 命名顺延，是其新一代。
+
+---
+
+## 二、逐段解读（原文要点 → 含义）
+
+### 1. 标题《…满分登顶 TsecBench Cybench —— 众人向左，我偏向右》
+
+**【原文】**（前言）Cairn_Y 基于 Cairn 架构演进；目前**以满分登顶 Cybench 评测基准第一**，同时**以绝对高分优势登顶 Tsecbench v1 第一**，以及 XBOW Validation Benchmarks 第一。Cairn_Y「没有针对靶场赛题定向优化提示词，更不会内嵌答案或携带跨轮记忆，仅仅是围绕 Harness 工程的迭代」。排行榜公布选手全部 LLM 记录、且有作弊举报功能。
+
+**解读**：
+- 三个第一各有含义：Cybench 是**满分**；Tsecbench v1 是"绝对高分优势"第一（措辞 ≠ 满分，但 63 题 74 旗的全解成本都能压到 ¥50，说明接近全解）；XBOW Validation Benchmarks（自动化攻防厂商的公开验证榜）也第一。
+- 主动声明"无定向提示词/无内嵌答案/无跨轮记忆"是**对榜单公信力的正面回应**：他的满分在"全量日志公开+可举报"的规则下站得住。
+- 对我们最重的一句：**登顶不需要跨题学习、不需要记忆复利**——纯 Harness 工程。我们"跨 run 复利=0 是差距根因"的假设被他证伪为必要条件。
+
+### 2. 「从 Cairn 架构说起」
+
+**【原文】** Cairn 是其参加 TCH（腾讯云黑客松智能渗透挑战赛）的方案；**意图工程、黑板架构、间接协调、Fact-Intent 有向无环图、状态空间搜索**是他在这套架构里首创的概念；设计哲学 **Less Is More**——极简、减少约束释放模型能力、**0 Skill / 0 RAG / 0 MCP**、反对多角色 SubAgent、无预置渗透流程。开源仓库定位不是一个功能齐全的渗透项目，而是极简主义/黑板架构/Fact-Intent 图的工程实践。并观察：榜首选手提示词频繁出现 Fact/Intent 词汇与 Cairn 的 DAG 数据结构，出现大量基于 Cairn 的二开。
+
+**解读**：
+- 这段是"认领发明权"：Fact/Intent、黑板、间接协调这些我们习以为常的概念，源头在此。我们整个星图协议就是这一谱系。
+- 注意他对开源仓库的**降格定位**：公开的 Cairn 是"概念验证工程实践"，不是他的主力。这与第一节核实结果互证——主力（Cairn_Y）另有其身，闭源。
+- "大量基于 Cairn 的二开"指的就是我们这类项目（以及榜单上其他 Fact/Intent 系选手）。
+
+### 3. 「Cairn_Y 方案」总述
+
+**【原文】** 设计上依然克制，Less Is More；改进方向与社区的几个热门方向——**跨题学习、幻觉门控、数百工具集成、多类专业 Subagent、数十内置 Security Skill——完全无关**。
+
+**解读**：这是全文的路线宣言：社区在往"更多机制"卷，他在往"更少机制"卷（标题"众人向左，我偏向右"）。他点名不用的五样东西里，**跨题学习（=我们的知识库方向）和数十内置 Security Skill（=我们的 playbook 方向）我们都在做**，需要诚实面对（见第五节）。
+
+### 4. FGS 图
+
+**【原文】** 渗透本质 = 以目标为导向的**状态空间搜索**；所有状态**外部化为一张 append-only 的图**。FGS = **Fact-Goal-Step Graph**：
+- **Fact**：已被确认的事实，代表当前世界状态；
+- **Goal**：项目的完成条件，即搜索的**终止条件**；支持动态增加/删除 Sub Goal；
+- **Step**：下一步做什么——描述**如何从既有事实产出新事实的因果过程**，驱动世界状态演进。
+
+**解读**：
+- 相对旧 Cairn 的 Fact-Intent 二元，是把 Intent 拆成了两个语义更纯的节点：**Goal 管"何时停"，Step 管"怎么走"**。旧 Intent 混合了方向与行动两层含义，FGS 把它们解耦。
+- Step 的定义里有明确的认识论要求："从既有事实产出新事实的因果过程"——即每个 Step 必须回答"我预期它产出什么 Fact"。这是很强的结构约束，等价于给每步行动定义了**可验收的产出**。
+- **append-only + 无压缩**：与我们星图的 consolidate（星尘压缩/归档）路线相反。他的答案不是压缩历史，而是让 Decide 每次只看图的结构化现状（见下），上下文规模由图的摘要视图控制，而非对话历史。
+- Goal 支持动态 Sub Goal：阶段性里程碑（如"拿下 webshell"）可作为子目标挂上/摘除——对应我们航向的阶段性子目标，但他把它归入 Goal 语义（终止条件树），不是行动清单。
+
+### 5. Decide & Execute（全文最核心的机制段）
+
+**【原文】** 只有两类活动：**Decide** 与 **Execute**。二者是**独立的运行过程，而非固定角色的 SubAgent**；也可以理解为**同一个运行器被注入了不同的提示词与工具**。
+
+**Decide**：
+- 只有查看和操作 FGS 图的工具；
+- 触发条件：**任务开始，或图上信息增加/变化**（事件驱动）；
+- **串行执行**；
+- 职能：分析现状、评估图上的 Step、新增/放弃/重排 Step 优先级；可为阶段性进展提出或删除 Sub Goal；
+- **每次触发都从干净上下文重新起一次运行，不携带记忆**。
+
+**Execute**：
+- 拥有 FGS 图的查看权限 + 所有改变世界状态的工具（read/bash/edit/write）+ **最重要的 submit_fact**。
+
+二者本质都是 Agent Loop（注入不同提示词与工具）；**没有独立的跨会话记忆机制，FGS 图就是二者共享的外置化记忆**。
+
+**解读**（逐个机制拆）：
+- **"运行过程而非角色 SubAgent"**：没有 explore-worker/reason-worker 这样的常驻角色进程，只有一个 runner，两种注入配置。并发发生在 Execute 的多个实例上，而不是"角色分工"上——**并发 ≠ 分工**。这与他 TCH 时期就主张的控制三分法一脉相承。
+- **Decide 串行**：单写者原则。图上的 Step 队列/优先级同一时刻只有一个人在改，天然无竞态、无调度抖动。我们的 reason 实际也可并行多实例（R10 舰队 reason maxrun=2），存在两个 reason 同时提案的冲突窗口——他直接用串行消掉这一类问题。
+- **Decide 干净上下文**：每次决策都是"新进程读图快照"，不带历史对话。三个直接后果：①无上下文腐烂（长任务决策质量不随时间劣化）；②每次决策的 token 成本只与图的当前规模有关，与任务时长无关；③决策天然可重放（同图同决策）。**这是成本从 ¥7000 到 ¥50 的核心机制之一**——决策调用的 token 是 O(图规模) 而非 O(任务时长×对话史)。
+- **Decide 只有图操作工具**：控制面不碰世界。它不能跑 bash、不能访问靶机——纯纸上调度。控制面与执行面彻底隔离。
+- **Execute 有 submit_fact**：事实入图的唯一闸口在执行侧。"Fact=已被确认的事实"的确认责任在 Execute 自己（跑过命令、亲眼看到输出才 submit）。**没有独立审查环节**——旧架构社区派生的各种 review/gate 他一律不要，用"执行者自证 + 强模型"替代。
+- **图是唯一共享记忆**：Decide 与 Execute 之间零直接通信，全部通过 FGS 图间接协调（黑板架构贯彻到底）。这也意味着换模型、换 worker、重启进程都不丢状态——状态外置的可靠性红利。
+
+### 6. Finding（新概念）
+
+**【原文】** 渗透测试和代码审计本质是搜索过程。CTF 是纯粹的搜索：**搜索的产物就是最终 Goal（flag）**。但渗透/审计不同——**产物是搜索过程中发现的漏洞**，而不是最终目标（例如"完成所有功能点测试"这类 Goal）。对于关心搜索过程产物的任务，引入 Finding：「搜索当然既有目的地，也有沿途的发现」。Finding 动态可定义；对漏洞挖掘类任务，Finding 的定义就是安全漏洞。
+
+**解读**：
+- 这是 FGS 之外的**第三个一等节点**：Fact（世界状态）/ Goal（终止条件）/ Step（行动）之外，Finding（**沿途产出**）。
+- 为什么 Cybench/XBOW 能满分而 Tsecbench 只说"绝对高分"？【推断】XBOW Validation Benchmarks 与真实渗透/审计同构，**计分单位就是漏洞发现**——Finding 概念直接对齐其计分模型；Tsecbench 计分单位是 flag，Finding 不参与计分，所以那里拼的是纯搜索效率。
+- 对通用平台定位的我们，这是**产出模型的补全**：CTF 旗只是 Finding 的特例（Finding ≡ Goal 产物）。SRC/众测/审计场景里，真正要收集和计分的是 Finding。我们的星图 schema 目前没有这一层。
+
+### 7. 工程选型
+
+**【原文】** 不再使用 Claude Code 和 Codex 的 SDK，**基于 PI 的库，且只使用其 Agent Loop 功能**。原因不是 PI 更强，而是 **PI 更原始，从而完全可控**；未来会完全自写 Agent Loop。技术栈 **Python → Node**（CC/Codex/PI 都是 Node 生态）；未来更偏好 Go 或 Rust 的更轻版本。内置提示词**非常短**，且**不和安全类任务耦合**——依然是通用任务解决引擎。
+
+**解读**：
+- **绕开 CC/Codex SDK 的动机是"可控 + 便宜"**：CC 每次调用自带系统提示词、内置工具描述、会话管理——这些对我们是**看不见但每 call 都在付费的固定开销**（我们记作"CC 税"，尚无量化）。他自己写 loop 后，每次调用的 token = 他的短提示词 + 图视图 + 工具结果，最小化。
+- 选 PI 不是能力考虑，是**最小依赖**考虑：PI 的 agent loop 足够原始（无内置安全工作流、无内置技能），能整条接管。这正是"0 Skill/0 RAG/0 MCP"哲学在运行时层面的延续。
+- Node 选型是生态现实（三家 agent 运行时全是 Node），Go/Rust 是下一步降耗方向——他的工程主线一直是**把每一分钱花在模型推理上**。
+- "提示词不与安全耦合"再次强化通用引擎定位（与我们"赛事只是适配件"的定位一致）。
+
+### 8. 最后（成本与判断）
+
+**【原文】** 全文手写未用 AI。Tsecbench v1 共 **63 题、74 个 flag**；半年前的 TCH 比赛中想全解需要 **7000 元左右**成本，目前 Cairn_Y 最低只需**不到 50 元**，仍有很大优化空间。正在研究**本地模型**方案，未来渗透一个网站成本可能以分计算，安全攻防的成本结构将被颠覆。最后：「**大多数看起来很厉害很有道理的 Agent 架构设计其实并没有用，甚至会起反效果；真正厉害的是模型，不是外层臃肿的 Agent 架构，也不是那一堆冗余的 Skill**」。
+
+**解读**：
+- **¥7000 → ¥50（≈140×）** 是全文最重要的数字。降本来源【推断】：①Decide 干净上下文（决策成本 O(图) 而非 O(史)）；②去掉 CC/Codex SDK 固定开销；③无审查/压缩等额外模型调用；④极短提示词；⑤无 Skill/RAG 的提示词膨胀。具体模型与单价**未披露**。
+- "本地模型方案"：他的下一步是继续压单位成本——这与我们 R9 教训（deepseek-flash 吞吐=分数）完全同向：**分数 ≈ 单位成本能买到的有效推理次数**。
+- 结尾判断是强的：**架构做减法，把钱留给模型**。注意这是他的经验判断（文章无消融数据），采信程度要与我们自己的实测对齐（见第五节）。
+
+---
+
+## 三、提炼：Cairn_Y 架构全景
+
+```
+                 ┌──────────────────────────────────────┐
+ 事件触发 ──────▶ │        FGS 图（append-only）         │
+ 任务开始         │  Fact  = 已确认事实（世界状态）        │
+                 │  Goal  = 完成条件（终止条件，可挂SubGoal）│◀── submit_fact
+                 │  Step  = 因果行动（预期产出新事实）      │    （唯一入图闸口）
+                 │  Finding = 沿途发现（动态定义，如漏洞）  │
+                 └──────────────────────────────────────┘
+                    │ 只读视图                 │ 读写（唯一写者：改 Step/Goal）
+              ┌─────▼──────┐            ┌─────▼───────────┐
+              │   Decide   │            │    Execute ×N    │
+              │ 串行·事件驱动│            │ （并发=多实例，    │
+              │ 干净上下文   │            │   非角色分工）     │
+              │ 只操作图     │            │ read/bash/edit/  │
+              │ 增删/重排Step│            │ write + submit_fact│
+              └────────────┘            └─────────────────┘
+              控制面（不碰世界）              执行面（不碰图结构）
+              运行时：同一个 runner，两种提示词/工具注入（PI 库 Agent Loop，Node）
+              无审查环·无压缩·无Skill/RAG/MCP·无跨轮记忆·提示词极短且与安全解耦
+```
+
+### 机制要点表
+
+| 机制 | Cairn_Y 做法 | 设计意图 |
+|---|---|---|
+| 状态载体 | FGS 图，append-only，唯一共享状态 | 状态外置：进程可死可换，上下文不腐烂 |
+| 决策 | Decide：串行、事件触发、干净上下文、只有图工具 | 单写者无竞态；决策成本 O(图规模)；无历史包袱 |
+| 执行 | Execute：世界工具 + submit_fact，多实例并发 | 并发用在执行，不用在认知分工 |
+| 事实闸口 | Execute 自证后 submit_fact（Fact=已确认） | 用执行者自证替代审查环节 |
+| 产出 | Finding 与 Goal 分离 | 对齐渗透/审计真实计分物（漏洞而非终点） |
+| 运行时 | PI 库只取 Agent Loop；Node；未来自写/Go/Rust | 每分钱花在模型推理上 |
+| 明确不用 | Skill/RAG/MCP/角色SubAgent/预置流程/跨轮记忆/定向提示词/审查压缩 | Less Is More，减少约束释放模型能力 |
+
+### 三方对照：Cairn_Y vs 开源 Cairn（我们的 fork 基线）vs ASTRA（我们）
+
+| 维度 | Cairn_Y（闭源，文章披露） | 开源 Cairn | ASTRA（我们） |
+|---|---|---|---|
+| 图/状态 | FGS（Fact-Goal-Step+Finding），append-only 无压缩 | Fact-Intent DAG 黑板 | 星图 Fact/Intent/Hint + consolidate 压缩归档 |
+| 活动类型 | 仅 2 种，同一 runner 两种注入 | dispatcher + 多类型 worker 池 | dispatcher + 多类型 worker 池（explore/reason） |
+| 决策者 | Decide：串行、干净上下文、事件触发 | reason worker（触发式，带历史） | reason worker（GLM，maxrun=2 可并行）+ 双星审查环 |
+| 执行者 | Execute 多实例，submit_fact 自证入图 | explore worker 租约认领 | explore worker（DS flash）租约认领 + 平台回执入图 |
+| Finding 概念 | 有（一等节点） | 无 | 无（flag=唯一产出） |
+| 审查 | 无独立审查 | 无 | 机器预检+质询者+裁决者（双星审查） |
+| 记忆 | 仅图，无跨会话/跨轮记忆 | 仅图 | 图 + 知识库46条 + 跨题注入（托管已合规禁用） |
+| Skill/RAG/MCP | 0/0/0 | 0/0/0 | playbook 注入 / KB / playwright-mcp |
+| 运行时 | 自控 loop（PI 库，Node） | Python harness + CC/Codex SDK 适配器 | Python harness + claudecode CLI 子进程 |
+| 提示词 | 极短，与安全任务解耦 | 短 | 长（图摘要+KB+playbook 多层注入） |
+| 战绩 | Cybench 满分第一；Tsecbench v1 绝对高分第一；XBOW 第一 | TCH 二等奖方案 | 托管 13470 分 / 48 旗（R8） |
+
+---
+
+## 四、关键数字与未披露清单
+
+**披露的数字**：Tsecbench v1 = 63 题 74 旗；全解成本 TCH 期 ≈¥7000 → Cairn_Y 最低 <¥50（≈140×）；正在研究本地模型。
+
+**未披露（防止编造，全部存疑待考）**：
+- Execute 并发实例数；Decide/Execute 各用什么模型、是否分档、深度思考开关；
+- hint 购买策略、flag 提交与多旗收割逻辑、题目调度顺序（有无价值排序/难度排序）；
+- FGS 图的物理形态（文件/DB）、Decide 看到的"图视图"如何渲染（全量 or 摘要）、append-only 图如何防止无限膨胀；
+- 防死循环/止损机制（Step 反复失败怎么办）；Finding 的存储与去重；
+- ¥50 成本的模型构成与单价口径。
+
+---
+
+## 五、对我们的启示（诚实对照）
+
+### 5.1 结构上我们已同构，差距在"重量"与"成本"
+
+explore/reason 双活动 ≈ Execute/Decide 二分；我们的 worker 舰队并发也发生在执行侧。**真正被他减掉而我们还背着的**：双星审查环（每次提案 2-3 次额外模型调用）、consolidate 压缩、KB/playbook 多层提示词注入、CC SDK 固定开销。这些每一项都在消耗调用次数与 token——他的 ¥50 就是从这些地方省出来的。
+
+### 5.2 他点名反对、而我们在做的（逐项裁决）
+
+| 他的反对项 | 我们现状 | 裁决（基于我们自己的数据） |
+|---|---|---|
+| 跨题学习/跨轮记忆 | KB 46 条；托管 ASTRA_KB_DISABLED=1 | **打分管线维持禁用**（合规禁+实测 33 条零命中，与他判断一致）；保留为通用平台/SRC 场景卖点，不上榜 |
+| 数十内置 Security Skill | playbook（逆向工具链等） | 我们的 playbook 本质是**工具安装与环境预备**（radare2/ghidra 就位），不是提示词级技能——保留；但注入方式可瘦身 |
+| 多类专业 Subagent | 仅 explore/reason 两类 | 已接近他的二分，不需要再减；reason 可考虑收紧为串行（消竞态窗口，待 R10 复盘看有无 reason 冲突实例再定） |
+| 幻觉门控/审查 | 双星审查 | 错交不扣分前提下审查期望收益低；候选实验=complete 提案免审直交（**等 R10 复盘后，遵守一次只动一层**） |
+| 数百工具集成/MCP | playwright-mcp | 浏览器题确需；非架构装饰，保留 |
+
+### 5.3 可直接吸收的（下一轮候选，不动 R10 交付）
+
+1. **量化"CC 税"**：用 collect_claude_usage 的数据测一轮 CC 系统提示词+内置工具描述+会话史的 token 占比。这是他绕开 CC 的全部理由，我们先量化再决定要不要跟。仓库已有 pi adapter（WorkerType 含 pi），可做单题 A/B（**中期实验项**）。
+2. **reason 提示词瘦身**：向"极短、与安全解耦"靠拢，砍冗余注入段。
+3. **Intent 语义拆分**：航向模板引入 Goal（终止条件）/Step（行动+预期产出事实）两段式——让每个航向自带可验收产出，Decide 类决策质量可测。
+4. **Finding 数据模型**：星图加 Finding 节点类型，作为通用平台的产出层（SRC/审计场景）——不进打分管线。
+5. **Decide 干净上下文纪律**：我们的 reason 每次新起 claude -p 已接近；要补的是**确保 prompt 里不夹带历史对话**，只带图视图。
+
+### 5.4 战略修正
+
+榜首的护城河 = **闭源 Node 重写 + 调用经济学**，不是公开仓库增量。对我们的含义：追赶方向从"复刻他的仓库/加机制"彻底转向**压单位有效推理成本 + 排序经济学**——恰好是 R10（价值排序、GLM 出 explore）已经走的方向。R10 复盘时新增量化项：全轮 token 去向分布（CC 税/reason 调用/explore 调用占比），作为是否启动 pi/自控 loop 实验线的判据。
+
+---
+
+## 附：信息源
+
+- 文章：https://mp.weixin.qq.com/s/ZzKF_0MOb0cak9izhHqCUQ （l3yx 公众号，2026-08 前后；文中线索"TCH 后约半年"）
+- oritera 组织仓库列表：https://github.com/orgs/oritera/repositories
+- Cairn main 提交史：https://github.com/oritera/Cairn/commits/main
+- Cairn dev-0.3.0 提交史：https://github.com/oritera/Cairn/commits/dev-0.3.0
+- Cairn 分支列表：https://github.com/oritera/Cairn/branches
+- l3yx 个人仓库：https://github.com/l3yx?tab=repositories
+- l3yx 博客：https://l3yx.github.io/
+- 背景关联（此前研究）：Tsecbench 榜单考证 Cairn_X=作者本人；与上游对比 288 文件分歧见 docs/与上游Cairn对比.md
