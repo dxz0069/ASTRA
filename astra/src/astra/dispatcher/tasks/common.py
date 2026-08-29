@@ -30,7 +30,6 @@ _last_snapshot_cleanup_at = [0.0]
 LOG = logging.getLogger(__name__)
 
 FAILURE_HINT_PREFIX = "[失败学习] "
-REVIEW_HINT_PREFIX = "[审查否决] "
 
 # 星记去重：新发现与既有星记描述的 Jaccard 词集合相似度达到该阈值视为重复（防重复侦察）。
 # token 粒度：ASCII 词 + 连续 CJK 段（中文描述按短语段匹配，兼顾中英文混排）。
@@ -65,70 +64,6 @@ def find_duplicate_fact(project: ProjectDetail, description: str, *, exclude_ids
         if len(target & other) / len(union) >= FACT_SIMILARITY_THRESHOLD:
             return fact
     return None
-
-
-def review_graph_summary(project: ProjectDetail, *, max_facts: int = 15, max_intents: int = 8) -> str:
-    """双星审查的结构化战况卡 + 主题索引（PentestGPT v2 State Store 思想的读侧实现）。
-
-    取代按 id 顺序截断的条目清单：主机/端口/凭据/会话正则聚合常驻（渗透 agent
-    丢上下文最常见的具体损失是"忘了那个凭据在哪个 fact 里"），航向按主题一行一条；
-    结构化抽取为空时回退到逐条摘要（新旧图都可用）。
-    """
-    import re as _re
-
-    lines = ["## 战况卡（结构化，完整快照见上方文件路径）"]
-    goal = next((f.description for f in project.facts if f.id == "goal"), "")
-    if goal:
-        lines.append(f"- Goal: {goal[:200]}")
-
-    facts = [f for f in project.facts if f.id not in ("origin", "goal")]
-    blob = "\n".join(f.description for f in facts)
-    hosts = sorted(set(_re.findall(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", blob)))[:12]
-    ports = sorted(
-        set(_re.findall(r"\b(?:\d{1,3}\.){3}\d{1,3}:(\d{1,5})\b", blob))
-        | set(_re.findall(r"端口[：: ]+(\d{1,5})", blob))
-    )[:16]
-    if hosts:
-        lines.append(f"- 主机（{len(hosts)}）: {', '.join(hosts)}")
-    if ports:
-        lines.append(f"- 端口（{len(ports)}）: {', '.join(ports)}")
-    cred_hits = []
-    for f in facts:
-        if _re.search(r"(?i)password|passwd|凭据|密码|私钥|token|api[_-]?key|session[_-]?id|ak/sk", f.description) and not f.challenged:
-            cred_hits.append(f"{f.id}: {' '.join(f.description.split())[:90]}")
-    if cred_hits:
-        lines.append("- 凭据/会话（钉住级，勿丢）:")
-        lines.extend(f"  - {c}" for c in cred_hits[:8])
-
-    intents = [i for i in (getattr(project, "intents", None) or []) if i.to is None]
-    if intents:
-        lines.append(f"- 未决航向主题索引（{len(intents)}，按此索引按需读全文）:")
-        for intent in intents[:max_intents]:
-            desc = " ".join(intent.description.split())[:110]
-            marks = []
-            if getattr(intent, "challenged", False):
-                marks.append("被质询")
-            heartbeat = getattr(intent, "last_heartbeat_at", None)
-            if heartbeat:
-                marks.append(f"心跳 {heartbeat[11:16] if len(heartbeat) > 16 else heartbeat}")
-            suffix = f"（{'，'.join(marks)}）" if marks else ""
-            lines.append(f"  - {intent.id}: {desc}{suffix}")
-    summaries = [f for f in facts if f.kind == "summary"]
-    if summaries:
-        lines.append(f"- 摘要星记: {len(summaries)} 条（{', '.join(f.id for f in summaries[:5])}）")
-
-    # 结构化抽取为空（早期图/纯文本题）→ 回退逐条摘要，保证总有可用上下文
-    if len(lines) <= 2:
-        lines.append("- Facts:")
-        for fact in facts[:max_facts]:
-            desc = " ".join(fact.description.split())[:120]
-            lines.append(f"  - {fact.id}: {desc}")
-    hints = getattr(project, "hints", None) or []
-    if hints:
-        previews = ", ".join(" ".join(h.content.split())[:40] for h in hints[:3])
-        suffix = "..." if len(hints) > 3 else ""
-        lines.append(f"- Hints: {len(hints)} 条（{previews}{suffix}）")
-    return "\n".join(lines)
 
 
 def record_failure_hint(
@@ -329,34 +264,34 @@ def run_worker_process(
             cancellation.attach_process(None)
 
 
-def project_allows_conclude_fallback(client: ASTRAClient, project_id: str, *, worker_name: str, intent_id: str) -> bool:
+def project_allows_conclude_fallback(client: ASTRAClient, project_id: str, *, worker_name: str, step_id: str) -> bool:
     project = client.get_project(project_id)
     if project.project.status == "active":
         return True
     LOG.info(
-        "skip conclude fallback because project is no longer active project=%s intent=%s worker=%s status=%s",
+        "skip conclude fallback because project is no longer active project=%s step=%s worker=%s status=%s",
         project_id,
-        intent_id,
+        step_id,
         worker_name,
         project.project.status,
     )
     return False
 
 
-def best_effort_release_reason(client: ASTRAClient, project_id: str, worker_name: str, lease_token: str | None = None) -> None:
-    response = client.release_reason(project_id, worker_name, lease_token)
+def best_effort_release_decide(client: ASTRAClient, project_id: str, worker_name: str, lease_token: str | None = None) -> None:
+    response = client.release_decide(project_id, worker_name, lease_token)
     if not response.ok and response.status_code not in (403, 409):
         LOG.warning(
-            "reason release failed project=%s worker=%s status=%s",
+            "decide release failed project=%s worker=%s status=%s",
             project_id,
             worker_name,
             response.status_code,
         )
     elif response.ok:
-        LOG.info("released reason project=%s worker=%s", project_id, worker_name)
+        LOG.info("released decide project=%s worker=%s", project_id, worker_name)
     else:
         LOG.info(
-            "reason release skipped project=%s worker=%s status=%s",
+            "decide release skipped project=%s worker=%s status=%s",
             project_id,
             worker_name,
             response.status_code,
@@ -366,58 +301,50 @@ def best_effort_release_reason(client: ASTRAClient, project_id: str, worker_name
 def write_conclude_result(
     client: ASTRAClient,
     project_id: str,
-    intent_id: str,
+    step_id: str,
     worker_name: str,
     description: str,
     *,
     source: str,
     phase_ms: int,
     total_ms: int | None = None,
-    confidence: str = "medium",
-    evidence: str | None = None,
-    challenged: bool = False,
     kind: str = "regular",
+    finding: str | None = None,
 ) -> str:
     return write_conclude_result_with_fact_id(
         client,
         project_id,
-        intent_id,
+        step_id,
         worker_name,
         description,
         source=source,
         phase_ms=phase_ms,
         total_ms=total_ms,
-        confidence=confidence,
-        evidence=evidence,
-        challenged=challenged,
         kind=kind,
+        finding=finding,
     ).status
 
 
 def write_conclude_result_with_fact_id(
     client: ASTRAClient,
     project_id: str,
-    intent_id: str,
+    step_id: str,
     worker_name: str,
     description: str,
     *,
     source: str,
     phase_ms: int,
     total_ms: int | None = None,
-    confidence: str = "medium",
-    evidence: str | None = None,
-    challenged: bool = False,
     kind: str = "regular",
+    finding: str | None = None,
 ) -> ConcludeWriteResult:
     response = client.conclude(
         project_id,
-        intent_id,
+        step_id,
         worker_name,
         description,
-        confidence=confidence,
-        evidence=evidence,
-        challenged=challenged,
         kind=kind,
+        finding=finding,
     )
     if response.ok:
         fact_id: str | None = None
@@ -429,18 +356,18 @@ def write_conclude_result_with_fact_id(
                     fact_id = candidate
         if total_ms is None:
             LOG.info(
-                "intent concluded project=%s intent=%s worker=%s source=%s phase_ms=%s",
+                "step concluded project=%s step=%s worker=%s source=%s phase_ms=%s",
                 project_id,
-                intent_id,
+                step_id,
                 worker_name,
                 source,
                 phase_ms,
             )
         else:
             LOG.info(
-                "intent concluded project=%s intent=%s worker=%s source=%s phase_ms=%s total_ms=%s",
+                "step concluded project=%s step=%s worker=%s source=%s phase_ms=%s total_ms=%s",
                 project_id,
-                intent_id,
+                step_id,
                 worker_name,
                 source,
                 phase_ms,
@@ -449,41 +376,41 @@ def write_conclude_result_with_fact_id(
         return ConcludeWriteResult(status="success", fact_id=fact_id)
     if response.status_code in (403, 404):
         LOG.info(
-            "project became inactive during conclude project=%s intent=%s worker=%s",
+            "project became inactive during conclude project=%s step=%s worker=%s",
             project_id,
-            intent_id,
+            step_id,
             worker_name,
         )
     else:
         LOG.warning(
-            "conclude write failed project=%s intent=%s worker=%s status=%s body=%s",
+            "conclude write failed project=%s step=%s worker=%s status=%s body=%s",
             project_id,
-            intent_id,
+            step_id,
             worker_name,
             response.status_code,
             response.text,
         )
-    best_effort_release(client, project_id, intent_id, worker_name)
+    best_effort_release(client, project_id, step_id, worker_name)
     return ConcludeWriteResult(status="failed", fact_id=None)
 
 
-def best_effort_release(client: ASTRAClient, project_id: str, intent_id: str, worker_name: str) -> None:
-    response = client.release(project_id, intent_id, worker_name)
+def best_effort_release(client: ASTRAClient, project_id: str, step_id: str, worker_name: str) -> None:
+    response = client.release(project_id, step_id, worker_name)
     if not response.ok and response.status_code not in (403, 409):
         LOG.warning(
-            "release failed project=%s intent=%s worker=%s status=%s",
+            "release failed project=%s step=%s worker=%s status=%s",
             project_id,
-            intent_id,
+            step_id,
             worker_name,
             response.status_code,
         )
     elif response.ok:
-        LOG.info("released intent project=%s intent=%s worker=%s", project_id, intent_id, worker_name)
+        LOG.info("released step project=%s step=%s worker=%s", project_id, step_id, worker_name)
     else:
         LOG.info(
-            "release skipped project=%s intent=%s worker=%s status=%s",
+            "release skipped project=%s step=%s worker=%s status=%s",
             project_id,
-            intent_id,
+            step_id,
             worker_name,
             response.status_code,
         )

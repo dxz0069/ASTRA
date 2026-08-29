@@ -10,7 +10,7 @@ from pydantic import TypeAdapter
 import requests
 from requests.adapters import HTTPAdapter
 
-from astra.server.models import Intent, ProjectDetail, ProjectSummary, Settings
+from astra.server.models import ProjectDetail, ProjectSummary, Settings, Step
 
 LOG = logging.getLogger(__name__)
 
@@ -41,8 +41,7 @@ class ASTRAClient:
         self._local = threading.local()
         self._sessions: dict[int, requests.Session] = {}
         self._sessions_lock = threading.Lock()
-        # 审计修复：服务端启用 ASTRA_AUTH_TOKEN 时客户端自动带 Bearer 头
-        # （原客户端从不发送——认证一旦真正生效会把自家 dispatcher 全部 401）
+        # 服务端启用 ASTRA_AUTH_TOKEN 时客户端自动带 Bearer 头
         self._auth_headers: dict[str, str] = {}
         _token = os.environ.get("ASTRA_AUTH_TOKEN", "")
         if _token:
@@ -70,10 +69,10 @@ class ASTRAClient:
         response.raise_for_status()
         return Settings.model_validate(response.json())
 
-    def update_settings(self, intent_timeout: int, reason_timeout: int) -> Settings:
+    def update_settings(self, step_timeout: int, decide_timeout: int) -> Settings:
         response = self._session().put(
             self._url("/settings"),
-            json={"intent_timeout": intent_timeout, "reason_timeout": reason_timeout},
+            json={"step_timeout": step_timeout, "decide_timeout": decide_timeout},
             timeout=self._timeout,
         )
         response.raise_for_status()
@@ -88,62 +87,59 @@ class ASTRAClient:
         response.raise_for_status()
         return response.text
 
-    def heartbeat(self, project_id: str, intent_id: str, worker: str) -> ApiResult:
+    def heartbeat(self, project_id: str, step_id: str, worker: str) -> ApiResult:
         return self._request_json(
             "POST",
-            f"/projects/{project_id}/intents/{intent_id}/heartbeat",
+            f"/projects/{project_id}/steps/{step_id}/heartbeat",
             json={"worker": worker},
         )
 
-    def claim_reason(self, project_id: str, worker: str, trigger: str) -> ApiResult:
+    def claim_decide(self, project_id: str, worker: str, trigger: str) -> ApiResult:
         return self._request_json(
             "POST",
-            f"/projects/{project_id}/reason/claim",
+            f"/projects/{project_id}/decide/claim",
             json={"worker": worker, "trigger": trigger},
         )
 
-    def reason_heartbeat(self, project_id: str, worker: str, lease_token: str | None = None) -> ApiResult:
+    def decide_heartbeat(self, project_id: str, worker: str, lease_token: str | None = None) -> ApiResult:
         return self._request_json(
             "POST",
-            f"/projects/{project_id}/reason/heartbeat",
+            f"/projects/{project_id}/decide/heartbeat",
             json={"worker": worker, "lease_token": lease_token},
         )
 
-    def release_reason(self, project_id: str, worker: str, lease_token: str | None = None) -> ApiResult:
+    def release_decide(self, project_id: str, worker: str, lease_token: str | None = None) -> ApiResult:
         return self._request_json(
             "POST",
-            f"/projects/{project_id}/reason/release",
+            f"/projects/{project_id}/decide/release",
             json={"worker": worker, "lease_token": lease_token},
         )
 
-    def release(self, project_id: str, intent_id: str, worker: str) -> ApiResult:
+    def release(self, project_id: str, step_id: str, worker: str) -> ApiResult:
         return self._request_json(
             "POST",
-            f"/projects/{project_id}/intents/{intent_id}/release",
+            f"/projects/{project_id}/steps/{step_id}/release",
             json={"worker": worker},
         )
 
     def conclude(
         self,
         project_id: str,
-        intent_id: str,
+        step_id: str,
         worker: str,
         description: str,
-        confidence: str = "medium",
-        evidence: str | None = None,
-        challenged: bool = False,
         kind: str = "regular",
+        finding: str | None = None,
     ) -> ApiResult:
-        body: dict[str, Any] = {"worker": worker, "description": description, "confidence": confidence}
-        if evidence:
-            body["evidence"] = evidence
-        if challenged:
-            body["challenged"] = True
+        """Execute 收束（submit_fact）：写事实+步骤落点，可携沿途 Finding。"""
+        body: dict[str, Any] = {"worker": worker, "description": description}
         if kind != "regular":
             body["kind"] = kind
+        if finding:
+            body["finding"] = finding
         return self._request_json(
             "POST",
-            f"/projects/{project_id}/intents/{intent_id}/conclude",
+            f"/projects/{project_id}/steps/{step_id}/conclude",
             json=body,
         )
 
@@ -154,18 +150,18 @@ class ASTRAClient:
             json={"description": description, "kind": kind, "creator": creator},
         )
 
+    def create_finding(self, project_id: str, description: str) -> ApiResult:
+        return self._request_json(
+            "POST",
+            f"/projects/{project_id}/findings",
+            json={"description": description},
+        )
+
     def create_hint(self, project_id: str, content: str, creator: str = "human") -> ApiResult:
         return self._request_json(
             "POST",
             f"/projects/{project_id}/hints",
             json={"content": content, "creator": creator},
-        )
-
-    def archive_facts(self, project_id: str, fact_ids: list[str]) -> ApiResult:
-        return self._request_json(
-            "POST",
-            f"/projects/{project_id}/facts/archive",
-            json={"fact_ids": fact_ids},
         )
 
     def complete(self, project_id: str, from_ids: list[str], description: str, worker: str, lease_token: str | None = None) -> ApiResult:
@@ -175,11 +171,42 @@ class ASTRAClient:
             json={"from": from_ids, "description": description, "worker": worker, "lease_token": lease_token},
         )
 
-    def create_intent(self, project_id: str, from_ids: list[str], description: str, creator: str) -> ApiResult:
+    def create_step(
+        self,
+        project_id: str,
+        from_ids: list[str],
+        description: str,
+        creator: str,
+        expect: str | None = None,
+    ) -> ApiResult:
+        body: dict[str, Any] = {"from": from_ids, "description": description, "creator": creator, "worker": None}
+        if expect:
+            body["expect"] = expect
         return self._request_json(
             "POST",
-            f"/projects/{project_id}/intents",
-            json={"from": from_ids, "description": description, "creator": creator, "worker": None},
+            f"/projects/{project_id}/steps",
+            json=body,
+        )
+
+    def close_step(self, project_id: str, step_id: str, reason: str) -> ApiResult:
+        return self._request_json(
+            "POST",
+            f"/projects/{project_id}/steps/{step_id}/close",
+            json={"reason": reason},
+        )
+
+    def create_subgoal(self, project_id: str, description: str) -> ApiResult:
+        return self._request_json(
+            "POST",
+            f"/projects/{project_id}/subgoals",
+            json={"description": description},
+        )
+
+    def update_subgoal_status(self, project_id: str, subgoal_id: str, status: str) -> ApiResult:
+        return self._request_json(
+            "POST",
+            f"/projects/{project_id}/subgoals/{subgoal_id}/status",
+            json={"status": status},
         )
 
     def _request_json(self, method: str, path: str, json: dict[str, Any]) -> ApiResult:
@@ -198,8 +225,8 @@ class ASTRAClient:
             try:
                 data = response.json()
             except (ValueError, UnicodeDecodeError) as exc:
-                # D3 修复：content-type 声称 json 但 body 非法（网关错误页/截断响应）
-                # ——裸抛会杀死心跳线程导致租约静默失效→同 intent 双跑
+                # content-type 声称 json 但 body 非法（网关错误页/截断响应）
+                # ——裸抛会杀死心跳线程导致租约静默失效→同 step 双跑
                 LOG.warning("response json parse failed method=%s path=%s error=%s", method, path, exc)
                 return ApiResult(status_code=response.status_code, text=response.text)
         return ApiResult(status_code=response.status_code, data=data, text=response.text)
@@ -224,7 +251,7 @@ class ASTRAClient:
         return session
 
     def _remove_session(self) -> None:
-        """按当前线程 ident 注销并关闭其 Session（P1-2：修复 _sessions 只增不减泄漏）。
+        """按当前线程 ident 注销并关闭其 Session。
 
         HeartbeatLease 每个任务新建心跳线程并在其中调用 client 接口（_session()
         会在线程 ident 下注册 Session），线程结束后 Session 残留在 _sessions 里；

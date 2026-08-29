@@ -194,34 +194,28 @@ def trace(db_path: str, project: str):
         proj = rows[0]
         click.echo(f"\n项目：{proj['title']}（{proj['id']}，{proj['status']}，建于 {proj['created_at']}）")
 
-        intents = conn.execute(
-            "SELECT id, description, worker, created_at, concluded_at, to_fact_id, challenged "
-            "FROM intents WHERE project_id = ? ORDER BY created_at",
+        steps = conn.execute(
+            "SELECT id, description, worker, created_at, concluded_at, to_fact_id, status "
+            "FROM steps WHERE project_id = ? ORDER BY created_at",
             (proj["id"],),
         ).fetchall()
         facts = conn.execute(
-            "SELECT id, description, kind, confidence, challenged "
+            "SELECT id, description, kind "
             "FROM facts WHERE project_id = ? ORDER BY rowid",
             (proj["id"],),
         ).fetchall()
 
-        click.echo(f"\n决策链（航向 {len(intents)} 条）——AI 为什么走这条路：")
-        for it in intents:
-            state = "已归航→" + (it["to_fact_id"] or "?") if it["concluded_at"] else "未归航"
-            mark = " 〖被质询〗" if it["challenged"] else ""
+        click.echo(f"\n决策链（步骤 {len(steps)} 条）——AI 为什么走这条路：")
+        for it in steps:
+            state = "已收束→" + (it["to_fact_id"] or "?") if it["concluded_at"] else ("已关闭" if it["status"] == "closed" else "未收束")
             desc = (it["description"] or "").replace("\n", " ")[:120]
-            click.echo(f"  [{it['created_at']}] {it['worker'] or '?'}: {desc} → {state}{mark}")
+            click.echo(f"  [{it['created_at']}] {it['worker'] or '?'}: {desc} → {state}")
 
-        click.echo(f"\n星记序列（事实 {len(facts)} 条，按写入序）：")
+        click.echo(f"\n事实序列（{len(facts)} 条，按写入序）：")
         for f in facts:
-            marks = []
-            if f["kind"] == "summary":
-                marks.append("摘要")
-            if f["challenged"]:
-                marks.append("被质询")
-            tag = f"（{'、'.join(marks)}）" if marks else ""
+            tag = "（负结果）" if f["kind"] == "negative" else ""
             desc = (f["description"] or "").replace("\n", " ")[:120]
-            click.echo(f"  {f['id']} [{f['confidence']}]{tag} {desc}")
+            click.echo(f"  {f['id']}{tag} {desc}")
     finally:
         conn.close()
 
@@ -237,7 +231,7 @@ def trace(db_path: str, project: str):
 @click.argument("project", required=False, default="")
 @click.option("--out", type=click.Path(path_type=Path), default=Path("astra-star-map.html"), show_default=True, help="输出 HTML 路径")
 def map_(db_path: str, project: str, out: Path):
-    """星图可视化：生成单文件 HTML（内联 SVG，无外部依赖）——事实为星、航向为轨迹、质询红标。"""
+    """星图可视化：生成单文件 HTML（内联 SVG，无外部依赖）——事实为星、步骤为轨迹。"""
     import html as _html
     import sqlite3
 
@@ -259,13 +253,13 @@ def map_(db_path: str, project: str, out: Path):
             click.echo("未匹配到项目")
             return
         facts = conn.execute(
-            "SELECT id, description, kind, confidence, challenged FROM facts "
+            "SELECT id, description, kind FROM facts "
             "WHERE project_id = ? ORDER BY rowid",
             (proj["id"],),
         ).fetchall()
-        intents = conn.execute(
-            "SELECT id, description, worker, to_fact_id, concluded_at, challenged "
-            "FROM intents WHERE project_id = ? ORDER BY created_at",
+        steps = conn.execute(
+            "SELECT id, description, worker, to_fact_id, concluded_at, status "
+            "FROM steps WHERE project_id = ? ORDER BY created_at",
             (proj["id"],),
         ).fetchall()
 
@@ -281,27 +275,25 @@ def map_(db_path: str, project: str, out: Path):
             x = gap_x + c * (node_w + gap_x)
             y = 160 + r * (node_h + gap_y)
             pos[f["id"]] = (x + node_w // 2, y)
-            color = "#f59e0b" if f["id"] == "goal" else ("#94a3b8" if f["kind"] == "summary" else "#38bdf8")
-            stroke = "#ef4444" if f["challenged"] else "#1e293b"
-            dash = ' stroke-dasharray="4,3"' if f["kind"] == "summary" else ""
+            color = "#f59e0b" if f["id"] == "goal" else ("#94a3b8" if f["kind"] == "negative" else "#38bdf8")
+            stroke = "#1e293b"
             desc = _html.escape((f["description"] or "")[:80])
             cells.append(
                 f'<g class="node"><title>{_html.escape(f["description"] or "")}</title>'
                 f'<rect x="{x}" y="{y}" width="{node_w}" height="{node_h}" rx="8" fill="{color}22" '
-                f'stroke="{stroke}" stroke-width="{2 if f["challenged"] else 1}"{dash}/>'
+                f'stroke="{stroke}" stroke-width="1"/>'
                 f'<text x="{x + 8}" y="{y + 20}" font-size="12" font-weight="bold" fill="#0f172a">{f["id"]}</text>'
                 f'<text x="{x + 8}" y="{y + 38}" font-size="10" fill="#334155">{desc}</text>'
-                f'<text x="{x + 8}" y="{y + 56}" font-size="9" fill="#64748b">{f["kind"]}/{f["confidence"]}'
-                + (' <tspan fill="#ef4444">质询</tspan>' if f["challenged"] else "")
+                f'<text x="{x + 8}" y="{y + 56}" font-size="9" fill="#64748b">{f["kind"]}'
                 + "</text></g>"
             )
         links = []
-        for it in intents:
+        for it in steps:
             if it["to_fact_id"] and it["to_fact_id"] in pos:
                 tx, ty = pos[it["to_fact_id"]]
-                # 从星记上方弧线进入（简化：全部从画布顶部的航向泳道出发）
+                # 从事实上方弧线进入（简化：全部从画布顶部的步骤泳道出发）
                 lane_y = 110
-                color = "#ef4444" if it["challenged"] else "#22c55e" if it["concluded_at"] else "#a78bfa"
+                color = "#22c55e" if it["concluded_at"] else "#a78bfa"
                 links.append(
                     f'<path d="M {width // 2} {lane_y} Q {tx} {ty - 80} {tx} {ty}" fill="none" '
                     f'stroke="{color}" stroke-width="1.5" stroke-opacity="0.6">'
@@ -315,12 +307,12 @@ svg{{background:#1e293b;border-radius:12px}} text{{font-family:system-ui}}
 .node:hover rect{{stroke-width:3;cursor:pointer}}
 .legend span{{margin-right:16px;font-size:12px}}</style></head><body>
 <h1>ASTRA 星图 · {_html.escape(proj['title'])}</h1>
-<div class="meta">{proj['id']} ｜ {proj['status']} ｜ 建于 {proj['created_at']} ｜ 星记 {len(facts)} 条 ｜ 航向 {len(intents)} 条</div>
-<div class="legend"><span>🟦 星记</span><span>🟨 目标</span><span>⬜ 摘要(Epitome)</span><span>🟥 边框=被质询</span><span>绿线=已归航航向</span><span>紫线=未归航</span><span>红线=被质询航向</span></div>
+<div class="meta">{proj['id']} ｜ {proj['status']} ｜ 建于 {proj['created_at']} ｜ 事实 {len(facts)} 条 ｜ 步骤 {len(steps)} 条</div>
+<div class="legend"><span>🟦 事实</span><span>🟨 目标</span><span>⬜ 负结果</span><span>绿线=已收束步骤</span><span>紫线=未收束</span></div>
 <svg width="{width}" height="{height}">{''.join(links)}{''.join(cells)}</svg>
 </body></html>"""
         out.write_text(doc, encoding="utf-8")
-        click.echo(f"星图已生成：{out.resolve()}（星记 {len(facts)}，航向 {len(intents)}）")
+        click.echo(f"星图已生成：{out.resolve()}（事实 {len(facts)}，步骤 {len(steps)}）")
     finally:
         conn.close()
 

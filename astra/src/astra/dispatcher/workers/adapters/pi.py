@@ -14,11 +14,6 @@ from astra.dispatcher.workers.base import DriverResult, WorkerDriver
 class PiDriver(WorkerDriver):
     type_name = "pi"
 
-    def supports_review(self) -> bool:
-        # 实测 pi 在审查场景偶发提前退出（输出停在 message_start 后 rc=0 退出），
-        # 审查对输出契约稳定性要求高 → 声明不支持，由调度层回退到 claudecode worker。
-        return False
-
     def build_healthcheck(self, worker: WorkerConfig) -> list[str]:
         env = worker.env
         return self._wrap_with_models(

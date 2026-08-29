@@ -27,8 +27,8 @@ def format_fact_ids(fact_ids: list[str]) -> str:
     return format_json_block(fact_ids)
 
 
-def format_open_intents(intents: list[dict[str, Any]]) -> str:
-    return format_json_block(intents)
+def format_open_steps(steps: list[dict[str, Any]]) -> str:
+    return format_json_block(steps)
 
 
 def format_hints(hints: list[dict[str, Any]]) -> str:

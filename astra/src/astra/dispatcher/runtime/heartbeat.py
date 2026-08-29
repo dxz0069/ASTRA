@@ -44,24 +44,24 @@ class HeartbeatLease:
         self._thread = threading.Thread(target=self._run, daemon=True)
 
     @classmethod
-    def for_intent(
+    def for_step(
         cls,
         client: ASTRAClient,
         project_id: str,
-        intent_id: str,
+        step_id: str,
         worker_name: str,
         interval: int,
     ) -> "HeartbeatLease":
         return cls(
-            heartbeat=lambda: client.heartbeat(project_id, intent_id, worker_name),
-            scope=f"project={project_id} intent={intent_id}",
+            heartbeat=lambda: client.heartbeat(project_id, step_id, worker_name),
+            scope=f"project={project_id} step={step_id}",
             worker_name=worker_name,
             interval=interval,
             client=client,
         )
 
     @classmethod
-    def for_reason(
+    def for_decide(
         cls,
         client: ASTRAClient,
         project_id: str,
@@ -70,8 +70,8 @@ class HeartbeatLease:
         lease_token: str | None = None,
     ) -> "HeartbeatLease":
         return cls(
-            heartbeat=lambda: client.reason_heartbeat(project_id, worker_name, lease_token),
-            scope=f"project={project_id} reason",
+            heartbeat=lambda: client.decide_heartbeat(project_id, worker_name, lease_token),
+            scope=f"project={project_id} decide",
             worker_name=worker_name,
             interval=interval,
             client=client,
