@@ -348,15 +348,20 @@ def test_run_benchmark_progress_file_skips_started_on_restart(tmp_path) -> None:
     results1 = run_benchmark(client1, factory, flag_poll_seconds=0, progress_file=str(progress))
     assert client1.started == ["p001", "p002"]
     data = json.loads(progress.read_text(encoding="utf-8"))
-    assert data["p001"] == "done"
-    assert data["p002"] == "done"
+    # v2 模式：状态 + 战果同存（崩溃重启后报告不丢分）
+    assert data["p001"]["state"] == "done"
+    assert data["p001"]["flags"] == 1
+    assert data["p001"]["awarded"] == 100
+    assert data["p002"]["state"] == "done"
 
-    # 第二轮（模拟重启）：进度文件自动跳过，不再 start
+    # 第二轮（模拟重启）：进度文件自动跳过，不再 start；已解题历史战果回填报告
     client2 = FakeClient(challenges, flags=flags)
     results2 = run_benchmark(client2, factory, flag_poll_seconds=0, progress_file=str(progress))
-    assert client2.started == []
-    assert all(r.started is False for r in results2)
-    assert results2[0].flags_found == []  # 未跑故未提交
+    assert client2.started == []  # 本会话未重跑（不重复 start）
+    # 历史战果回填：报告含上一会话战果；started=True 是诚实语义（上会话确实开跑过）
+    assert results2[0].flags_correct == 1
+    assert results2[0].awarded == 100
+    assert results2[0].started is True
 
     # skip_codes 与 progress 并存：skip_codes 仍生效
     client3 = FakeClient(challenges, flags=flags)
