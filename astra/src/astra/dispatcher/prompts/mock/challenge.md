@@ -1,4 +1,0 @@
-{
-  "phase": "challenge",
-  "proposal": {proposal}
-}
