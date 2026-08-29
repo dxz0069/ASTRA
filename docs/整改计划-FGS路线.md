@@ -125,3 +125,4 @@
 - **第九轮（本提交）**：长跑泄漏——Windows prompt @file 每任务一文件从不清理（已加写前 1h 清理）；高频压力实证——200 并发混合负载（读/认领/finding/恶意超长）零 5xx、findings 计数守恒 50/50、原子认领不变量保持。
 - **第十轮（c380c36）**：runner 数据操作深查——ProgressStore 损坏路径根治（tmp 回退补非 dict 校验[曾启动即崩]+主文件形状损坏也回退+归一化）；give-up 不再覆盖 close_failed（清道夫补关失联）；进度文件 v2 战果模式（state+flags+awarded，v1 兼容，崩溃重启报告不丢分）；+9 回归（损坏矩阵/并发写 20×25/战果守恒端到端/图重置回访新项目）。
 - **第十一轮（b823d29）**：前端交互+pi 健壮性——全部写操作 actionBusy 防抖（双击重复步骤/指引）+空值前端校验；删除项目清画布残留；品牌栏/图例旧术语清零（双星决策/已收束）；**pi traversal 防线修复（resolve 先折叠 .. 使旧检查成死代码——E:/a/../../escape 直穿）**；pi CLI 缺失 fail-fast 带安装指引；models.json 写失败明确报错；+11 回归（**前端静态一致性三件套：绑定一致性/命名回归锁/防抖锚点**——CI 无浏览器下的可持续回归网）。
+- **第十二轮（8114cee）**：任务层异常交叠——**D2 复活修复**（decide 写图前租约复查：complete/每笔 create_step/close 前，长跑 900s 过期→中止写图，防与重派 decide 并发双写图；v0.2 重写时丢失了旧修复）；引擎日志句柄回收（watchdog 每次重启 2 个新句柄无限累积 → _popen 有界 6 + shutdown 全回收）；execute 超时×lease 交叠审计确认（conclude fallback 前有 lease.failure 检查、流式抢救不需租约、被抢步骤 409 由原子守卫兜底——语义闭合）；+3 回归。
