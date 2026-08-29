@@ -147,47 +147,98 @@ class AstraEngine(Protocol):
 
 
 class ProgressStore:
-    """断点续跑进度存储：{题码: started|done} 的线程安全 JSON 文件。
+    """断点续跑进度存储：线程安全 JSON 文件，v2 模式兼带每题战果。
+
+    模式（向后兼容）：
+    - v1：{题码: "started"|"done"|"close_failed"}
+    - v2：{题码: {"state": ..., "flags": int, "awarded": int}}——崩溃重启后
+      报告不再把已解题记 0 分（进度文件是唯一跨进程战果载体）。
 
     每题 start 成功后标记 started，关题后标记 done；重启 runner 时用同一
-    --progress-file 自动跳过已尝试的题（重构备忘候选：runner 进度文件断点续跑）。
+    --progress-file 自动跳过已尝试的题。
     """
 
     def __init__(self, path: Path) -> None:
         self.path = path
         self._lock = threading.Lock()
-        self._data: dict[str, str] = {}
+        self._data: dict[str, dict] = {}
+
+    @staticmethod
+    def _normalize_entry(value) -> dict:
+        """单条目归一化：v1 字符串 → {"state": s}；非法形状 → 空（不崩、不丢整库）。"""
+        if isinstance(value, str):
+            return {"state": value}
+        if isinstance(value, dict):
+            entry = dict(value)
+            entry["state"] = str(entry.get("state", ""))
+            for key in ("flags", "awarded"):
+                try:
+                    entry[key] = int(entry.get(key) or 0)
+                except (TypeError, ValueError):
+                    entry[key] = 0
+            return entry
+        return {}
+
+    @classmethod
+    def _try_load_file(cls, path: Path) -> dict[str, dict] | None:
+        """读单个进度文件并归一化；损坏/非 dict 返回 None（由调用方决定回退）。"""
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+            return None
+        if not isinstance(loaded, dict):
+            return None  # 合法 JSON 但形状损坏——不是可用进度
+        return {str(k): cls._normalize_entry(v) for k, v in loaded.items()}
 
     @classmethod
     def load(cls, path: str | None) -> "ProgressStore | None":
         if not path:
             return None
         store = cls(Path(path))
-        if store.path.exists():
-            try:
-                loaded = json.loads(store.path.read_text(encoding="utf-8"))
-                if isinstance(loaded, dict):
-                    store._data = {str(k): str(v) for k, v in loaded.items()}
-            except (json.JSONDecodeError, OSError):
-                # D5：主文件损坏时尝试 .tmp 回退（可能是上次崩溃前完整的写入）
-                try:
-                    store._data = json.loads(
-                        store.path.with_name(store.path.name + ".tmp").read_text(encoding="utf-8")
-                    )
-                except (OSError, json.JSONDecodeError, AttributeError):
-                    store._data = {}  # 损坏的进度文件按空处理，不阻断
+        # D5：主文件优先，损坏（异常或非 dict）时回退 .tmp（上次崩溃前完整的写入），
+        # 再损坏按空处理——三条路径都不阻断启动（审计第十轮：tmp 非 dict 曾致启动崩）
+        data = cls._try_load_file(store.path)
+        if data is None:
+            data = cls._try_load_file(store.path.with_name(store.path.name + ".tmp"))
+        store._data = data or {}
         return store
+
+    def _state_of(self, code: str) -> str:
+        entry = self._data.get(code) or {}
+        return str(entry.get("state", ""))
+
+    def state_of(self, code: str) -> str:
+        """线程安全读取某题当前状态（空串=未记录）。"""
+        with self._lock:
+            return self._state_of(code)
+
+    def score_of(self, code: str) -> tuple[int, int]:
+        """线程安全读取某题历史战果 (flags_correct, awarded)——重启报告回填用。"""
+        with self._lock:
+            entry = self._data.get(code) or {}
+            return int(entry.get("flags", 0) or 0), int(entry.get("awarded", 0) or 0)
 
     def skipped_codes(self) -> set[str]:
         # 跳过 done / close_failed：已完整跑过或关题泄漏需人工；started 不跳过——
         # 崩溃重启后重新 start（平台幂等返回同地址）继续解题，避免放弃已启动的题目。
         # B3：读路径持锁（防 worker 并发 mark 时 dict 迭代 RuntimeError）
         with self._lock:
-            return {code for code, state in self._data.items() if state in ("done", "close_failed")}
+            return {code for code, entry in self._data.items() if entry.get("state") in ("done", "close_failed")}
 
-    def mark(self, code: str, state: str) -> None:
+    def mark(self, code: str, state: str, *, flags: int | None = None, awarded: int | None = None) -> None:
+        """标记状态（可选携带战果）。已有战果未被显式覆盖时保留（增量关题场景）。"""
         with self._lock:
-            self._data[code] = state
+            entry = dict(self._data.get(code) or {})
+            entry["state"] = state
+            if flags is not None:
+                entry["flags"] = int(flags)
+            elif "flags" not in entry:
+                entry["flags"] = 0
+            if awarded is not None:
+                entry["awarded"] = int(awarded)
+            elif "awarded" not in entry:
+                entry["awarded"] = 0
+            self._data[code] = entry
             try:
                 self.path.parent.mkdir(parents=True, exist_ok=True)
                 tmp = self.path.with_name(self.path.name + ".tmp")
@@ -282,7 +333,17 @@ def run_benchmark(
             results[code] = result
             continue
         if progress is not None and code in progress.skipped_codes():
-            LOG.info("skip challenge by progress file code=%s（断点续跑）", code)
+            # 审计第十轮：回填历史战果——崩溃重启后报告不再把已解题记 0 分
+            prior_flags, prior_awarded = progress.score_of(code)
+            if prior_flags or prior_awarded:
+                result.flags_correct = prior_flags
+                result.awarded = prior_awarded
+                result.flags_found = result.flags_found or [f"flag#{i + 1}" for i in range(prior_flags)]
+                result.started = True
+            LOG.info(
+                "skip challenge by progress file code=%s（断点续跑；历史战果 flags=%s awarded=%s）",
+                code, prior_flags, prior_awarded,
+            )
             results[code] = result
             continue
         queue.append((ch, result))
@@ -435,7 +496,18 @@ def run_benchmark(
                     except Exception:  # noqa: BLE001
                         pass
                     if progress is not None:
-                        progress.mark(result.unique_code, "done")
+                        # 审计第十轮：finally 关题失败已标 close_failed（清道夫负责补关
+                        # 泄漏容器）——此处无条件 done 会抹掉它，补关永久失联
+                        if progress.state_of(result.unique_code) != "close_failed":
+                            progress.mark(
+                                result.unique_code, "done",
+                                flags=result.flags_correct, awarded=result.awarded,
+                            )
+                        else:
+                            LOG.warning(
+                                "give-up keeps close_failed code=%s（容器待清道夫补关，不覆盖）",
+                                result.unique_code,
+                            )
                     return
                 LOG.info("challenge deferred code=%s（%s 分钟无结果，保留进度放回队尾）", result.unique_code, defer_after_seconds / 60)
                 # V10 整图重置（榜首经验：14 题重置后快速收敛）——连续 2 轮 defer
@@ -1103,7 +1175,12 @@ def _run_single_challenge(
                 LOG.error("close_challenge exhausted retries code=%s（平台活跃名额可能泄漏，需人工关闭）", code)
             if progress is not None and not deferred:
                 # 关题失败不标 done：close_failed 保留在进度文件里便于事后排查/补关
-                progress.mark(code, "done" if closed else "close_failed")
+                progress.mark(
+                    code,
+                    "done" if closed else "close_failed",
+                    flags=result.flags_correct,
+                    awarded=result.awarded,
+                )
         engine.stop()
 
 
