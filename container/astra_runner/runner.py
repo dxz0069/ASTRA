@@ -1691,19 +1691,19 @@ def _close_challenge_quiet(client: BenchmarkClient, code: str) -> bool:
 
 
 def _watchdog_stalled() -> bool:
-    """自愈③a：全停检测——活跃题存在，但全部 claudecode worker 会话文件超时无写入。
+    """自愈③a：全停检测——活跃题存在，但全部 pi worker 会话文件超时无写入。
 
-    CC 会话按 worker 隔离（$TMP/astra-claude/<worker>/projects/**/*.jsonl），
+    pi 会话按 worker 隔离（$TMP/astra-pi/<worker>/sessions/**/*.jsonl），
     任一文件新鲜即视为系统在工作；全部陈旧且持续超过阈值才触发（避免把
     "长命令执行中"误判为停摆）。
     """
     import glob as _glob
     import tempfile as _tempfile
 
-    root = os.environ.get("ASTRA_CLAUDE_HOME") or str(Path(_tempfile.gettempdir()) / "astra-claude")
+    root = os.environ.get("ASTRA_PI_HOME") or str(Path(_tempfile.gettempdir()) / "astra-pi")
     try:
         newest = 0.0
-        for f in _glob.glob(str(Path(root) / "*" / "projects" / "**" / "*.jsonl"), recursive=True):
+        for f in _glob.glob(str(Path(root) / "*" / "sessions" / "**" / "*.jsonl"), recursive=True):
             newest = max(newest, os.path.getmtime(f))
         if newest <= 0:
             return False  # 找不到会话（异常布局）不误杀
@@ -1813,12 +1813,12 @@ def _self_heal_restart(engine_factory=None) -> None:
         LOG.info("watchdog: engine daemon shutdown complete before execv")
     except Exception as exc:  # noqa: BLE001
         LOG.warning("watchdog: daemon shutdown failed: %s（仍执行 execv）", exc)
-    # 再杀非 daemon 拉起的 claude worker（_popen 未设进程组，用 pkill 兜底；
-    # 匹配 --dangerously-skip-permissions 而非裸 "claude"，避免误杀无关进程）
+    # 再杀非 daemon 拉起的 pi worker（_popen 未设进程组，用 pkill 兜底；
+    # 匹配 pi-coding-agent 包路径而非裸 "pi"，避免误杀无关进程）
     if sys.platform != "win32":
         try:
             subprocess.run(
-                ["pkill", "-TERM", "-f", "dangerously-skip-permissions"],
+                ["pkill", "-TERM", "-f", "pi-coding-agent"],
                 capture_output=True, timeout=10,
             )
         except Exception:  # noqa: BLE001
@@ -1967,7 +1967,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--once", action="store_true", help="跑一轮后退出（默认循环直到任务结束）")
     parser.add_argument("--engine", default="local", choices=["local"], help="ASTRA 引擎模式（当前仅 local）")
     parser.add_argument("--watchdog", action="store_true", help="同时拉起模型健康 watchdog（403/配额秒级告警，2026-08 实测教训）")
-    parser.add_argument("--check", action="store_true", help="环境自检后退出（平台 API 连通 / claude CLI / 舰队 env / 引擎可启动）")
+    parser.add_argument("--check", action="store_true", help="环境自检后退出（平台 API 连通 / pi CLI / 舰队 env / 引擎可启动）")
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -2055,7 +2055,7 @@ def main(argv: list[str] | None = None) -> int:
 
     total_awarded = sum(r.awarded for r in results)
     total_flags = sum(r.flags_correct for r in results)
-    usage = collect_claude_usage()
+    usage = collect_worker_usage()
     LOG.info("=== astra-runner 报告 ===")
     report: dict[str, Any] = {
         "challenges": [
@@ -2121,35 +2121,37 @@ def _run_environment_check(token: str, base_url: str) -> int:
         LOG.error("[FAIL] 平台 API 不可达 error=%s（检查 BENCHMARK_BASE_URL / 网络 / VPN）", exc)
         ok = False
 
-    # 2. 模型 CLI / 舰队配置（claudecode——2026-08-28 起唯一路径，dsh 已移除）
-    if os.environ.get("ASTRA_WORKER_TYPE", "claudecode") != "claudecode":
-        LOG.error("[FAIL] ASTRA_WORKER_TYPE=%s 不受支持（dsh 已于 2026-08-28 移除，仅 claudecode）",
+    # 2. 模型 CLI / 舰队配置（cairn-y：pi 唯一执行底座）
+    if os.environ.get("ASTRA_WORKER_TYPE", "pi") != "pi":
+        LOG.error("[FAIL] ASTRA_WORKER_TYPE=%s 不受支持（cairn-y 起仅 pi）",
                   os.environ.get("ASTRA_WORKER_TYPE"))
         ok = False
-    claude = shutil.which("claude")
-    if claude:
-        LOG.info("[PASS] claude CLI 位于 %s", claude)
+    pi = shutil.which("pi")
+    if pi:
+        LOG.info("[PASS] pi CLI 位于 %s", pi)
     else:
-        LOG.error("[FAIL] 未找到 claude CLI（npm install -g @anthropic-ai/claude-code）")
+        LOG.error("[FAIL] 未找到 pi CLI（npm install -g @mariozechner/pi-coding-agent）")
         ok = False
-    auth_token = os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
-    if auth_token:
-        LOG.info("[PASS] ANTHROPIC_AUTH_TOKEN 已配置（%s 字符）", len(auth_token))
+    pi_key = os.environ.get("PI_API_KEY", "")
+    if pi_key:
+        LOG.info("[PASS] PI_API_KEY 已配置（%s 字符）", len(pi_key))
     else:
-        LOG.error("[FAIL] 缺少 ANTHROPIC_AUTH_TOKEN（DeepSeek anthropic 兼容端点密钥）")
+        LOG.error("[FAIL] 缺少 PI_API_KEY（模型端点密钥）")
         ok = False
-    model = os.environ.get("ANTHROPIC_MODEL", "deepseek-v4-flash")
-    base_url = os.environ.get("ANTHROPIC_BASE_URL", "https://api.deepseek.com/anthropic")
+    model = os.environ.get("PI_MODEL", "deepseek-v4-flash")
+    base_url = os.environ.get("PI_BASE_URL", "https://api.deepseek.com/anthropic")
     if os.environ.get("ZHIPU_API_KEY"):
-        LOG.info("[PASS] 模型舰队 = claudecode 双通道（DS explore×%s + GLM explore×2 + GLM reason×2；"
+        LOG.info("[PASS] 模型舰队 = pi 双通道（DS execute×%s + GLM decide；"
                  "DS %s @ %s，GLM %s @ %s）",
-                 os.environ.get("ASTRA_EXPLORE_REPLICAS", "2"), model, base_url,
-                 os.environ.get("ZHIPU_MODEL", "glm-5.3"),
-                 os.environ.get("ZHIPU_ANTHROPIC_BASE_URL", "https://open.bigmodel.cn/api/anthropic"))
+                 os.environ.get("ASTRA_EXECUTE_REPLICAS") or os.environ.get("ASTRA_EXPLORE_REPLICAS", "2"),
+                 model, base_url,
+                 os.environ.get("ZHIPU_PI_MODEL", "glm-5.3"),
+                 os.environ.get("ZHIPU_PI_BASE_URL", "https://open.bigmodel.cn/api/anthropic"))
     else:
-        LOG.info("[PASS] 模型舰队 = claudecode 单通道（explore×%s + reason×1，%s @ %s；"
-                 "注入 ZHIPU_API_KEY 可启用 GLM 双通道）",
-                 os.environ.get("ASTRA_EXPLORE_REPLICAS", "2"), model, base_url)
+        LOG.info("[PASS] 模型舰队 = pi 单通道（execute×%s + decide×1，%s @ %s；"
+                 "注入 ZHIPU_API_KEY 可启用 GLM 决策通道）",
+                 os.environ.get("ASTRA_EXECUTE_REPLICAS") or os.environ.get("ASTRA_EXPLORE_REPLICAS", "2"),
+                 model, base_url)
 
     # 3. 引擎可启动（server + dispatcher 拉起，含 worker env 校验）
     try:
@@ -2173,16 +2175,17 @@ def _run_environment_check(token: str, base_url: str) -> int:
     return 0 if ok else 1
 
 
-def collect_claude_usage() -> dict[str, int]:
-    """汇总 claudecode worker 会话的 token 用量（CC 会话 jsonl 里每条 assistant
-    消息带 message.usage）。无会话时返回空 dict。
+def collect_worker_usage() -> dict[str, int]:
+    """汇总 pi worker 会话的 token 用量（$TMP/astra-pi/<worker>/sessions/**.jsonl）。
 
-    billed input ≈ input_tokens + cache_read + cache_creation（anthropic 口径）。
+    pi 会话行为 jsonl；usage 位置随 pi 版本可能变化（message.usage / usage /
+    tokenCount 等形态），此处按宽容扫描逐行提取可用字段，缺失记 0。
+    无会话时返回空 dict。
     """
     import glob as _glob
     import tempfile as _tempfile
 
-    root = os.environ.get("ASTRA_CLAUDE_HOME") or str(Path(_tempfile.gettempdir()) / "astra-claude")
+    root = os.environ.get("ASTRA_PI_HOME") or str(Path(_tempfile.gettempdir()) / "astra-pi")
     total = {
         "inputTokens": 0,
         "outputTokens": 0,
@@ -2190,7 +2193,7 @@ def collect_claude_usage() -> dict[str, int]:
         "cacheWriteTokens": 0,
     }
     found = False
-    for f in _glob.glob(str(Path(root) / "*" / "projects" / "**" / "*.jsonl"), recursive=True):
+    for f in _glob.glob(str(Path(root) / "*" / "sessions" / "**" / "*.jsonl"), recursive=True):
         found = True
         try:
             for line in Path(f).read_text(encoding="utf-8", errors="replace").splitlines():
@@ -2201,11 +2204,15 @@ def collect_claude_usage() -> dict[str, int]:
                     record = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                usage = (record.get("message") or {}).get("usage") or {}
-                total["inputTokens"] += int(usage.get("input_tokens") or 0)
-                total["outputTokens"] += int(usage.get("output_tokens") or 0)
-                total["cacheReadTokens"] += int(usage.get("cache_read_input_tokens") or 0)
-                total["cacheWriteTokens"] += int(usage.get("cache_creation_input_tokens") or 0)
+                usage = (record.get("message") or {}).get("usage") or record.get("usage") or {}
+                total["inputTokens"] += int(usage.get("input_tokens") or usage.get("inputTokens") or 0)
+                total["outputTokens"] += int(usage.get("output_tokens") or usage.get("outputTokens") or 0)
+                total["cacheReadTokens"] += int(
+                    usage.get("cache_read_input_tokens") or usage.get("cacheReadInputTokens") or 0
+                )
+                total["cacheWriteTokens"] += int(
+                    usage.get("cache_creation_input_tokens") or usage.get("cacheCreationInputTokens") or 0
+                )
         except OSError:
             continue
     return total if found else {}
