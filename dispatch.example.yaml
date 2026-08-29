@@ -29,13 +29,13 @@ tasks:
     timeout: 300
     # Time budget for conclude fallback after the main phase times out or returns unusable output.
     conclude_timeout: 90
-  reason:
-    # Reason decides whether the goal is met and whether new intents should be proposed.
+  decide:
+    # Decide judges whether Goal is satisfied and adds/closes steps on the graph.
     timeout: 300
-    # Hard cap on how many new intents one reason step may create.
-    max_intents: 2
-  explore:
-    # Main execution timeout for exploring a claimed intent.
+    # Hard cap on how many new steps one decide run may create.
+    max_steps: 2
+  execute:
+    # Main execution timeout for working on a claimed step.
     timeout: 300
     # Time budget for conclude fallback used to summarize confirmed findings from the same session.
     conclude_timeout: 90
@@ -55,62 +55,31 @@ container:
 workers:
   # Worker priority is ascending: lower numbers are preferred first.
   # max_running is per-worker concurrency. Slower backends such as Pi usually benefit from lower values.
-  - name: "claudecode_deepseek-v4-pro"
-    type: "claudecode"
-    task_types: [bootstrap, reason, explore]
-    max_running: 2
-    priority: 0
-    env:
-      ANTHROPIC_MODEL: "deepseek-v4-pro"
-      ANTHROPIC_BASE_URL: "https://api.deepseek.com/anthropic"
-      ANTHROPIC_AUTH_TOKEN: "sk-xxx"
-
-  - name: "codex_qwen3.6-plus"
-    type: "codex"
-    task_types: [bootstrap,reason,explore]
-    max_running: 2
-    priority: 0
-    env:
-      CODEX_MODEL: "deepseek-v4-pro"
-      CODEX_BASE_URL: "https://api.deepseek.com/v1"
-      OPENAI_API_KEY: "sk-xxx"
-
-  - name: "pi_qwen3.6-plus"
+  # cairn-y（2026-08-29）：执行底座只留 pi（claudecode/codex/dsh 已移除）
+  - name: "pi_deepseek-execute"
     type: "pi"
-    task_types: [bootstrap,reason,explore]
-    max_running: 2
+    task_types: [bootstrap, execute]
+    max_running: 3
     priority: 0
     env:
-      PI_MODEL: "deepseek-v4-pro"
-      PI_BASE_URL: "https://api.deepseek.com/v1"
+      PI_MODEL: "deepseek-v4-flash"
+      PI_BASE_URL: "https://api.deepseek.com/anthropic"
       PI_API_KEY: "sk-xxx"
-      PI_PROVIDER_API: "openai-completions"
-      PI_MODEL_CONTEXT_WINDOW: "262144"
+      PI_PROVIDER_API: "anthropic"
+      PI_MODEL_CONTEXT_WINDOW: "131072"
 
-  # ---- dsh（DeepSeek Harness）已于 2026-08-28 移除 ----
-  # tsecbench 前十 0 家使用 dsh（6 家 Claude Code/Agent SDK + 3 家自研循环），
-  # 托管舰队统一 claudecode；如需 Kimi/GLM 等其他 anthropic 兼容端点，复制
-  # 上方 claudecode worker 块改 ANTHROPIC_BASE_URL/AUTH_TOKEN/MODEL 即可。
+  - name: "pi_glm-decide"
+    type: "pi"
+    task_types: [decide]
+    max_running: 2
+    priority: 1
+    env:
+      PI_MODEL: "glm-5.3"
+      PI_BASE_URL: "https://open.bigmodel.cn/api/anthropic"
+      PI_API_KEY: "sk-xxx"
+      PI_PROVIDER_API: "anthropic"
 
-  # ---- 混合模型示例（降本：决策用便宜模型、探索用强模型，技术方案 §3.2）----
-  # dispatch.yaml 已支持按 task_types 路由 worker：reason/consolidate/审查用便宜
-  # 模型，bootstrap/explore 用强模型。每个 claudecode worker 独立
-  # CLAUDE_CONFIG_DIR（会话隔离，explore 的 execute→conclude 走同一 worker 不串）。
-  # - name: "cc_reason_cheap"
-  #   type: "claudecode"
-  #   task_types: [reason, consolidate]
-  #   max_running: 2
-  #   priority: 0
-  #   env:
-  #     ANTHROPIC_MODEL: "deepseek-v4-flash"
-  #     ANTHROPIC_BASE_URL: "https://api.deepseek.com/anthropic"
-  #     ANTHROPIC_AUTH_TOKEN: "sk-xxx"
-  # - name: "cc_explore_strong"
-  #   type: "claudecode"
-  #   task_types: [bootstrap, explore]
-  #   max_running: 2
-  #   priority: 0
-  #   env:
-  #     ANTHROPIC_MODEL: "deepseek-v4-pro"
-  #     ANTHROPIC_BASE_URL: "https://api.deepseek.com/anthropic"
-  #     ANTHROPIC_AUTH_TOKEN: "sk-xxx"
+  # ---- dsh / claudecode / codex 适配器已于 2026-08-29（cairn-y）全部移除，底座仅 pi ----
+  # 如需 Kimi/GLM 等其他 anthropic 兼容端点：复制上方 pi worker 块，
+  # 改 PI_BASE_URL / PI_API_KEY / PI_MODEL 即可。
+  # 每个 pi worker 独立 PI_CODING_AGENT_DIR（会话隔离，execute→conclude 走同一 worker 不串）。

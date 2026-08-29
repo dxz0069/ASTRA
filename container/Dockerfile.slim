@@ -101,20 +101,17 @@ COPY ./container/knowledge /opt/knowledge
 # 镜像默认入口：astra-runner（本地模式可手动执行 python3 /opt/astra-runner/runner.py）
 ENTRYPOINT ["python3", "/opt/astra-runner/runner.py"]
 
-# 2026-08-28 舰队切换 claudecode（tsecbench 前十 0 家 dsh，CC/AgentSDK 系 6 家，
-# 见 docs/Tsecbench前十名日志机制拆解.md §6）：dsh + 自研 headless patch 整体
-# 移除，恢复 claude-code CLI（DeepSeek anthropic 兼容端点驱动 deepseek-v4-flash）。
+# 2026-08-29 cairn-y：执行底座只留 pi（@mariozechner/pi-coding-agent）——
+# 最原始、完全可控的 Agent Loop（Less is More）。claude-code 与 playwright-mcp
+# （CC 经 .claude.json 注入）整体移除；浏览器类需求由 worker 经 bash 直驱。
 # 硬失败纪律：双镜像源装不上直接断构建；装完必须能输出版本号。
 RUN ok=""; \
     for reg in https://registry.npmmirror.com https://registry.npmjs.org; do \
-      echo "[claude-code] trying $reg"; \
-      if sudo npm install -g --registry=$reg @anthropic-ai/claude-code@2.1.250; then ok=1; break; fi; \
+      echo "[pi] trying $reg"; \
+      if sudo npm install -g --registry=$reg @mariozechner/pi-coding-agent@0.73.0; then ok=1; break; fi; \
       sleep $((RANDOM % 5 + 3)); \
     done; \
-    [ -n "$ok" ] && claude --version
-# Playwright MCP（headless 通过 mcp-client 接入，Web 类题目用真实浏览器；npx -y 现场下载的替代）
-RUN sudo npm install -g --registry=https://registry.npmmirror.com @playwright/mcp@latest && \
-    sudo rm -rf /root/.npm /home/kali/.npm /home/kali/.cache 2>/dev/null; true
+    [ -n "$ok" ] && pi --version
 
 RUN sudo chmod +x /usr/local/bin/kerbrute
 RUN mkdir -p /home/kali/.config/nuclei && \
@@ -128,14 +125,10 @@ RUN printf '%s\n' 'PS1="${PS1%\\n*} \[\033[0;36m\]\D{%y-%m-%d} - \t\[\033[;32m\]
     mkdir -p /home/kali/workspace && cd /home/kali/workspace && git init
 ENV PATH="/home/kali/.local/bin:${PATH}"
 ENV TZ=Asia/Shanghai
-ENV PLAYWRIGHT_MCP_BROWSER=chromium
-ENV CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 ENV PYTHONUNBUFFERED=1
 
 COPY ./container/.agents /home/kali/workspace/.agents
-COPY ./container/.agents /home/kali/workspace/.claude
 COPY ./container/AGENTS.md /home/kali/workspace/AGENTS.md
-COPY ./container/AGENTS.md /home/kali/workspace/CLAUDE.md
 COPY ./container/knowledge /home/kali/workspace/knowledge
 
 # V9 体积治理（托管 3G 上传硬限，裸 fs 8.6G→目标 ~7G）：
