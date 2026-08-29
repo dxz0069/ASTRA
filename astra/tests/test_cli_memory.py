@@ -61,7 +61,7 @@ def test_memory_map_writes_standalone_html(tmp_path):
     assert result.exit_code == 0, result.output
     html = out.read_text(encoding="utf-8")
     assert "<svg" in html and "f001" in html
-    assert "星记" in html  # ASTRA 术语
+    assert "天枢" in html  # ASTRA 古星名
 
 
 def test_report_renders_risk_table_and_findings(tmp_path):
@@ -71,5 +71,5 @@ def test_report_renders_risk_table_and_findings(tmp_path):
     md = out.read_text(encoding="utf-8")
     assert "渗透测试报告" in md
     assert "## 三、攻击路径" in md and "已归航" in md
-    assert "## 四、星辉发现" in md and "SQL injection at /login" in md
+    assert "## 四、客星发现" in md and "SQL injection at /login" in md
     assert "修复建议" in md
