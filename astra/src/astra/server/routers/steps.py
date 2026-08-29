@@ -13,6 +13,8 @@ from astra.server.models import (
 )
 from astra.server.services import (
     check_project_active,
+    claim_step_atomic,
+    conclude_step_atomic,
     get_claimable_open_step_or_404,
     get_releasable_open_step_or_404,
     get_step_or_404,
@@ -86,20 +88,8 @@ def create_step(project_id: str, body: CreateStepRequest):
 def heartbeat(project_id: str, step_id: str, body: HeartbeatRequest):
     with get_conn() as conn:
         check_project_active(conn, project_id)
-        get_claimable_open_step_or_404(conn, project_id, step_id, body.worker)
-
-        now = utcnow()
-        prev = conn.execute(
-            "SELECT worker FROM steps WHERE id = ? AND project_id = ?",
-            (step_id, project_id),
-        ).fetchone()
-        # 投入卡：首次认领/换 worker 认领记一次派发（同 worker 心跳续租不计数）
-        claim_dispatch = 1 if prev is None or prev["worker"] is None or prev["worker"] != body.worker else 0
-        conn.execute(
-            "UPDATE steps SET worker = ?, last_heartbeat_at = ?, dispatch_count = dispatch_count + ? "
-            "WHERE id = ? AND project_id = ?",
-            (body.worker, now, claim_dispatch, step_id, project_id),
-        )
+        # 原子认领（守卫 UPDATE）：消灭并发双认领窗口；投入计数由 CASE 在写时原子判定
+        claim_step_atomic(conn, project_id, step_id, body.worker)
 
         updated = conn.execute(
             "SELECT * FROM steps WHERE id = ? AND project_id = ?",
@@ -135,12 +125,15 @@ def release(project_id: str, step_id: str, body: HeartbeatRequest):
     response_model=ConcludeResponse,
 )
 def conclude(project_id: str, step_id: str, body: ConcludeRequest):
-    """Execute 收束：submit_fact——写新星记 + 步骤落点，可携一条沿途 Finding。"""
+    """Execute 收束：submit_fact——写新星记 + 步骤落点，可携一条沿途 Finding。
+
+    原子预留（conclude_step_atomic）抢写权 → 同事务内插 fact + 终写落点；
+    并发败者整个请求回滚，不产生孤儿 fact。
+    """
     with get_conn() as conn:
         check_project_active(conn, project_id)
-        get_claimable_open_step_or_404(conn, project_id, step_id, body.worker)
+        now = conclude_step_atomic(conn, project_id, step_id, body.worker)
 
-        now = utcnow()
         fid = next_fact_id(conn, project_id)
 
         conn.execute(
@@ -148,8 +141,8 @@ def conclude(project_id: str, step_id: str, body: ConcludeRequest):
             (fid, project_id, body.description, body.kind),
         )
         conn.execute(
-            "UPDATE steps SET to_fact_id = ?, worker = ?, last_heartbeat_at = ?, concluded_at = ? WHERE id = ? AND project_id = ?",
-            (fid, body.worker, now, now, step_id, project_id),
+            "UPDATE steps SET to_fact_id = ?, last_heartbeat_at = ?, concluded_at = ? WHERE id = ? AND project_id = ? AND worker = ?",
+            (fid, now, now, step_id, project_id, body.worker),
         )
 
         finding: Finding | None = None
