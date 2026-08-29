@@ -2,40 +2,60 @@ from __future__ import annotations
 
 from typing import Literal
 
-
 from pydantic import BaseModel, Field, field_validator
 
 
 class Settings(BaseModel):
-    # 安全审计 C3：加上限——intent_timeout=999999999 会让 expire_workers 永不生效
-    # （全服务租约瘫痪 DoS），5 是下限（现有校验），3600 是合理上限（1小时）
-    intent_timeout: int = Field(ge=5, le=3600)
-    reason_timeout: int = Field(ge=5, le=3600)
+    # step_timeout=执行租约超时，decide_timeout=决策租约超时（下限 5s，上限 1h）
+    step_timeout: int = Field(ge=5, le=3600)
+    decide_timeout: int = Field(ge=5, le=3600)
 
 
 class Fact(BaseModel):
     id: str
     description: str
-    kind: Literal["regular", "summary", "negative"] = "regular"
-    confidence: str = "medium"
-    evidence: str | None = None
-    challenged: bool = False
+    kind: Literal["regular", "negative"] = "regular"
 
 
-class Intent(BaseModel):
+class Step(BaseModel):
+    """FGS 的 Step：从既有事实出发、预期产出新事实的因果行动。
+
+    生命周期：status=open 可被认领执行；Decide 可 close（附 reason，留痕防重开死路）；
+    执行收束写 to_fact_id + concluded_at。
+    """
+
     id: str
     from_: list[str] = Field(alias="from")
     to: str | None = None
     description: str
+    expect: str | None = None
+    status: Literal["open", "closed"] = "open"
+    close_reason: str | None = None
     creator: str
     worker: str | None = None
     last_heartbeat_at: str | None = None
-    dispatch_count: int = 0  # UCB 航向投入卡：被派发探索的次数（跨心跳累计）
+    dispatch_count: int = 0  # 投入卡：被派发执行的次数（跨心跳累计），Decide 评估低产步骤用
     created_at: str
     concluded_at: str | None = None
-    challenged: bool = False
 
     model_config = {"populate_by_name": True}
+
+
+class Finding(BaseModel):
+    """FGS 的 Finding：搜索过程的沿途发现（如漏洞）——与 Goal 终点相对的产出物。"""
+
+    id: str
+    description: str
+    created_at: str
+
+
+class SubGoal(BaseModel):
+    """FGS 的动态 Sub Goal：阶段性里程碑，Decide 可增删。"""
+
+    id: str
+    description: str
+    status: Literal["active", "done", "dropped"] = "active"
+    created_at: str
 
 
 class Hint(BaseModel):
@@ -45,7 +65,7 @@ class Hint(BaseModel):
     created_at: str
 
 
-class ProjectReason(BaseModel):
+class ProjectDecide(BaseModel):
     worker: str
     trigger: str
     started_at: str
@@ -58,24 +78,27 @@ class ProjectMeta(BaseModel):
     status: Literal["active", "stopped", "completed"]
     bootstrap_enabled: bool
     created_at: str
-    reason: ProjectReason | None = None
+    decide: ProjectDecide | None = None
     # 审计修复（租约令牌）：仅 claim 响应填充下发；其余端点恒为 None（不回显）
-    reason_token: str | None = Field(default=None, max_length=128)
+    decide_token: str | None = Field(default=None, max_length=128)
 
 
 class ProjectSummary(ProjectMeta):
     fact_count: int
-    intent_count: int
-    working_intent_count: int
-    unclaimed_intent_count: int
+    step_count: int
+    working_step_count: int
+    unclaimed_step_count: int
     hint_count: int
+    finding_count: int
 
 
 class ProjectDetail(BaseModel):
     project: ProjectMeta
     facts: list[Fact]
-    intents: list[Intent]
+    steps: list[Step]
     hints: list[Hint]
+    findings: list[Finding]
+    subgoals: list[SubGoal]
 
 
 class CreateHintInline(BaseModel):
@@ -93,7 +116,7 @@ class CreateHintInline(BaseModel):
 
 class CreateFactRequest(BaseModel):
     description: str
-    kind: Literal["regular", "summary", "negative"] = "regular"
+    kind: Literal["regular", "negative"] = "regular"
     creator: str = "system"
 
     @field_validator("description")
@@ -103,10 +126,6 @@ class CreateFactRequest(BaseModel):
         if not text:
             raise ValueError("must not be empty")
         return text
-
-
-class ArchiveFactsRequest(BaseModel):
-    fact_ids: list[str] = Field(max_length=500)
 
 
 class CreateProjectRequest(BaseModel):
@@ -138,15 +157,16 @@ class CreateHintRequest(BaseModel):
         return text
 
 
-class CreateIntentRequest(BaseModel):
+class CreateStepRequest(BaseModel):
     from_: list[str] = Field(alias="from", min_length=1)
     description: str
+    expect: str | None = None
     creator: str
     worker: str | None = None
 
     model_config = {"populate_by_name": True}
 
-    @field_validator("description", "creator", "worker")
+    @field_validator("description", "creator", "worker", "expect")
     @classmethod
     def validate_non_empty_text(cls, value: str | None) -> str | None:
         if value is None:
@@ -165,8 +185,48 @@ class CreateIntentRequest(BaseModel):
             if not text:
                 raise ValueError("fact ids must not be empty")
             cleaned.append(text)
-        # 去重保序：LLM 输出可能带重复 id，intent_sources 主键冲突会抛 500
+        # 去重保序：LLM 输出可能带重复 id，step_sources 主键冲突会抛 500
         return list(dict.fromkeys(cleaned))
+
+
+class CreateFindingRequest(BaseModel):
+    description: str
+
+    @field_validator("description")
+    @classmethod
+    def validate_non_empty_description(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError("must not be empty")
+        return text
+
+
+class CreateSubGoalRequest(BaseModel):
+    description: str
+
+    @field_validator("description")
+    @classmethod
+    def validate_non_empty_description(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError("must not be empty")
+        return text
+
+
+class UpdateSubGoalStatusRequest(BaseModel):
+    status: Literal["active", "done", "dropped"]
+
+
+class CloseStepRequest(BaseModel):
+    reason: str = Field(max_length=4096)
+
+    @field_validator("reason")
+    @classmethod
+    def validate_non_empty_reason(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError("must not be empty")
+        return text
 
 
 class HeartbeatRequest(BaseModel):
@@ -183,7 +243,7 @@ class HeartbeatRequest(BaseModel):
         return text
 
 
-class ReasonClaimRequest(BaseModel):
+class DecideClaimRequest(BaseModel):
     worker: str
     trigger: str
 
@@ -199,28 +259,20 @@ class ReasonClaimRequest(BaseModel):
 class ConcludeRequest(BaseModel):
     worker: str = Field(max_length=256)
     description: str = Field(max_length=65536)
-    confidence: str = "medium"
-    evidence: str | None = None
-    # 该发现是否经过了双星质询（低置信巡猎的 challenge 阶段跑过才置 True）
-    challenged: bool = False
-    # V8 负结果一等公民："negative"=此路不通/方向已穷尽（与 regular 同等存储，
-    # 焦点裁剪时加权保活，防同类死路被反复开航向）
-    kind: Literal["regular", "summary", "negative"] = "regular"
+    # 负结果："negative"=此路不通/方向已穷尽（与 regular 同等存储，Decide 侧保活）
+    kind: Literal["regular", "negative"] = "regular"
+    # Execute 沿途发现（可选）：与事实一并写回
+    finding: str | None = Field(default=None, max_length=65536)
 
-    @field_validator("worker", "description")
+    @field_validator("worker", "description", "finding")
     @classmethod
-    def validate_non_empty_text(cls, value: str) -> str:
+    def validate_non_empty_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         text = value.strip()
         if not text:
             raise ValueError("must not be empty")
         return text
-
-    @field_validator("confidence")
-    @classmethod
-    def validate_confidence(cls, value: str) -> str:
-        if value not in ("low", "medium", "high"):
-            raise ValueError("confidence must be one of low/medium/high")
-        return value
 
 
 class CompleteRequest(BaseModel):
@@ -248,13 +300,14 @@ class CompleteRequest(BaseModel):
             if not text:
                 raise ValueError("fact ids must not be empty")
             cleaned.append(text)
-        # 去重保序：LLM 输出可能带重复 id，intent_sources 主键冲突会抛 500
+        # 去重保序：LLM 输出可能带重复 id，step_sources 主键冲突会抛 500
         return list(dict.fromkeys(cleaned))
 
 
 class ConcludeResponse(BaseModel):
     fact: Fact
-    intent: Intent
+    step: Step
+    finding: Finding | None = None
 
 
 class UpdateProjectStatusRequest(BaseModel):
@@ -289,4 +342,4 @@ class ReopenRequest(BaseModel):
 class ReopenResponse(BaseModel):
     project: ProjectMeta
     fact: Fact
-    intent: Intent
+    step: Step
