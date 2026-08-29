@@ -1,7 +1,23 @@
 # ASTRA 整改计划：对齐 Cairn_Y 路线（仅 PI + Node + 极短通用提示词）
 
-> 2026-08-29 定稿。依据：用户指令（三条）+ l3yx《众人向左，我偏向右》逐字解读（`docs/Cairn_Y文章解读与架构提炼.md`）。
+> 2026-08-29 定稿，**同日实施完成（阶段 A+B 合并执行）**，分支 `cairn-y`，版本 0.2.0，148 测试全绿。
+> 依据：用户指令（三条）+ l3yx《众人向左，我偏向右》逐字解读（`docs/Cairn_Y文章解读与架构提炼.md`）。
 > 纪律：三阶段各自独立可发车、可回滚；一次只动一层；每阶段有验收门，不过门不进下一阶段。
+
+## ✅ 实施进度（2026-08-29，分支 cairn-y）
+
+| 项 | 状态 | 提交 |
+|---|---|---|
+| 提示词重建（495→218 行，删 4 个审查/压缩/侦察模板） | ✅ | 0e0920c |
+| server FGS 数据模型（Step+expect/status、Finding、SubGoal、迁移） | ✅ | ebec3b7 |
+| dispatcher 核心（decide/execute、砍审查链+consolidate、仅 pi|mock） | ✅ | 7c915b6 |
+| 前端 FGS 化 | ✅ | 1699ee8 |
+| 引擎 pi 化（舰队/watchdog/自检/usage） | ✅ | e551bbc |
+| 镜像（pi@0.73.0，卸 claude-code+playwright-mcp） | ✅ | 409167f |
+| 测试迁移 148 全绿 | ✅ | a4a958e |
+| 版本 0.2.0 + note/release | ✅ | 本提交 |
+
+**待验证（发车前必须）**：A1 spike——pi 双网关实测（DS/智谱 anthropic：headless json、会话续接、执行场景稳定性）；镜像重建 + 容器内 pi pong；打包验收。
 
 ---
 
