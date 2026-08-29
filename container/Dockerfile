@@ -96,13 +96,9 @@ COPY ./container/astra_runner /opt/astra-runner
 # 镜像默认入口：astra-runner（本地模式可手动执行 python3 /opt/astra-runner/runner.py）
 ENTRYPOINT ["python3", "/opt/astra-runner/runner.py"]
 
-# 2026-08-28：dsh 已移除（含 COPY container/dsh——目录已删，旧行会让本文件不可构建）；
-# claude-code 升到与 slim 一致的 2.1.250。托管出包请用 Dockerfile.slim（本文件为本地全量开发镜像）。
-RUN sudo npm install -g @openai/codex@0.118.0
-RUN sudo npm install -g @anthropic-ai/claude-code@2.1.250
+# 2026-08-29 cairn-y：执行底座只留 pi（最原始、完全可控——Less is More）；
+# codex / claude-code / playwright-mcp 全部移除。托管出包请用 Dockerfile.slim（本文件为本地全量开发镜像）。
 RUN sudo npm install -g @mariozechner/pi-coding-agent@0.73.0
-# Playwright MCP（claudecode worker 经 .claude.json 注入使用，Web 类题目真实浏览器）
-RUN sudo npm install -g @playwright/mcp@latest
 
 RUN sudo chmod +x /usr/local/bin/kerbrute
 RUN mkdir -p /home/kali/.config/nuclei && \
@@ -116,13 +112,9 @@ RUN printf '%s\n' 'PS1="${PS1%\\n*} \[\033[0;36m\]\D{%y-%m-%d} - \t\[\033[;32m\]
     mkdir -p /home/kali/workspace && cd /home/kali/workspace && git init
 ENV PATH="/home/kali/.local/bin:${PATH}"
 ENV TZ=Asia/Shanghai
-ENV PLAYWRIGHT_MCP_BROWSER=chromium
-ENV CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 ENV PYTHONUNBUFFERED=1
 
 COPY ./container/.agents /home/kali/workspace/.agents
-COPY ./container/.agents /home/kali/workspace/.claude
 COPY ./container/AGENTS.md /home/kali/workspace/AGENTS.md
-COPY ./container/AGENTS.md /home/kali/workspace/CLAUDE.md
 
 WORKDIR /home/kali/workspace
