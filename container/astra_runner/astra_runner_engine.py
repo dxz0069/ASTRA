@@ -195,6 +195,7 @@ class AstraDaemon:
         }
         common_env = {k: v for k, v in common_env.items() if v}
         worker_block = self._render_claudecode_fleet()
+        _reason_timeout = max(60, int(os.environ.get("ASTRA_REASON_TIMEOUT", "900")))
         yaml = f"""server: "{ASTRA_SERVER_URL}"
 runtime:
   interval: 3
@@ -214,7 +215,7 @@ tasks:
     timeout: 600
     conclude_timeout: 120
   reason:
-    timeout: 420
+    timeout: {_reason_timeout}
     max_intents: 2
   explore:
     timeout: 600
@@ -272,13 +273,9 @@ workers:
                 )
             )
         if glm_key:
-            fleet.append(
-                self._render_claudecode_worker(
-                    "glm-explore", ["bootstrap", "explore"],
-                    max_running=2, priority=0,
-                    model=glm_model, base_url=glm_base, auth_token=glm_key,
-                )
-            )
+            # R9 修复（run 13464 诊断）：GLM 撤出 explore——CC 全量上下文 × 深思考单轮
+            # 10-20min，explore 位只占并发不产出（平台级 2% 调用量）。GLM 专注
+            # reason/consolidate（低频高价值，深度思考是资产）。
             fleet.append(
                 self._render_claudecode_worker(
                     "glm-reason", ["reason", "consolidate"],

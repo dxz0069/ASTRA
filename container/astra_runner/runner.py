@@ -380,20 +380,23 @@ def run_benchmark(
         queue = deque(head + rest_items)
 
     if prefer_easy and queue and not order_codes:
-        # easy→medium→hard 开题（稳定排序：同难度保持平台原始顺序）。
-        # 未知难度排在 medium 之后、hard 之前，不置于队首冒进。
-        diff_rank = {"easy": 0, "medium": 1, "hard": 2}
-        ordered = sorted(
-            queue,
-            key=lambda item: diff_rank.get(str(getattr(item[0], "difficulty", "") or "").lower(), 1.5),
-        )
+        # R9 修复：难度排序对分值视盲——13464 轮 15 道 hard（共 8,200 分）从未开题，
+        # 而 a 系 hard 500 分一旦被开 2 分钟即解。新序 = easy 热身（分值降序，快速银行）
+        # + 其余全部按分值降序（b-02 1800 提前拿到长跑道，500 分 hard 不再饿死）。
+        # 未知难度并入分值池（原排在 medium/hard 之间）。
+        def _score_of(item) -> int:
+            return int(getattr(item[0], "total_score", 0) or 0)
+
+        easy_pool = [it for it in queue if str(getattr(it[0], "difficulty", "") or "").lower() == "easy"]
+        rest_pool = [it for it in queue if str(getattr(it[0], "difficulty", "") or "").lower() != "easy"]
+        easy_pool.sort(key=_score_of, reverse=True)
+        rest_pool.sort(key=_score_of, reverse=True)
+        ordered = easy_pool + rest_pool
         queue = deque(ordered)
         LOG.info(
-            "queue ordered easy-first（easy=%s medium=%s hard=%s/未知=%s）",
-            sum(1 for c, _ in ordered if str(getattr(c, "difficulty", "")).lower() == "easy"),
-            sum(1 for c, _ in ordered if str(getattr(c, "difficulty", "")).lower() == "medium"),
-            sum(1 for c, _ in ordered if str(getattr(c, "difficulty", "")).lower() == "hard"),
-            sum(1 for c, _ in ordered if str(getattr(c, "difficulty", "") or "").lower() not in diff_rank),
+            "queue ordered value-hybrid（easy热身=%s 分值池=%s；池首=%s）",
+            len(easy_pool), len(rest_pool),
+            ", ".join(f"{_code_of(it)}:{_score_of(it)}" for it in ordered[:5]),
         )
 
     active: dict[str, threading.Thread] = {}
@@ -958,6 +961,8 @@ def _run_single_challenge(
         # V2-1④：hint 次数缓存感知——defer 前已购的 hint 不重购
         hint_taken = min(len(result.hint_texts), MAX_HINTS_PER_CHALLENGE)
         facts_at_hint1: int | None = None  # V2-1①：hint1 时的星记数（hint2 前对比是否产生新攻击面）
+        hint1_at: float | None = None  # R10：hint1 时刻（post-hint 止损计时）
+        facts_at_last_poll: int | None = None  # R10：上次轮询星记数（hint 后停滞判据）
         # V9 多旗收割：hint 门控从"零旗才买"改为"本窗口停滞即买"——多旗题卡在
         # 2/6 时同样需要 hint 解锁下一旗（剩余旗的收益远大于 hint 扣分）
         flags_at_window_start = len(result.flags_found)
@@ -973,11 +978,28 @@ def _run_single_challenge(
             except Exception:  # noqa: BLE001 —— 引擎 API 偶发失败不中断等待
                 pass
             stalled_no_new_flag = len(result.flags_found) == flags_at_window_start
+            # R10 hint 后止损（b-01 型空转：hint@135min 后 30 分钟零产出占槽到窗口尾）——
+            # hint 已购、又 15 分钟无新旗且星记零增长 → 提前结束窗口回队（星图保留）
+            if (
+                hint1_at is not None
+                and stalled_no_new_flag
+                and fact_count is not None
+                and facts_at_last_poll is not None
+                and fact_count == facts_at_last_poll
+                and time.monotonic() - hint1_at >= 900
+            ):
+                LOG.warning(
+                    "post-hint stall code=%s（hint 后 %.0f 分钟无新旗无新星记——提前回队腾槽）",
+                    code, (time.monotonic() - hint1_at) / 60,
+                )
+                break
+            facts_at_last_poll = fact_count
             if hint_eligible and stalled_no_new_flag:
                 now = time.monotonic()
                 if hint_taken < 1 and now >= hint_trigger_at:
                     if _try_platform_hint(client, engine, code, project_id, result):
                         hint_taken = 1
+                        hint1_at = now
                         facts_at_hint1 = fact_count
                 elif hint_taken < 2 and now >= hint2_trigger_at:
                     # V2-1①：hint1 注入后星图零新增（无新攻击面）→ hint2 大概率无效，跳过止损。
