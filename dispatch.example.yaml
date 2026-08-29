@@ -65,7 +65,7 @@ workers:
       PI_MODEL: "deepseek-v4-flash"
       PI_BASE_URL: "https://api.deepseek.com/anthropic"
       PI_API_KEY: "sk-xxx"
-      PI_PROVIDER_API: "anthropic"
+      PI_PROVIDER_API: "anthropic-messages"
       PI_MODEL_CONTEXT_WINDOW: "131072"
 
   - name: "pi_glm-decide"
@@ -77,7 +77,7 @@ workers:
       PI_MODEL: "glm-5.3"
       PI_BASE_URL: "https://open.bigmodel.cn/api/anthropic"
       PI_API_KEY: "sk-xxx"
-      PI_PROVIDER_API: "anthropic"
+      PI_PROVIDER_API: "anthropic-messages"
 
   # ---- 旧执行适配器已于 2026-08-29（v0.2）全部移除，底座仅 pi ----
   # 如需 Kimi/GLM 等其他 anthropic 兼容端点：复制上方 pi worker 块，

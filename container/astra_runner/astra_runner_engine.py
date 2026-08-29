@@ -42,6 +42,21 @@ def _pi_agent_dir(worker_name: str) -> Path:
     return Path(_pi_agent_root()) / worker_name
 
 
+def _sanitize_polluted_env() -> None:
+    """清洗会污染 pi worker 的环境变量（spike 实证 2026-08-30）。
+
+    pi-ai 的 anthropic-messages 层会优先读进程环境里的 ANTHROPIC_AUTH_TOKEN/
+    ANTHROPIC_API_KEY，覆盖 models.json 的 apiKey——宿主 shell 若残留旧栈
+    （claudecode 时代）的失效 key，pi worker 会全量 401。v0.2 起 ANTHROPIC_*
+    不再是本系统的合法变量，启动即剥除。
+    """
+    polluted = [k for k in os.environ if k.startswith("ANTHROPIC_") or k in ("OPENAI_API_KEY", "CLAUDE_CODE_SUBAGENT_MODEL")]
+    for k in polluted:
+        os.environ.pop(k, None)
+    if polluted:
+        LOG.warning("sanitized polluted env vars (pi worker 防污染): %s", sorted(polluted))
+
+
 def _cleanup_stale_engine_files(keep_dbs: int = 5) -> None:
     """文件系统审计：清理旧引擎 db 文件与含密钥的 dispatch yaml。
 
@@ -151,6 +166,7 @@ class AstraDaemon:
             self._start_locked()
 
     def _start_locked(self) -> None:
+        _sanitize_polluted_env()
         _cleanup_stale_engine_files()
         self._cleanup_pi_agent_dirs()
         db_path = Path(tempfile.gettempdir()) / f"astra-runner-{uuid.uuid4().hex[:8]}.db"
@@ -253,11 +269,11 @@ workers:
         ds_key = os.environ.get("PI_API_KEY", "")
         if not ds_key:
             raise RuntimeError("缺少 PI_API_KEY（DeepSeek 端点密钥）")
-        ds_provider_api = os.environ.get("PI_PROVIDER_API", "anthropic")
+        ds_provider_api = os.environ.get("PI_PROVIDER_API", "anthropic-messages")
         glm_key = os.environ.get("ZHIPU_API_KEY", "")
         glm_model = os.environ.get("ZHIPU_PI_MODEL", "glm-5.3")
         glm_base = os.environ.get("ZHIPU_PI_BASE_URL", "https://open.bigmodel.cn/api/anthropic")
-        glm_provider_api = os.environ.get("ZHIPU_PI_PROVIDER_API", "anthropic")
+        glm_provider_api = os.environ.get("ZHIPU_PI_PROVIDER_API", "anthropic-messages")
         execute_replicas = max(
             1,
             int(os.environ.get("ASTRA_EXECUTE_REPLICAS") or os.environ.get("ASTRA_EXPLORE_REPLICAS", "2")),
