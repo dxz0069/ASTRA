@@ -163,7 +163,7 @@ function astraApp(){
       const map={active:'var(--accent)', completed:'var(--ok)', stopped:'var(--ink-faint)'};
       return 'background:'+(map[p.status]||'var(--ink-faint)');
     },
-    statusText(s){ return {active:'进行中', completed:'已完成', stopped:'已停航'}[s]||s; },
+    statusText(s){ return {active:'进行中', completed:'已归航', stopped:'已停航'}[s]||s; },
     statusBadgeClass(s){ return {active:'high', completed:'summary', stopped:'medium'}[s]||'medium'; },
 
     filteredProjects(){
@@ -184,7 +184,7 @@ function astraApp(){
         const prev=this.current;
         this.current=p;
         this.renderGraph(p);
-        if(prev && prev.project.id===p.project.id && (prev.facts.length!==p.facts.length || prev.hints.length!==p.hints.length)) this.toast(`图更新：${p.facts.length} 事实 / ${p.hints.length} 指引`);
+        if(prev && prev.project.id===p.project.id && (prev.facts.length!==p.facts.length || prev.hints.length!==p.hints.length)) this.toast(`星图更新：${p.facts.length} 星记 / ${p.hints.length} 指引`);
       }).catch(e=>{ if(!silent) this.toast(e.message,'err'); });
     },
     refreshAll(){
@@ -335,7 +335,7 @@ function astraApp(){
 
     nodeTypeLabel(n){
       const t=n.data.nodeType;
-      return t==='fact'?'事实':t==='step'?'步骤':t==='goal'?'目标':t==='origin'?'起点':'节点';
+      return t==='fact'?'星记':t==='step'?'航向':t==='goal'?'北辰':t==='origin'?'起点':'节点';
     },
     nodeBadgeClass(n){
       return n.data.nodeType==='goal' ? 'medium' : 'summary';
@@ -356,7 +356,7 @@ function astraApp(){
     },
     openCreateStep(){ this.stepFrom=[]; this.stepForm={description:'', expect:''}; this.modal='step'; },
     createStep(){
-      if(!this.stepFrom.length){ this.toast('至少选择一个源自事实','err'); return; }
+      if(!this.stepFrom.length){ this.toast('至少选择一个源自星记','err'); return; }
       const body={from:this.stepFrom, description:this.stepForm.description, creator:'human', worker:null};
       if(this.stepForm.expect && this.stepForm.expect.trim()) body.expect=this.stepForm.expect.trim();
       this.api('POST',`/projects/${this.selectedId}/steps`,body).then(()=>{
@@ -372,7 +372,7 @@ function astraApp(){
     },
     openComplete(){ this.completeFrom=[]; this.completeForm.description=''; this.modal='complete'; },
     completeProject(){
-      if(!this.completeFrom.length){ this.toast('至少选择一个完成依据事实','err'); return; }
+      if(!this.completeFrom.length){ this.toast('至少选择一个完成依据星记','err'); return; }
       this.api('POST',`/projects/${this.selectedId}/complete`,{from:this.completeFrom,
         description:this.completeForm.description, worker:'human'}).then(()=>{
         this.modal=null; this.loadProject(this.selectedId);
