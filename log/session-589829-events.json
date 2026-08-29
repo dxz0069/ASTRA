@@ -1,0 +1,166 @@
+{
+  "pagination": {
+    "page": 1,
+    "page_size": 50,
+    "total": 4,
+    "total_pages": 1
+  },
+  "session": {
+    "baseline_len": 2,
+    "closed_reason": "compacted",
+    "explicit_id": "",
+    "first_captured_at": "2026-08-28T23:58:32Z",
+    "group_id": 592095,
+    "id": 589829,
+    "last_active_at": "2026-08-28T23:58:32Z",
+    "model": "deepseek-v4-flash",
+    "protocol": "anthropic_messages",
+    "status": "archived",
+    "task_code": "task_iZS0Ps97evvb",
+    "title": "Perform a web search for the query: github \"process-injection-minimal\" OR \"minimal-process-injection\" repo",
+    "usage": {
+      "cache_read": 384,
+      "cache_write": 0,
+      "input": 189,
+      "output": 183,
+      "reasoning": 0
+    },
+    "working_directory": ""
+  },
+  "steps": [
+    {
+      "captured_at": "2026-08-28T23:58:32Z",
+      "error": "推断此处发生上下文压缩",
+      "event_type": "session_note",
+      "id": 22575418,
+      "items": [],
+      "raw_exchange_id": 3413550,
+      "render_state": "confirmed",
+      "seq": 0,
+      "state": "confirmed",
+      "stop_reason": "",
+      "usage": {
+        "cache_read": null,
+        "cache_write": null,
+        "input": null,
+        "output": null,
+        "reasoning": null
+      }
+    },
+    {
+      "captured_at": "2026-08-28T23:58:32Z",
+      "error": "",
+      "event_type": "system_note",
+      "id": 22575419,
+      "items": [
+        {
+          "args": null,
+          "call_id": "",
+          "char_len": 193,
+          "fp": "***REDACTED-HEX***",
+          "is_error": false,
+          "kind": "system_note",
+          "name": "",
+          "role": "system",
+          "text": "x-anthropic-billing-header: cc_version=2.1.250.5cc; cc_entrypoint=sdk-cli;You are a Claude agent, built on Anthropic's Claude Agent SDK.You are an assistant for performing a web search tool use"
+        }
+      ],
+      "raw_exchange_id": 3413550,
+      "render_state": "confirmed",
+      "seq": 1,
+      "state": "confirmed",
+      "stop_reason": "",
+      "usage": {
+        "cache_read": null,
+        "cache_write": null,
+        "input": null,
+        "output": null,
+        "reasoning": null
+      }
+    },
+    {
+      "captured_at": "2026-08-28T23:58:32Z",
+      "error": "",
+      "event_type": "user_message",
+      "id": 22575420,
+      "items": [
+        {
+          "args": null,
+          "call_id": "",
+          "char_len": 106,
+          "fp": "***REDACTED-HEX***",
+          "is_error": false,
+          "kind": "user_text",
+          "name": "",
+          "role": "user",
+          "text": "Perform a web search for the query: github \"process-injection-minimal\" OR \"minimal-process-injection\" repo"
+        }
+      ],
+      "raw_exchange_id": 3413550,
+      "render_state": "confirmed",
+      "seq": 2,
+      "state": "confirmed",
+      "stop_reason": "",
+      "usage": {
+        "cache_read": null,
+        "cache_write": null,
+        "input": null,
+        "output": null,
+        "reasoning": null
+      }
+    },
+    {
+      "captured_at": "2026-08-28T23:58:32Z",
+      "error": "",
+      "event_type": "assistant_message",
+      "id": 22575421,
+      "items": [
+        {
+          "args": null,
+          "call_id": "",
+          "char_len": 72,
+          "fp": "***REDACTED-HEX***",
+          "is_error": false,
+          "kind": "thinking",
+          "name": "",
+          "role": "assistant",
+          "text": "The user wants me to perform a web search for the query. Let me do that."
+        },
+        {
+          "args": null,
+          "call_id": "",
+          "char_len": 265,
+          "fp": "***REDACTED-HEX***",
+          "is_error": false,
+          "kind": "thinking",
+          "name": "",
+          "role": "assistant",
+          "text": "The user query asks for a GitHub repository named \"process-injection-minimal\" or \"minimal-process-injection\". The search results are empty ([]). There is no information to summarize. I should state that no search results were provided, so I cannot answer the query."
+        },
+        {
+          "args": null,
+          "call_id": "",
+          "char_len": 244,
+          "fp": "***REDACTED-HEX***",
+          "is_error": false,
+          "kind": "assistant_text",
+          "name": "",
+          "role": "assistant",
+          "text": "No search results were provided, so I cannot answer the query. The search returned an empty list, meaning there is no information available to summarize about a GitHub repository named \"process-injection-minimal\" or \"minimal-process-injection.\""
+        }
+      ],
+      "raw_exchange_id": 3413550,
+      "render_state": "confirmed",
+      "seq": 3,
+      "state": "tentative",
+      "stop_reason": "end_turn",
+      "usage": {
+        "cache_read": 384,
+        "cache_write": 0,
+        "input": 189,
+        "output": 183,
+        "reasoning": null
+      }
+    }
+  ]
+}

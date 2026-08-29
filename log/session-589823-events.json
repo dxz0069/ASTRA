@@ -1,0 +1,166 @@
+{
+  "pagination": {
+    "page": 1,
+    "page_size": 50,
+    "total": 4,
+    "total_pages": 1
+  },
+  "session": {
+    "baseline_len": 2,
+    "closed_reason": "compacted",
+    "explicit_id": "",
+    "first_captured_at": "2026-08-28T23:54:44Z",
+    "group_id": 592095,
+    "id": 589823,
+    "last_active_at": "2026-08-28T23:54:44Z",
+    "model": "deepseek-v4-flash",
+    "protocol": "anthropic_messages",
+    "status": "archived",
+    "task_code": "task_iZS0Ps97evvb",
+    "title": "Perform a web search for the query: tsecbench challenge github \"minimal-process-injection\"",
+    "usage": {
+      "cache_read": 384,
+      "cache_write": 0,
+      "input": 178,
+      "output": 224,
+      "reasoning": 0
+    },
+    "working_directory": ""
+  },
+  "steps": [
+    {
+      "captured_at": "2026-08-28T23:54:44Z",
+      "error": "推断此处发生上下文压缩",
+      "event_type": "session_note",
+      "id": 22575121,
+      "items": [],
+      "raw_exchange_id": 3413472,
+      "render_state": "confirmed",
+      "seq": 0,
+      "state": "confirmed",
+      "stop_reason": "",
+      "usage": {
+        "cache_read": null,
+        "cache_write": null,
+        "input": null,
+        "output": null,
+        "reasoning": null
+      }
+    },
+    {
+      "captured_at": "2026-08-28T23:54:44Z",
+      "error": "",
+      "event_type": "system_note",
+      "id": 22575122,
+      "items": [
+        {
+          "args": null,
+          "call_id": "",
+          "char_len": 193,
+          "fp": "***REDACTED-HEX***",
+          "is_error": false,
+          "kind": "system_note",
+          "name": "",
+          "role": "system",
+          "text": "x-anthropic-billing-header: cc_version=2.1.250.5cc; cc_entrypoint=sdk-cli;You are a Claude agent, built on Anthropic's Claude Agent SDK.You are an assistant for performing a web search tool use"
+        }
+      ],
+      "raw_exchange_id": 3413472,
+      "render_state": "confirmed",
+      "seq": 1,
+      "state": "confirmed",
+      "stop_reason": "",
+      "usage": {
+        "cache_read": null,
+        "cache_write": null,
+        "input": null,
+        "output": null,
+        "reasoning": null
+      }
+    },
+    {
+      "captured_at": "2026-08-28T23:54:44Z",
+      "error": "",
+      "event_type": "user_message",
+      "id": 22575123,
+      "items": [
+        {
+          "args": null,
+          "call_id": "",
+          "char_len": 90,
+          "fp": "***REDACTED-HEX***",
+          "is_error": false,
+          "kind": "user_text",
+          "name": "",
+          "role": "user",
+          "text": "Perform a web search for the query: tsecbench challenge github \"minimal-process-injection\""
+        }
+      ],
+      "raw_exchange_id": 3413472,
+      "render_state": "confirmed",
+      "seq": 2,
+      "state": "confirmed",
+      "stop_reason": "",
+      "usage": {
+        "cache_read": null,
+        "cache_write": null,
+        "input": null,
+        "output": null,
+        "reasoning": null
+      }
+    },
+    {
+      "captured_at": "2026-08-28T23:54:44Z",
+      "error": "",
+      "event_type": "assistant_message",
+      "id": 22575124,
+      "items": [
+        {
+          "args": null,
+          "call_id": "",
+          "char_len": 128,
+          "fp": "***REDACTED-HEX***",
+          "is_error": false,
+          "kind": "thinking",
+          "name": "",
+          "role": "assistant",
+          "text": "The user wants me to perform a web search for the query: tsecbench challenge github \"minimal-process-injection\". Let me do that."
+        },
+        {
+          "args": null,
+          "call_id": "",
+          "char_len": 483,
+          "fp": "***REDACTED-HEX***",
+          "is_error": false,
+          "kind": "thinking",
+          "name": "",
+          "role": "assistant",
+          "text": "The user query is \"tsecbench challenge github 'minimal-process-injection'\". The search results are empty. That means I don't have any search results to base my summary on. I should state that I cannot answer based on the provided search results because there are none. However, I might have some background knowledge, but the instruction says \"based only on the provided search results.\" Since the search results list is empty, I should indicate that no search results were provided."
+        },
+        {
+          "args": null,
+          "call_id": "",
+          "char_len": 200,
+          "fp": "***REDACTED-HEX***",
+          "is_error": false,
+          "kind": "assistant_text",
+          "name": "",
+          "role": "assistant",
+          "text": "The provided search results are empty, so I cannot produce a summary about the \"tsecbench challenge github 'minimal-process-injection'\" query. No web search results were returned to base an answer on."
+        }
+      ],
+      "raw_exchange_id": 3413472,
+      "render_state": "confirmed",
+      "seq": 3,
+      "state": "tentative",
+      "stop_reason": "end_turn",
+      "usage": {
+        "cache_read": 384,
+        "cache_write": 0,
+        "input": 178,
+        "output": 224,
+        "reasoning": null
+      }
+    }
+  ]
+}
