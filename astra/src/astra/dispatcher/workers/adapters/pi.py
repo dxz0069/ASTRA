@@ -132,13 +132,21 @@ class PiDriver(WorkerDriver):
             )
             # 审计修复（CWE-22）：规范化并拒绝显式遍历段（..）——worker.env 虽属受信
             # 配置面，仍不放过路径逃逸写 models.json 的可能
-            base_dir = base_dir.resolve()
-            if ".." in base_dir.parts:
+            # 审计十一轮：必须查【原始路径】的 parts——resolve() 会把 .. 折叠掉，
+            # 先 resolve 再检查等于永不清真（旧防线是死代码，E:/a/../../escape 直穿）
+            raw_parts = Path(base_dir).parts
+            if ".." in raw_parts:
                 raise RuntimeError(f"PI_CODING_AGENT_DIR must not contain traversal segments: {base_dir}")
-            base_dir.mkdir(parents=True, exist_ok=True)
-            (base_dir / "sessions").mkdir(exist_ok=True)
-            (base_dir / "models.json").write_text(self._models_json(worker), encoding="utf-8")
-            cli_js = self._pi_cli_js()
+            base_dir = base_dir.resolve()
+            cli_js = self._pi_cli_js()  # 先定位 CLI：缺失 fail-fast 带安装指引
+            try:
+                base_dir.mkdir(parents=True, exist_ok=True)
+                (base_dir / "sessions").mkdir(exist_ok=True)
+                (base_dir / "models.json").write_text(self._models_json(worker), encoding="utf-8")
+            except OSError as exc:
+                raise RuntimeError(
+                    f"pi worker 目录/models.json 写入失败 dir={base_dir}（检查磁盘空间与权限）: {exc}"
+                ) from exc
             return ["node", cli_js, *argv, *pi_argv]
         script = (
             'agent_dir="$1"\n'
@@ -162,7 +170,11 @@ class PiDriver(WorkerDriver):
 
     @staticmethod
     def _pi_cli_js() -> str:
-        """定位 pi 的 node 入口（绕过 npm 的 pi.CMD / 无扩展 shim）。"""
+        """定位 pi 的 node 入口（绕过 npm 的 pi.CMD / 无扩展 shim）。
+
+        审计十一轮：CLI 完全缺失时旧版静默退化为 argv["node","pi",...]，
+        报错是晦涩的 MODULE_NOT_FOUND——现在 fail-fast 给出安装指引。
+        """
         resolved = shutil.which("pi")
         if sys.platform == "win32":
             # Windows：无论 .CMD 还是无扩展 shim，都优先 node_modules 原生 cli.js
@@ -173,6 +185,15 @@ class PiDriver(WorkerDriver):
                 cli = candidate / "node_modules" / "@mariozechner" / "pi-coding-agent" / "dist" / "cli.js"
                 if cli.exists():
                     return str(cli)
+            if not resolved:
+                raise RuntimeError(
+                    "pi CLI 未安装：npm install -g @mariozechner/pi-coding-agent"
+                    "（找不到 pi 命令，也无 node_modules 入口）"
+                )
+        if not resolved:
+            raise RuntimeError(
+                "pi CLI 未安装：npm install -g @mariozechner/pi-coding-agent（PATH 中无 pi）"
+            )
         return resolved or "pi"
 
     @staticmethod

@@ -110,7 +110,7 @@ function astraApp(){
     createForm: {title:'', origin:'', goal:'', hints:'', bootstrap:true},
     stepForm: {description:'', expect:''}, concludeForm: {stepId:'', description:''},
     completeForm: {description:''}, hintForm: {content:''}, settingsForm: {},
-    _nodeCount: -1,
+    _nodeCount: -1, actionBusy: false,
 
     init(){
       window.__astra_apply_ui = () => this.applyUI(false);
@@ -341,6 +341,16 @@ function astraApp(){
       return n.data.nodeType==='goal' ? 'medium' : 'summary';
     },
     /* ---- 操作 ---- */
+    /* in-flight 防抖：写操作进行中禁用全部提交按钮（双击曾致重复步骤/重复指引） */
+    guard(fn){
+      if(this.actionBusy) return;
+      this.actionBusy=true;
+      const done=()=>{ this.actionBusy=false; };
+      try{
+        const r=fn();
+        if(r && typeof r.finally==='function'){ r.finally(done); } else { done(); }
+      }catch(e){ done(); throw e; }
+    },
     selectableFacts(){ return (this.current?.facts||[]).filter(f=>f.id!=='goal'&&f.id!=='origin'); },
     toggleStepFrom(id){ const i=this.stepFrom.indexOf(id); i>=0?this.stepFrom.splice(i,1):this.stepFrom.push(id); },
     toggleCompleteFrom(id){ const i=this.completeFrom.indexOf(id); i>=0?this.completeFrom.splice(i,1):this.completeFrom.push(id); },
@@ -348,54 +358,75 @@ function astraApp(){
     openCreate(){ this.createForm={title:'',origin:'',goal:'',hints:'',bootstrap:true}; this.modal='create'; },
     createProject(){
       if(!this.createForm.title.trim()){ this.toast('请填写星域标题','err'); return; }
-      const hints=(this.createForm.hints||'').split('\n').map(s=>s.trim()).filter(Boolean).map(c=>({content:c,creator:'human'}));
-      this.api('POST','/projects',{title:this.createForm.title, origin:this.createForm.origin,
-        goal:this.createForm.goal, bootstrap_enabled:this.createForm.bootstrap, hints}).then(p=>{
-        this.modal=null; this.loadProjects(); this.selectProject(p.project.id);
-      }).catch(e=>this.toast(e.message,'err'));
+      if(!this.createForm.origin.trim() || !this.createForm.goal.trim()){ this.toast('起点与北辰必填','err'); return; }
+      this.guard(()=>{
+        const hints=(this.createForm.hints||'').split('\n').map(s=>s.trim()).filter(Boolean).map(c=>({content:c,creator:'human'}));
+        return this.api('POST','/projects',{title:this.createForm.title, origin:this.createForm.origin,
+          goal:this.createForm.goal, bootstrap_enabled:this.createForm.bootstrap, hints}).then(p=>{
+          this.modal=null; this.loadProjects(); this.selectProject(p.project.id);
+        }).catch(e=>this.toast(e.message,'err'));
+      });
     },
     openCreateStep(){ this.stepFrom=[]; this.stepForm={description:'', expect:''}; this.modal='step'; },
     createStep(){
       if(!this.stepFrom.length){ this.toast('至少选择一个源自天枢','err'); return; }
-      const body={from:this.stepFrom, description:this.stepForm.description, creator:'human', worker:null};
-      if(this.stepForm.expect && this.stepForm.expect.trim()) body.expect=this.stepForm.expect.trim();
-      this.api('POST',`/projects/${this.selectedId}/steps`,body).then(()=>{
-        this.modal=null; this.loadProject(this.selectedId);
-      }).catch(e=>this.toast(e.message,'err'));
+      if(!this.stepForm.description.trim()){ this.toast('请填写斗柄指向','err'); return; }
+      this.guard(()=>{
+        const body={from:this.stepFrom, description:this.stepForm.description, creator:'human', worker:null};
+        if(this.stepForm.expect && this.stepForm.expect.trim()) body.expect=this.stepForm.expect.trim();
+        return this.api('POST',`/projects/${this.selectedId}/steps`,body).then(()=>{
+          this.modal=null; this.loadProject(this.selectedId);
+        }).catch(e=>this.toast(e.message,'err'));
+      });
     },
     openConclude(n){ this.concludeForm={stepId:n.nodeId, description:''}; this.modal='conclude'; },
     concludeStep(){
-      this.api('POST',`/projects/${this.selectedId}/steps/${this.concludeForm.stepId}/conclude`,
-        {worker:'human', description:this.concludeForm.description}).then(()=>{
-        this.modal=null; this.loadProject(this.selectedId);
-      }).catch(e=>this.toast(e.message,'err'));
+      if(!this.concludeForm.description.trim()){ this.toast('请填写结论天枢','err'); return; }
+      this.guard(()=>{
+        return this.api('POST',`/projects/${this.selectedId}/steps/${this.concludeForm.stepId}/conclude`,
+          {worker:'human', description:this.concludeForm.description}).then(()=>{
+          this.modal=null; this.loadProject(this.selectedId);
+        }).catch(e=>this.toast(e.message,'err'));
+      });
     },
     openComplete(){ this.completeFrom=[]; this.completeForm.description=''; this.modal='complete'; },
     completeProject(){
       if(!this.completeFrom.length){ this.toast('至少选择一个完成依据天枢','err'); return; }
-      this.api('POST',`/projects/${this.selectedId}/complete`,{from:this.completeFrom,
-        description:this.completeForm.description, worker:'human'}).then(()=>{
-        this.modal=null; this.loadProject(this.selectedId);
-      }).catch(e=>this.toast(e.message,'err'));
+      if(!this.completeForm.description.trim()){ this.toast('请填写完成说明','err'); return; }
+      this.guard(()=>{
+        return this.api('POST',`/projects/${this.selectedId}/complete`,{from:this.completeFrom,
+          description:this.completeForm.description, worker:'human'}).then(()=>{
+          this.modal=null; this.loadProject(this.selectedId);
+        }).catch(e=>this.toast(e.message,'err'));
+      });
     },
     openAddHint(){ this.hintForm.content=''; this.modal='hint'; },
     addHint(){
       if(!this.hintForm.content.trim()){ this.toast('请填写指引内容','err'); return; }
-      this.api('POST',`/projects/${this.selectedId}/hints`,{content:this.hintForm.content, creator:'human'}).then(()=>{
-        this.modal=null; this.loadProject(this.selectedId);
-      }).catch(e=>this.toast(e.message,'err'));
+      this.guard(()=>{
+        return this.api('POST',`/projects/${this.selectedId}/hints`,{content:this.hintForm.content, creator:'human'}).then(()=>{
+          this.modal=null; this.loadProject(this.selectedId);
+        }).catch(e=>this.toast(e.message,'err'));
+      });
     },
     openSettings(){ this.api('GET','/settings').then(s=>{ this.settingsForm={...s}; this.modal='settings'; }).catch(e=>this.toast(e.message,'err')); },
     saveSettings(){
-      this.api('PUT','/settings',this.settingsForm).then(()=>{ this.modal=null; }).catch(e=>this.toast(e.message,'err'));
+      this.guard(()=>{
+        return this.api('PUT','/settings',this.settingsForm).then(()=>{ this.modal=null; }).catch(e=>this.toast(e.message,'err'));
+      });
     },
-    setStatus(status){ this.api('PUT',`/projects/${this.selectedId}/status`,{status}).then(()=>{ this.loadProject(this.selectedId); }).catch(e=>this.toast(e.message,'err')); },
-    reopenProject(){ this.api('POST',`/projects/${this.selectedId}/reopen`,{description:'手动重开', creator:'human'}).then(()=>{ this.loadProject(this.selectedId); }).catch(e=>this.toast(e.message,'err')); },
+    setStatus(status){ this.guard(()=>{ return this.api('PUT',`/projects/${this.selectedId}/status`,{status}).then(()=>{ this.loadProject(this.selectedId); }).catch(e=>this.toast(e.message,'err')); }); },
+    reopenProject(){ this.guard(()=>{ return this.api('POST',`/projects/${this.selectedId}/reopen`,{description:'手动重开', creator:'human'}).then(()=>{ this.loadProject(this.selectedId); }).catch(e=>this.toast(e.message,'err')); }); },
     askDelete(){ this.modal='delete'; },
     deleteProject(){
-      this.api('DELETE',`/projects/${this.selectedId}`).then(()=>{
-        this.modal=null; this.selectedId=null; this.current=null; this._nodeCount=-1; this.loadProjects();
-      }).catch(e=>this.toast(e.message,'err'));
+      this.guard(()=>{
+        return this.api('DELETE',`/projects/${this.selectedId}`).then(()=>{
+          this.modal=null; this.selectedId=null; this.current=null; this._nodeCount=-1;
+          this.selectedNode=null;
+          if(this.cy){ this.cy.elements().remove(); }  // 画布残留已删项目的图（审计十一轮）
+          this.loadProjects();
+        }).catch(e=>this.toast(e.message,'err'));
+      });
     },
     exportYaml(){ window.open(`/projects/${this.selectedId}/export?format=yaml`,'_blank'); },
 

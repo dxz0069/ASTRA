@@ -61,7 +61,7 @@
     <circle cx="12" cy="20" r="2" fill="oklch(0.82 0.115 200 / 0.7)"/>
     <circle cx="14" cy="50" r="2.5" fill="oklch(0.93 0.008 220 / 0.6)"/>
   </svg>
-  <span class="brand">astra<small>星图 · 星尘记忆 · 双星决策</small></span>
+  <span class="brand">astra<small>星图 · 玉衡摇光 · 北斗导航</small></span>
   <div class="spacer"></div>
   <span class="sync-pill" :class="refreshing && 'busy'"><span class="pulse"></span><span x-text="refreshing ? '同步中' : '已连接 · 5s 轮询'"></span></span>
   <button class="btn glass-chip refract" @click="refreshAll()" :disabled="refreshing">
@@ -133,7 +133,7 @@
       <span class="lg"><span class="sw" style="background:var(--accent)"></span>天枢</span>
       <span class="lg"><span class="sw ring" style="border-color:var(--accent)"></span>斗柄</span>
       <span class="lg"><span class="sw ring" style="border-color:var(--ink-faint)"></span>负结果</span>
-      <span class="lg"><span class="sw ring" style="border-color:var(--ok)"></span>已收束</span>
+      <span class="lg"><span class="sw ring" style="border-color:var(--ok)"></span>已归航</span>
     </div>
     <div class="stage-empty" x-show="!current">
       <svg class="glyph" viewBox="0 0 120 120" fill="none" aria-hidden="true">
@@ -267,7 +267,7 @@
       <div class="form-row"><label>目标（Goal）</label><textarea x-model="createForm.goal" placeholder="目标描述…"></textarea></div>
       <div class="form-row"><label>指引（可选）</label><textarea x-model="createForm.hints" placeholder="每行一条"></textarea></div>
       <div class="form-row"><label class="check-row"><input type="checkbox" x-model="createForm.bootstrap"><span>启用首探</span></label></div>
-      <div class="foot"><button class="btn glass-chip" @click="modal=null">取消</button><button class="btn btn-accent" @click="createProject()">创建</button></div>
+      <div class="foot"><button class="btn glass-chip" @click="modal=null">取消</button><button class="btn btn-accent" :disabled="actionBusy" @click="createProject()">创建</button></div>
     </div>
   </div>
 </template>
@@ -286,7 +286,7 @@
       </div>
       <div class="form-row"><label>斗柄指向</label><textarea x-model="stepForm.description" placeholder="要探索的方向…"></textarea></div>
       <div class="form-row"><label>预期天枢（可选）</label><textarea x-model="stepForm.expect" placeholder="预期产出哪条新天枢…"></textarea></div>
-      <div class="foot"><button class="btn glass-chip" @click="modal=null">取消</button><button class="btn btn-accent" @click="createStep()">创建</button></div>
+      <div class="foot"><button class="btn glass-chip" @click="modal=null">取消</button><button class="btn btn-accent" :disabled="actionBusy" @click="createStep()">创建</button></div>
     </div>
   </div>
 </template>
@@ -298,7 +298,7 @@
       <h2><svg><use href="#i-anchor"/></svg>归航此斗柄</h2>
       <div class="form-row"><label>斗柄</label><input type="text" disabled :value="concludeForm.stepId"></div>
       <div class="form-row"><label>结论天枢</label><textarea x-model="concludeForm.description" placeholder="确认的发现…"></textarea></div>
-      <div class="foot"><button class="btn glass-chip" @click="modal=null">取消</button><button class="btn btn-accent" @click="concludeStep()">写回</button></div>
+      <div class="foot"><button class="btn glass-chip" @click="modal=null">取消</button><button class="btn btn-accent" :disabled="actionBusy" @click="concludeStep()">写回</button></div>
     </div>
   </div>
 </template>
@@ -316,7 +316,7 @@
         </div>
       </div>
       <div class="form-row"><label>完成说明</label><textarea x-model="completeForm.description" placeholder="为什么足以证明目标达成…"></textarea></div>
-      <div class="foot"><button class="btn glass-chip" @click="modal=null">取消</button><button class="btn btn-accent" @click="completeProject()">宣告归航</button></div>
+      <div class="foot"><button class="btn glass-chip" @click="modal=null">取消</button><button class="btn btn-accent" :disabled="actionBusy" @click="completeProject()">宣告归航</button></div>
     </div>
   </div>
 </template>
@@ -327,7 +327,7 @@
     <div class="modal">
       <h2><svg><use href="#i-compass"/></svg>添加指引</h2>
       <div class="form-row"><label>指引内容</label><textarea x-model="hintForm.content" placeholder="如：目标为 WAF 后的登录业务，尝试 multipart 绕过…"></textarea></div>
-      <div class="foot"><button class="btn glass-chip" @click="modal=null">取消</button><button class="btn btn-accent" @click="addHint()">添加</button></div>
+      <div class="foot"><button class="btn glass-chip" @click="modal=null">取消</button><button class="btn btn-accent" :disabled="actionBusy" @click="addHint()">添加</button></div>
     </div>
   </div>
 </template>
@@ -339,7 +339,7 @@
       <h2><svg><use href="#i-sliders"/></svg>设置</h2>
       <div class="form-row"><label>斗柄超时（秒）</label><input type="number" x-model.number="settingsForm.step_timeout"></div>
       <div class="form-row"><label>玉衡超时（秒）</label><input type="number" x-model.number="settingsForm.decide_timeout"></div>
-      <div class="foot"><button class="btn glass-chip" @click="modal=null">取消</button><button class="btn btn-accent" @click="saveSettings()">保存</button></div>
+      <div class="foot"><button class="btn glass-chip" @click="modal=null">取消</button><button class="btn btn-accent" :disabled="actionBusy" @click="saveSettings()">保存</button></div>
     </div>
   </div>
 </template>
@@ -350,7 +350,7 @@
     <div class="modal">
       <h2 class="warn"><svg><use href="#i-alert"/></svg>删除星域</h2>
       <div class="sub">将永久删除 <b class="mono" x-text="current ? current.project.title : ''"></b> 及其全部天枢、斗柄与指引，此操作不可恢复。</div>
-      <div class="foot"><button class="btn glass-chip" @click="modal=null">取消</button><button class="btn btn-accent" style="background:var(--bad);box-shadow:none" @click="deleteProject()">确认删除</button></div>
+      <div class="foot"><button class="btn glass-chip" @click="modal=null">取消</button><button class="btn btn-accent" style="background:var(--bad);box-shadow:none" :disabled="actionBusy" @click="deleteProject()">确认删除</button></div>
     </div>
   </div>
 </template>
