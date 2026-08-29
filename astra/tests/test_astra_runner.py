@@ -665,7 +665,7 @@ def test_render_dispatch_config_pi_fleet(monkeypatch, tmp_path) -> None:
     assert by_name["deepseek-decide"].priority == 1
     assert by_name["deepseek-execute-0"].max_running == 3
     env0 = by_name["deepseek-execute-0"].env
-    assert env0["PI_PROVIDER_API"] == "anthropic"
+    assert env0["PI_PROVIDER_API"] == "anthropic-messages"
     assert env0["PI_API_KEY"] == "sk-test"
     # agent 目录按 worker 隔离（会话复用/续跑依赖稳定路径）
     assert env0["PI_CODING_AGENT_DIR"].endswith("deepseek-execute-0")

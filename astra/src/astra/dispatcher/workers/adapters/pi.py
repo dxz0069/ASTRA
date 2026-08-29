@@ -249,6 +249,8 @@ class PiDriver(WorkerDriver):
             if isinstance(parsed, dict):
                 model["compat"] = parsed
 
+        # PI_PROVIDER_API 取值以 pi-ai 实现为准（spike 实证 2026-08-30）：
+        # anthropic 协议端点 = "anthropic-messages"；openai 系 = "openai-completions"/"openai-responses"
         provider: dict[str, Any] = {
             "baseUrl": env["PI_BASE_URL"],
             "api": env["PI_PROVIDER_API"],
