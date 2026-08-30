@@ -67,7 +67,9 @@ def _load_project_data(conn, project_id: str):
     proj = get_project_or_404(conn, project_id)
 
     facts = conn.execute(
-        "SELECT id, description, kind FROM facts WHERE project_id = ?",
+        # ORDER BY rowid 显式定序：Epitome 的"最近 N 条不折叠"（facts[-30:]）与
+        # YAML 时间线可读性都依赖插入序——裸 SELECT 的返回序 SQL 未担保（审计30轮）
+        "SELECT id, description, kind FROM facts WHERE project_id = ? ORDER BY rowid",
         (project_id,),
     ).fetchall()
     hints = conn.execute(
