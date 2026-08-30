@@ -14,10 +14,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from datetime import datetime
 from pathlib import Path
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """审计23轮：tmp+os.replace 原子写——直写中途断电/磁盘满会把知识库正本写成
+    半截（runner 侧沉淀 13 轮已原子化，本离线工具漏配对）。"""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
 
 DEFAULT_INPUT = Path("/tmp/astra-knowledge-append.json") if sys.platform != "win32" else Path(
     __import__("tempfile").gettempdir()
@@ -109,6 +118,9 @@ def main() -> int:
     except (json.JSONDecodeError, OSError) as exc:
         print(f"[error] 沉淀文件损坏：{exc}")
         return 1
+    if not isinstance(pending, dict):
+        print(f"[error] 沉淀文件结构非预期（应为 {{code: entry}} 字典，实为 {type(pending).__name__}）")
+        return 1
     if not pending:
         print("[skip] 沉淀文件为空")
         return 0
@@ -151,7 +163,7 @@ def main() -> int:
         return 0
 
     args.kb.parent.mkdir(parents=True, exist_ok=True)
-    args.kb.write_text(kb_text, encoding="utf-8")
+    _atomic_write_text(args.kb, kb_text)
     if args.mark_merged:
         args.input.rename(args.input.with_suffix(".merged.json"))
     print(f"[done] 已写入 {args.kb}")
@@ -163,6 +175,9 @@ def main() -> int:
         except (json.JSONDecodeError, OSError) as exc:
             print(f"[warn] 死路沉淀文件损坏：{exc}")
             return 0
+        if not isinstance(pending_dd, dict):
+            print(f"[warn] 死路沉淀结构非预期（实为 {type(pending_dd).__name__}），跳过")
+            return 0
         dd_text = DEFAULT_DEADENDS.read_text(encoding="utf-8") if DEFAULT_DEADENDS.exists() else "# 失败经验库·死路集（负记忆）\n"
         dd_known = existing_codes(dd_text)
         dd_merged = [c for c in pending_dd if c.lower() not in dd_known]
@@ -170,7 +185,7 @@ def main() -> int:
             dd_text += format_deadend(c, pending_dd[c], tag)
         print(f"死路库：新增 {len(dd_merged)} ｜ 跳过 {len(pending_dd) - len(dd_merged)}")
         if dd_merged and not args.dry_run:
-            DEFAULT_DEADENDS.write_text(dd_text, encoding="utf-8")
+            _atomic_write_text(DEFAULT_DEADENDS, dd_text)
             if args.mark_merged:
                 DEFAULT_DEADENDS_INPUT.rename(DEFAULT_DEADENDS_INPUT.with_suffix(".merged.json"))
             print(f"[done] 已写入 {DEFAULT_DEADENDS}")
