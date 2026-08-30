@@ -1499,6 +1499,9 @@ def _pick_neighbor_entries(
     label = _CATEGORY_NAMES.get(my_category, my_category)
     out: list[str] = []
     for c, e in candidates[:limit]:
+        # 负权重（未命中多于命中）的邻居不打扰——参考本身被实战证伪还注入=负资产
+        if _score(c, e)[0] < 0:
+            continue
         approach = (e.get("approach") or "").strip()[:400]
         if not approach:
             continue
@@ -1607,6 +1610,7 @@ def _attach_knowledge(queue: Any, knowledge: dict) -> int:
     """
     attached = 0
     deadends = _load_deadends()
+    stats = _load_memory_stats()
     for ch_item, res in list(queue):
         if res.started:
             continue  # 已开题不回填——注入 fact 只在项目创建时做
@@ -1614,7 +1618,11 @@ def _attach_knowledge(queue: Any, knowledge: dict) -> int:
         entry = knowledge.get(code)
         if entry:
             res.kb_seconds = entry["seconds"]
-            if entry["approach"] and not res.kb_entry_text:
+            # 战绩淘汰：0 命中且 ≥6 未命中（多轮整跑零产出）的精确条目不再注入——
+            # 纯上下文噪音（f1-04 实例：0/24 还在注入全量攻击链）
+            st = stats.get(res.unique_code, {})
+            proven_dead = int(st.get("hits", 0)) == 0 and int(st.get("misses", 0)) >= 6
+            if entry["approach"] and not res.kb_entry_text and not proven_dead:
                 res.kb_entry_text = entry["approach"]
                 attached += 1
         if not res.kb_entry_text and not res.kb_neighbor_texts:

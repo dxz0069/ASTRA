@@ -114,6 +114,40 @@ def test_attach_knowledge_skips_started_and_fills_neighbors_deadends(tmp_path, m
     assert fresh.kb_neighbor_texts == before
 
 
+def test_attach_knowledge_proven_dead_exact_entry_not_injected(tmp_path, monkeypatch):
+    """战绩淘汰：0 命中且 ≥6 未命中的精确条目不再注入（f1-04 型 0/24 负资产）。"""
+    _isolate(tmp_path, monkeypatch)
+    kb = R._load_knowledge_base()
+    assert "old-web1" in kb
+    (tmp_path / "stats.json").write_text(
+        json.dumps({"old-web1": {"name": "老注入题", "hits": 0, "misses": 24}}), encoding="utf-8"
+    )
+    fresh = _result("old-web1", "sql 注入题")
+    R._attach_knowledge([(FakeChallenge("old-web1"), fresh)], kb)
+    assert not fresh.kb_entry_text
+    # 命中过的条目（hits>0）不受淘汰影响
+    (tmp_path / "stats.json").write_text(
+        json.dumps({"old-web1": {"name": "老注入题", "hits": 1, "misses": 8}}), encoding="utf-8"
+    )
+    fresh2 = _result("old-web1", "sql 注入题")
+    R._attach_knowledge([(FakeChallenge("old-web1"), fresh2)], kb)
+    assert fresh2.kb_entry_text and "sqlmap" in fresh2.kb_entry_text
+
+
+def test_pick_neighbor_entries_skips_negative_weight(tmp_path, monkeypatch):
+    """负权重邻居（未命中多于命中）不打扰——参考被实战证伪还注入=负资产。"""
+    _isolate(tmp_path, monkeypatch)
+    (tmp_path / "stats.json").write_text(
+        json.dumps({"old-web1": {"name": "老注入题", "hits": 0, "misses": 5}}), encoding="utf-8"
+    )
+    kb = R._load_knowledge_base()
+    assert R._pick_neighbor_entries(kb, "new-web", "登录后台 sql 注入") == []
+    # 从未用过的邻居（weight=1.0）仍可注入
+    (tmp_path / "stats.json").write_text("{}", encoding="utf-8")
+    nb = R._pick_neighbor_entries(kb, "new-web", "登录后台 sql 注入")
+    assert nb and "sqlmap" in nb[0]
+
+
 # ---------------- V5：失败经验库 ----------------
 
 def test_append_deadend_entry_sanitizes_and_classifies_reason(tmp_path, monkeypatch):
