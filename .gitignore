@@ -51,3 +51,6 @@ docs/review-drafts/
 *.tar.gz
 # 运行时知识产物不入库（种子由仓库提供，运行时改写不回传）
 container/knowledge/constellation.json
+
+# ZCode 会话工作区
+.zcode/
