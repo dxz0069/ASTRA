@@ -1078,6 +1078,16 @@ def _run_single_challenge(
                 except Exception:  # noqa: BLE001
                     pass
             if engine.wait_project(project_id, timeout_seconds=0.5):
+                if not result.flags_correct and not result.flags_found:
+                    # 审计28轮：decide 自主关题但全程 0 旗（r7 c-07 实例）——
+                    # 引擎 completed 直接标 done 会让整题本轮沉没。转 not-done
+                    # 分支按 defer 语义收尾（回队续跑/预算耗尽才放弃），与
+                    # 45min 空转题同待遇；已有旗（flags_correct>0）仍正常收卷。
+                    LOG.warning(
+                        "engine completed with zero flags code=%s（转 defer 回队，不沉没）",
+                        code,
+                    )
+                    break
                 done = True
                 break
             time.sleep(flag_poll_seconds)

@@ -160,12 +160,17 @@ def test_run_benchmark_value_hybrid_order(monkeypatch) -> None:
     easy1 = DiffChallenge("x-easy-90", difficulty="easy", total_score=90)
     med1 = DiffChallenge("x-med-300", difficulty="medium", total_score=300)
     easy2 = DiffChallenge("x-easy-250", difficulty="easy", total_score=250)
-    flags = {c.unique_code: ["flag{f}"] for c in (hard1, big, easy1, med1, easy2)}
+    flags = {c.unique_code: ["flag{fff}"] for c in (hard1, big, easy1, med1, easy2)}
+
+    class AlwaysFlagEngine(FakeEngine):
+        # 审计28轮：0 旗引擎归航已转 defer 轮转——顺序测试需真旗完成（任意项目均吐旗）
+        def list_fact_descriptions(self, project_id: str) -> list[str]:
+            return ["found flag flag{fff}"]
 
     client = FakeClient([hard1, big, easy1, med1, easy2], flags=flags)
     run_benchmark(
         client,
-        lambda: FakeEngine({"proj-0": ["flag{f}"]}),
+        lambda: AlwaysFlagEngine({}),
         challenge_timeout_seconds=0.5,
         flag_poll_seconds=0.01,
         parallel=1,
@@ -177,7 +182,7 @@ def test_run_benchmark_value_hybrid_order(monkeypatch) -> None:
     client2 = FakeClient([hard1, big, easy1, med1, easy2], flags=flags)
     run_benchmark(
         client2,
-        lambda: FakeEngine({"proj-0": ["flag{f}"]}),
+        lambda: AlwaysFlagEngine({}),
         challenge_timeout_seconds=0.5,
         flag_poll_seconds=0.01,
         parallel=1,
@@ -1083,3 +1088,37 @@ def test_v2_kb_short_first_attempt(monkeypatch, tmp_path) -> None:
     assert elapsed < 10.0, f"first attack not shortened? elapsed={elapsed:.1f}s"
     assert client.started.count("kb-01") == 2  # 两发后 defer 上限放弃
     assert results[0].defer_count == runner_mod.MAX_DEFER_PER_CHALLENGE
+
+
+def test_run_benchmark_engine_completed_zero_flags_defers_not_done() -> None:
+    """审计28轮：decide 自主关题但 0 旗（r7 c-07 实例）——不当 done 沉没。
+
+    引擎立即归航（wait_project=True）且星图无旗：旧行为直接标 done 本轮弃权；
+    现在按 defer 语义回队续跑（defer 预算耗尽才真放弃）。"""
+    challenges = [FakeChallenge("z-01", total_score=100, flag_count=1)]
+
+    class QuickCompleteEngine(FakeEngine):
+        def __init__(self, flags_by_project):
+            super().__init__(flags_by_project, done=True)
+
+        def list_fact_descriptions(self, project_id: str) -> list[str]:
+            return ["端口 8080 开放，无旗产出"]  # 有天枢但零旗
+
+    engines: list[QuickCompleteEngine] = []
+
+    def factory():
+        e = QuickCompleteEngine({})
+        engines.append(e)
+        return e
+
+    client = FakeClient(challenges, flags={"z-01": ["flag{late_win}"]})
+
+    results = run_benchmark(
+        client, factory,
+        challenge_timeout_seconds=0.2, flag_poll_seconds=0.05,
+        defer_after_seconds=10.0,  # 普通空转 defer 不会触发（引擎 0.05s 内即归航）
+    )
+    r = results[0]
+    # 引擎秒归航但 0 旗 → 转 defer 回队而非 done；预算 2 次后放弃
+    assert r.defer_count == 2, "0 旗引擎归航应按 defer 轮转（旧行为 defer_count=0 直接沉没）"
+    assert client.started.count("z-01") == 2  # 回队续跑了一次
