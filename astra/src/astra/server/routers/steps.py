@@ -125,7 +125,7 @@ def release(project_id: str, step_id: str, body: HeartbeatRequest):
     response_model=ConcludeResponse,
 )
 def conclude(project_id: str, step_id: str, body: ConcludeRequest):
-    """Execute 收束：submit_fact——写新星记 + 步骤落点，可携一条沿途 Finding。
+    """Execute 收束（自证写回）：写新天枢 + 步骤落点，可携一条沿途 Finding。
 
     原子预留（conclude_step_atomic）抢写权 → 同事务内插 fact + 终写落点；
     并发败者整个请求回滚，不产生孤儿 fact。

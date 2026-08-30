@@ -380,7 +380,7 @@ def report(db_path: str, project: str, out: Path):
     finally:
         conn.close()
 
-    # 风险评级启发式：关键词命中即评级（FGS 无置信度字段，发现均已由执行者实测自证）
+    # 风险评级启发式：关键词命中即评级（星图无置信度字段，发现均已由执行者实测自证）
     HIGH_KWS = ("rce", "远程命令", "任意命令", "凭据", "密码", "私钥", "ak/sk", "token", "getshell", "webshell", "反弹")
     MED_KWS = ("注入", "ssrf", "xss", "越权", "上传", "反序列化", "穿越", "泄露", "sqli")
 

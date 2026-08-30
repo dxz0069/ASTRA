@@ -11,7 +11,7 @@ tsecbench_adapter.TsecbenchAdapter——平台 SDK/字段形态/异常语义/经
 4. 输出每题得分/flag/耗时报告（喂作品评审量化指标）
 
 flag 提交由 runner 统一执行而非交给 agent 直连，保证幂等、防误报、可统计。
-agent 只需把拿到的 flag 作为星记写回星图（见 skill 说明）。
+agent 只需把拿到的 flag 作为天枢写回星图（见 skill 说明）。
 """
 
 from __future__ import annotations
@@ -76,7 +76,7 @@ class ChallengeResult:
     hint_texts: list[str] = field(default_factory=list)  # V2-1④：已购 hint 文本（defer 续跑复用，禁止重购）
     kb_seconds: float | None = None  # V2-5/V2-7：知识库历史首解耗时（期望预算依据）
     kb_entry_text: str | None = None  # V2-6：知识库思路条目（开局注入参考 fact）
-    kb_approach_draft: str | None = None  # V2-6：末段星记浓缩（解出后沉淀知识库用）
+    kb_approach_draft: str | None = None  # V2-6：末段天枢浓缩（解出后沉淀知识库用）
     kb_neighbor_texts: list[str] = field(default_factory=list)  # V4：同题型邻居经验（举一反三注入）
     transient_count: int = 0  # 自愈①：连续网络瞬断计数（超上限判死退出，防误匹配死循环）
     busy_count: int = 0  # 自愈④：槽位 busy 连击计数（指数退避用；漏定义曾致 SlotBusy 线程炸死）
@@ -462,7 +462,7 @@ def run_benchmark(
                 # 队列轮转后再续跑——避免死磕单题拖垮整轮吞吐
                 result.defer_count += 1
                 # V9 战果扩展预算：每收一旗 +2 窗口（多旗题还有油水就不放弃），
-                # hard 题 +1；星图已深（≥25 星记=有实质进展非空转）再 +1；
+                # hard 题 +1；星图已深（≥25 天枢=有实质进展非空转）再 +1；
                 # V10 难题倾斜（榜首经验：51% 会话堆难题——大分题≥800 再 +1）；
                 # 封顶 MAX_DEFER_BUDGET_CAP——零战果题维持原上限 2
                 budget = MAX_DEFER_PER_CHALLENGE + 2 * (result.flags_correct or 0)
@@ -479,7 +479,7 @@ def run_benchmark(
                         "challenge give up code=%s defer=%s（达到上限，删除项目放弃）",
                         result.unique_code, result.defer_count,
                     )
-                    # V5 失败经验库：删项目前抢救末段星记——死路与打法同样是资产
+                    # V5 失败经验库：删项目前抢救末段天枢——死路与打法同样是资产
                     if result.project_id and not result.kb_approach_draft:
                         try:
                             list_fn = getattr(engine_factory(), "list_fact_descriptions", None)
@@ -817,7 +817,7 @@ def _run_single_challenge(
     difficulty = str(getattr(ch, "difficulty", "") or "").lower()
     timeout_seconds = DIFFICULTY_TIMEOUTS.get(difficulty, challenge_timeout_seconds)
     engine = engine_factory()
-    # V2-6 修复：finally 段（星记采集）引用这两个变量——start 阶段即抛 TaskFinishedError
+    # V2-6 修复：finally 段（天枢采集）引用这两个变量——start 阶段即抛 TaskFinishedError
     # 时它们尚未赋值，UnboundLocalError 会掩盖原异常导致 409 全停信号失效。前置初始化。
     project_id: str | None = None
     started_this_round = False  # B1：本轮局部标记，防跨轮残留假 close_failed
@@ -969,9 +969,9 @@ def _run_single_challenge(
         hint_eligible = auto_hint and challenge_score >= hint_min_score
         # V2-1④：hint 次数缓存感知——defer 前已购的 hint 不重购
         hint_taken = min(len(result.hint_texts), MAX_HINTS_PER_CHALLENGE)
-        facts_at_hint1: int | None = None  # V2-1①：hint1 时的星记数（hint2 前对比是否产生新攻击面）
+        facts_at_hint1: int | None = None  # V2-1①：hint1 时的天枢数（hint2 前对比是否产生新攻击面）
         hint1_at: float | None = None  # R10：hint1 时刻（post-hint 止损计时）
-        facts_at_last_poll: int | None = None  # R10：上次轮询星记数（hint 后停滞判据）
+        facts_at_last_poll: int | None = None  # R10：上次轮询天枢数（hint 后停滞判据）
         # V9 多旗收割：hint 门控从"零旗才买"改为"本窗口停滞即买"——多旗题卡在
         # 2/6 时同样需要 hint 解锁下一旗（剩余旗的收益远大于 hint 扣分）
         flags_at_window_start = len(result.flags_found)
@@ -988,7 +988,7 @@ def _run_single_challenge(
                 pass
             stalled_no_new_flag = len(result.flags_found) == flags_at_window_start
             # R10 hint 后止损（b-01 型空转：hint@135min 后 30 分钟零产出占槽到窗口尾）——
-            # hint 已购、又 15 分钟无新旗且星记零增长 → 提前结束窗口回队（星图保留）
+            # hint 已购、又 15 分钟无新旗且天枢零增长 → 提前结束窗口回队（星图保留）
             if (
                 hint1_at is not None
                 and stalled_no_new_flag
@@ -998,7 +998,7 @@ def _run_single_challenge(
                 and time.monotonic() - hint1_at >= 900
             ):
                 LOG.warning(
-                    "post-hint stall code=%s（hint 后 %.0f 分钟无新旗无新星记——提前回队腾槽）",
+                    "post-hint stall code=%s（hint 后 %.0f 分钟无新旗无新天枢——提前回队腾槽）",
                     code, (time.monotonic() - hint1_at) / 60,
                 )
                 break
@@ -1035,7 +1035,7 @@ def _run_single_challenge(
                             for flag in [f for f in last_flags if f not in result.flags_found]:
                                 _submit_flag_safely(client, code, flag, result, started_at, engine=engine)
                             if last_descs:
-                                # V2-6：删项目前留末段星记（解出后沉淀知识库）；注入记忆剔除
+                                # V2-6：删项目前留末段天枢（解出后沉淀知识库）；注入记忆剔除
                                 result.kb_approach_draft = "；".join(_sediment_fact_filter(last_descs)[-3:])[:800]
                                 # V7 Constellation：网络级侦察结论跨项目共享
                                 try:
@@ -1146,7 +1146,7 @@ def _run_single_challenge(
                 result.hints_count = int(stats.get("hints", 0) or 0)
         except Exception:  # noqa: BLE001 —— 统计失败不影响主流程
             pass
-        # V2-6：末段星记浓缩（项目仍在时兜底采集；完成路径删项目前已采）
+        # V2-6：末段天枢浓缩（项目仍在时兜底采集；完成路径删项目前已采）
         if project_id and not result.kb_approach_draft and not project_gone:
             try:
                 _descs = _sediment_fact_filter(engine.list_fact_descriptions(project_id))
@@ -1342,7 +1342,7 @@ def _auto_distill(progress_file: str | None) -> None:
 def _append_knowledge_entry(result: ChallengeResult, fact_descriptions: list[str]) -> None:
     """V2-6：解出后自动沉淀思路到运行时知识库（progress 同目录，赛后人工合并回仓库文件）。
 
-    攻击链取该题末段星记（含 completion fact，是攻击链的浓缩叙述）；双层脱敏后写入。
+    攻击链取该题末段天枢（含 completion fact，是攻击链的浓缩叙述）；双层脱敏后写入。
     """
     try:
         # 托管镜像 /opt/knowledge 为 root 只读——沉淀文件写到临时目录（赛后人工取回合并）
@@ -1632,7 +1632,7 @@ DEADENDS_FILE = (
 
 
 def _append_deadend_entry(result: ChallengeResult) -> None:
-    """V5：未解出题收尾时沉淀死路（末段星记=走过的弯路浓缩），双层脱敏后写 /tmp JSON。
+    """V5：未解出题收尾时沉淀死路（末段天枢=走过的弯路浓缩），双层脱敏后写 /tmp JSON。
 
     别人只记住成功，我们把失败变成资产：死路记忆按题型注入后来的题（避坑提示）。
     """

@@ -31,7 +31,7 @@ LOG = logging.getLogger(__name__)
 
 FAILURE_HINT_PREFIX = "[失败学习] "
 
-# 星记去重：新发现与既有星记描述的 Jaccard 词集合相似度达到该阈值视为重复（防重复侦察）。
+# 天枢去重：新发现与既有天枢描述的 Jaccard 词集合相似度达到该阈值视为重复（防重复侦察）。
 # token 粒度：ASCII 词 + 连续 CJK 段（中文描述按短语段匹配，兼顾中英文混排）。
 FACT_SIMILARITY_THRESHOLD = 0.6
 
@@ -41,7 +41,7 @@ def _fact_tokens(text: str) -> set[str]:
 
 
 def find_duplicate_fact(project: ProjectDetail, description: str, *, exclude_ids: tuple[str, ...] = ("origin", "goal")) -> Fact | None:
-    """在既有星记中找与 description 高度相似的（防重复侦察/重复写回）。
+    """在既有天枢中找与 description 高度相似的（防重复侦察/重复写回）。
 
     - 描述含 flag{...} 的发现不去重（flag 必须完整写回，可能多个 flag 同题）；
     - origin/goal 不参与比较；

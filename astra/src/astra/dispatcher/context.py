@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""FGS 焦点上下文裁剪。
+"""星图焦点上下文裁剪。
 
 传统实现把整张图的历史无差别地内联进每次推理，token 随图线性增长。
 这里对 prompt 内联的事实（facts）、步骤（steps）与指引（hints）做预算治理：

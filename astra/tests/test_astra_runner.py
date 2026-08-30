@@ -804,7 +804,7 @@ def test_collect_worker_usage_aggregates_and_tolerates_bad_lines(monkeypatch, tm
 
 
 def test_render_dispatch_config_defaults_to_pi(monkeypatch, tmp_path) -> None:
-    """默认 ASTRA_WORKER_TYPE=pi（cairn-y：执行底座只留 pi）。漏带该变量也走正确栈。"""
+    """默认 ASTRA_WORKER_TYPE=pi（0.2 重建：执行底座只留 pi）。漏带该变量也走正确栈。"""
     from astra_runner.astra_runner_engine import AstraDaemon
 
     monkeypatch.delenv("ASTRA_WORKER_TYPE", raising=False)

@@ -131,7 +131,7 @@ class ASTRAClient:
         kind: str = "regular",
         finding: str | None = None,
     ) -> ApiResult:
-        """Execute 收束（submit_fact）：写事实+步骤落点，可携沿途 Finding。"""
+        """Execute 收束（自证写回）：写事实+步骤落点，可携沿途 Finding。"""
         body: dict[str, Any] = {"worker": worker, "description": description}
         if kind != "regular":
             body["kind"] = kind

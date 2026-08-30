@@ -18,7 +18,7 @@ class Fact(BaseModel):
 
 
 class Step(BaseModel):
-    """FGS 的 Step：从既有事实出发、预期产出新事实的因果行动。
+    """星图的 Step：从既有事实出发、预期产出新事实的因果行动。
 
     生命周期：status=open 可被认领执行；Decide 可 close（附 reason，留痕防重开死路）；
     执行收束写 to_fact_id + concluded_at。
@@ -43,7 +43,7 @@ class Step(BaseModel):
 
 
 class Finding(BaseModel):
-    """FGS 的 Finding：搜索过程的沿途发现（如漏洞）——与 Goal 终点相对的产出物。"""
+    """星图的 Finding：搜索过程的沿途发现（如漏洞）——与 Goal 终点相对的产出物。"""
 
     id: str
     description: str
@@ -51,7 +51,7 @@ class Finding(BaseModel):
 
 
 class SubGoal(BaseModel):
-    """FGS 的动态 Sub Goal：阶段性里程碑，Decide 可增删。"""
+    """星图的动态 Sub Goal：阶段性里程碑，Decide 可增删。"""
 
     id: str
     description: str
