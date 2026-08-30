@@ -1376,6 +1376,25 @@ def _memory_reinforcement_text(code: str) -> str:
     return f"（该思路历史战绩：{hits} 次命中/{misses} 次未命中）"
 
 
+def _recency_decay(last_used: str, half_life_days: float = 30.0) -> float:
+    """遗忘曲线：战绩权重的艾宾浩斯式时间衰减。
+
+    score = (hits - misses) × 0.5 ** (距 last_used 天数 / 半衰期)：
+    近期实战验证过的打法满权重上浮，久未命中的老条目自然沉底。
+    从未注入过（无 last_used）返回 1.0——新条目先给满权重，用实战说话。
+    """
+    if not last_used:
+        return 1.0
+    try:
+        last = datetime.fromisoformat(str(last_used))
+    except ValueError:
+        return 1.0
+    days = (datetime.now() - last).total_seconds() / 86400.0
+    if days <= 0:
+        return 1.0
+    return 0.5 ** (days / half_life_days)
+
+
 # ---------------- V4 举一反三：题型分类 + 同题型邻居经验注入 + 赛中实时复用 ----------------
 
 # 关键词→题型映射（顺序即优先级：先匹配更specific的类别）
@@ -1420,10 +1439,12 @@ def _pick_neighbor_entries(
         return []
     stats = _load_memory_stats()
 
-    def _score(entry_code: str, entry: dict) -> tuple[int, int]:
+    def _score(entry_code: str, entry: dict) -> tuple[float, int]:
         st = stats.get(entry_code, {})
         hits, misses = int(st.get("hits", 0)), int(st.get("misses", 0))
-        return (hits - misses, int(entry.get("awarded") or 0))
+        # 遗忘曲线：战绩差 × 时间衰减——同战绩下近期验证的优先，久未用条目沉底
+        weight = (hits - misses) * _recency_decay(st.get("last_used", ""))
+        return (round(weight, 4), int(entry.get("awarded") or 0))
 
     candidates = [
         (c, e) for c, e in knowledge.items()

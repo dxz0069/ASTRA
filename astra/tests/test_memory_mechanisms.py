@@ -167,3 +167,46 @@ def test_hosted_kb_disabled_gates_all_preloaded_memory(tmp_path, monkeypatch):
     )
     kb = R._load_runtime_knowledge()
     assert "live-1" in kb
+
+
+# ---------------- 遗忘曲线：战绩 × 时间衰减 ----------------
+
+def test_recency_decay_boundaries():
+    from datetime import datetime, timedelta
+
+    assert R._recency_decay("") == 1.0
+    assert R._recency_decay("garbage") == 1.0
+    assert R._recency_decay(datetime.now().isoformat()) == 1.0
+    # 半衰期 30 天：30 天前 ≈ 0.5，90 天前 ≈ 0.125
+    assert 0.45 <= R._recency_decay((datetime.now() - timedelta(days=30)).isoformat()) <= 0.55
+    assert 0.10 <= R._recency_decay((datetime.now() - timedelta(days=90)).isoformat()) <= 0.15
+
+
+def test_neighbor_picking_prefers_recent_over_stale_same_record(tmp_path, monkeypatch):
+    """遗忘曲线：同战绩条目，近期实战验证的排在前，久未使用的自然沉底。"""
+    from datetime import datetime, timedelta
+
+    _isolate(tmp_path, monkeypatch)
+    (tmp_path / "kb.md").write_text(
+        "# KB\n\n"
+        "## 老注入题（old-web1）\n- 分值/难度：300 / medium ｜ 首解耗时：5min ｜ 来源：[x]\n"
+        "- 思路1：登录页 sql 注入，sqlmap --tamper 绕 WAF 拿数据\n\n"
+        "## 另一注入题（old-web2）\n- 分值/难度：300 / medium ｜ 首解耗时：5min ｜ 来源：[x]\n"
+        "- 思路1：宽字节注入绕过转义拿数据\n",
+        encoding="utf-8",
+    )
+    now = datetime.now()
+    (tmp_path / "stats.json").write_text(
+        json.dumps({
+            "old-web1": {"name": "老注入题", "hits": 3, "misses": 1,
+                         "last_used": (now - timedelta(days=1)).isoformat(timespec="seconds")},
+            "old-web2": {"name": "另一注入题", "hits": 3, "misses": 1,
+                         "last_used": (now - timedelta(days=120)).isoformat(timespec="seconds")},
+        }),
+        encoding="utf-8",
+    )
+    kb = R._load_knowledge_base()
+    nb = R._pick_neighbor_entries(kb, "new-web", "某站登录后台 sql 注入点", limit=2)
+    assert len(nb) == 2
+    assert "老注入题" in nb[0]  # 近期验证（1 天前）满权重在前
+    assert "宽字节" in nb[1]  # 久未使用（120 天前）衰减沉底

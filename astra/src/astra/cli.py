@@ -141,16 +141,30 @@ def stats(db_path: str, kb_path: Path):
         used = total_hits + total_misses
         rate = f"{100 * total_hits / used:.0f}%" if used else "暂无数据"
         click.echo(f"  条目：{len(stats_data)} ｜ 注入后命中：{total_hits} ｜ 未命中：{total_misses} ｜ 命中率：{rate}")
-        top = sorted(
-            stats_data.items(),
-            key=lambda kv: int(kv[1].get("hits", 0)) - int(kv[1].get("misses", 0)),
-            reverse=True,
-        )[:5]
+
+        def _decay(last_used: str, half_life_days: float = 30.0) -> float:
+            # 遗忘曲线：与 runner._recency_decay 同式（0.5 ** (Δdays/半衰期)），供观测展示
+            from datetime import datetime as _dt
+
+            if not last_used:
+                return 1.0
+            try:
+                days = (_dt.now() - _dt.fromisoformat(str(last_used))).total_seconds() / 86400.0
+            except ValueError:
+                return 1.0
+            return 1.0 if days <= 0 else 0.5 ** (days / half_life_days)
+
+        def _weight(entry: dict) -> float:
+            raw = int(entry.get("hits", 0)) - int(entry.get("misses", 0))
+            return raw * _decay(entry.get("last_used", ""))
+
+        top = sorted(stats_data.items(), key=lambda kv: _weight(kv[1]), reverse=True)[:5]
         for code, entry in top:
             if int(entry.get("hits", 0)) or int(entry.get("misses", 0)):
                 click.echo(
                     f"  - {entry.get('name', code)}：{entry.get('hits', 0)} 命中 / "
-                    f"{entry.get('misses', 0)} 未命中（last {entry.get('last_used', '?')}）"
+                    f"{entry.get('misses', 0)} 未命中 ｜ 衰减后权重 {_weight(entry):.2f}"
+                    f"（last {entry.get('last_used', '?')}）"
                 )
     except (OSError, json.JSONDecodeError):
         click.echo("  （暂无统计——首轮复利数据在赛后生成）")
