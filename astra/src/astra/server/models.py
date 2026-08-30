@@ -130,7 +130,7 @@ class CreateFactRequest(BaseModel):
 
 
 class CreateProjectRequest(BaseModel):
-    title: str
+    title: str = Field(max_length=512)  # 审计14轮：唯一漏网的请求侧字符串（origin/goal 65K 有帽）
     origin: str = Field(max_length=65536)
     goal: str = Field(max_length=65536)
     bootstrap_enabled: bool = True
