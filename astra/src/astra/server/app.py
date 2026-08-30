@@ -40,19 +40,36 @@ app = FastAPI(
 )
 
 
+# 审计22轮：@app.middleware 后注册者在外层先执行——注册序即倒序执行序。
+# 目标执行序（外→内）：auth → body 限制 → 安全头。auth 必须最外：
+# 旧序 body 在 auth 之前，未认证请求也被完整读入最多 2MB 体才吃 401，
+# 无凭证频率攻击白嫖内存/CPU。安全头最内层：出站方向仍给所有响应（含 401）加头。
 @app.middleware("http")
-async def auth_middleware(request: Request, call_next):
-    # 审计修复（表述不符）：路由实际挂在根路径（/projects、/settings…），并无 /api
-    # 前缀——原 startswith("/api") 判断永不命中，认证是死代码。改为 token 设置时
-    # 保护全部路径（生产模式 docs 已禁用；/ 与 /static 属管理 UI，锁住符合预期）
-    if _AUTH_TOKEN:
-        auth_header = request.headers.get("authorization", "")
-        api_key_header = request.headers.get("x-api-key", "")
-        provided = auth_header.removeprefix("Bearer ").strip() or api_key_header.strip()
-        # 安全审计：constant-time 比较——普通 != 会泄露 token 长度/前缀（计时攻击）
-        if not _secrets.compare_digest(provided, _AUTH_TOKEN):
-            return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
-    return await call_next(request)
+async def security_headers_middleware(request: Request, call_next):
+    """审计修复（CWE-693）：补关键安全响应头。
+
+    X-Frame-Options/X-Content-Type-Options/Referrer-Policy 全量附加；
+    CSP 分三档：UI 页面（/）用允许自源资源的最小集（样式需 unsafe-inline——
+    图标 sprite 的隐藏 style 属性在标记内）；/static 资源不加 CSP；
+    其余 API 响应用最严格的 default-src 'none'。
+    HSTS 仅在 TLS 下有意义，本地 http 部署不加。
+    """
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    if request.url.path == "/":
+        response.headers.setdefault(
+            "Content-Security-Policy",
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data:; font-src 'self'; connect-src 'self'; "
+            "frame-ancestors 'none'",
+        )
+    elif not request.url.path.startswith("/static"):
+        response.headers.setdefault(
+            "Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'"
+        )
+    return response
 
 
 @app.middleware("http")
@@ -84,31 +101,18 @@ async def body_size_limit_middleware(request: Request, call_next):
 
 
 @app.middleware("http")
-async def security_headers_middleware(request: Request, call_next):
-    """审计修复（CWE-693）：补关键安全响应头。
-
-    X-Frame-Options/X-Content-Type-Options/Referrer-Policy 全量附加；
-    CSP 分三档：UI 页面（/）用允许自源资源的最小集（样式需 unsafe-inline——
-    图标 sprite 的隐藏 style 属性在标记内）；/static 资源不加 CSP；
-    其余 API 响应用最严格的 default-src 'none'。
-    HSTS 仅在 TLS 下有意义，本地 http 部署不加。
-    """
-    response = await call_next(request)
-    response.headers.setdefault("X-Content-Type-Options", "nosniff")
-    response.headers.setdefault("X-Frame-Options", "DENY")
-    response.headers.setdefault("Referrer-Policy", "no-referrer")
-    if request.url.path == "/":
-        response.headers.setdefault(
-            "Content-Security-Policy",
-            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
-            "img-src 'self' data:; font-src 'self'; connect-src 'self'; "
-            "frame-ancestors 'none'",
-        )
-    elif not request.url.path.startswith("/static"):
-        response.headers.setdefault(
-            "Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'"
-        )
-    return response
+async def auth_middleware(request: Request, call_next):
+    # 审计修复（表述不符）：路由实际挂在根路径（/projects、/settings…），并无 /api
+    # 前缀——原 startswith("/api") 判断永不命中，认证是死代码。改为 token 设置时
+    # 保护全部路径（生产模式 docs 已禁用；/ 与 /static 属管理 UI，锁住符合预期）
+    if _AUTH_TOKEN:
+        auth_header = request.headers.get("authorization", "")
+        api_key_header = request.headers.get("x-api-key", "")
+        provided = auth_header.removeprefix("Bearer ").strip() or api_key_header.strip()
+        # 安全审计：constant-time 比较——普通 != 会泄露 token 长度/前缀（计时攻击）
+        if not _secrets.compare_digest(provided, _AUTH_TOKEN):
+            return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+    return await call_next(request)
 
 
 app.include_router(settings.router)
