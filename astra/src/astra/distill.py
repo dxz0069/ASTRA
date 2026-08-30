@@ -82,18 +82,23 @@ def distill_new_entries(pending: dict) -> str:
 
 
 def distill_corrections(stats: dict, kb_text: str, dd_text: str) -> str:
-    """修正建议：战绩差的条目建议降权复核；死路与打法同题型对勘。"""
+    """修正建议：战绩差的条目建议降权复核；死路与打法同题型对勘。
+
+    审计16轮：题码匹配从子串 in 改为 KB 条目正则提取的精确集合——
+    旧实现 "a-1" in text 会命中（a-10）/（a-12），修正建议张冠李戴。
+    """
+    kb_codes = {m.group(2).lower() for m in KB_ENTRY_RE.finditer(kb_text)}
     lines = []
     for code, st in stats.items():
         hits, misses = int(st.get("hits", 0)), int(st.get("misses", 0))
-        if misses > hits and code.lower() in kb_text.lower():
+        if misses > hits and code.lower() in kb_codes:
             lines.append(
                 f"- **{st.get('name', code)}（{code}）**：{hits} 命中/{misses} 未命中——"
                 f"建议复核该条目是否过时/实例已变，考虑降权或标注适用条件"
             )
     dd_codes = {m.group(2) for m in KB_ENTRY_RE.finditer(dd_text)}
     for code in dd_codes:
-        if code.lower() in kb_text.lower():
+        if code.lower() in kb_codes:
             lines.append(
                 f"- **{code}**：同时出现在知识库（已解出）与死路库（未解出）——"
                 f"不同实例分叉，建议在条目中标注适用条件而非删除"
