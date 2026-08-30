@@ -1212,14 +1212,16 @@ _KB_ENTRY_RE = re.compile(r"^## (.+?)（([a-z0-9-]+)）\s*$", re.MULTILINE)
 _KB_META_RE = re.compile(r"首解耗时：(\d+)min")
 _KB_HINT_RE = re.compile(r"^- 思路\d+：(.+)$", re.MULTILINE)
 # V2-6 双层脱敏：① flag 值；② secret 语境附近的 ≥12 位随机串（flag 组件同罪）
-_FLAG_VALUE_RE = re.compile(r"(flag|FLAG)\{[^}\s]{3,}\}")
+# 审计16轮：补 IGNORECASE——旧正则只抓 flag{/FLAG{ 两种形态，混合大小写 Flag{...}
+# 漏网（r7 实测平台旗子确有大小写变体），真旗会随沉淀→LLM 蒸馏外发外部端点
+_FLAG_VALUE_RE = re.compile(r"flag\{[^}\s]{3,}\}", re.IGNORECASE)
 _SECRET_CTX_RE = re.compile(
     r"(?i)(secret|flag|key|token|password|泄漏|密码|密钥)[^\n]{0,100}?([0-9a-fA-F]{12,})"
 )
 
 
 def _sanitize_kb_text(text: str) -> str:
-    text = _FLAG_VALUE_RE.sub(lambda m: f"{m.group(1)}{{...已脱敏...}}", text)
+    text = _FLAG_VALUE_RE.sub("flag{...已脱敏...}", text)
     text = _SECRET_CTX_RE.sub(
         lambda m: m.group(0).replace(m.group(2), "[REDACTED]"), text
     )

@@ -897,6 +897,17 @@ def test_v2_sanitize_kb_text() -> None:
     assert _sanitize_kb_text("vulnerability CVE-2024-1234 via upload") == "vulnerability CVE-2024-1234 via upload"
 
 
+def test_v2_sanitize_kb_text_mixed_case_flag() -> None:
+    """审计16轮：混合大小写旗形态（Flag{...}/fLaG{...}）必须脱敏——
+    旧正则只抓 flag{/FLAG{ 两形态，真旗随沉淀→LLM 蒸馏外发外部端点。"""
+    from astra_runner.runner import _sanitize_kb_text
+
+    for form in ("Flag{MiXeD-CaSe-99}", "fLaG{MiXeD-CaSe-99}", "FLAG{MiXeD-CaSe-99}", "flag{MiXeD-CaSe-99}"):
+        clean = _sanitize_kb_text(f"拿到 {form} 之后提权")
+        assert "MiXeD-CaSe-99" not in clean, form
+        assert "已脱敏" in clean, form
+
+
 def test_v2_expected_budget(tmp_path, monkeypatch) -> None:
     """V2-7 期望预算：KB 题 2×首解(15min 地板)、近失 20min、无参考按难度。
 

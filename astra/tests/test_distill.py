@@ -73,6 +73,18 @@ def test_distill_corrections_flags_kb_deadend_overlap():
     assert "同时出现在知识库" in out
 
 
+def test_distill_corrections_no_substring_false_positive():
+    """审计16轮：题码精确匹配——"a-1" 战绩差不得命中（a-10）条目（旧子串 in 误报）。"""
+    kb = "# KB\n\n## 十号题（a-10）\n- 思路1：打法\n"
+    stats = {"a-1": {"name": "一号题", "hits": 0, "misses": 3}}
+    out = distill_corrections(stats, kb, "")
+    assert "一号题" not in out and "（a-1）" not in out  # 不得借 a-10 的壳触发建议
+    # 正例：a-1 条目真实存在 → 建议出现
+    kb2 = kb + "\n## 一号题（a-1）\n- 思路1：打法\n"
+    out2 = distill_corrections(stats, kb2, "")
+    assert "一号题" in out2 and "0 命中/3 未命中" in out2
+
+
 def test_runner_auto_distill_env_gate_and_output_dir(tmp_path, monkeypatch):
     """runner 收尾接入：env 开→草稿落在 progress 同目录；env 关→零副作用。"""
     monkeypatch.delenv("ASTRA_LLM_API_KEY", raising=False)
