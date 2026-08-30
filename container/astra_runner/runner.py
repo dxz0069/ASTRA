@@ -916,7 +916,7 @@ def _run_single_challenge(
                             project_id,
                             "[同题型避坑提示·失败经验库] 以下为同题型历史死路（含本轮实时沉淀），"
                             "开局即知前车之鉴、避免重蹈："
-                            + "\n".join(result.kb_deadend_texts),
+                            + "\n".join(strip_flag_like(t) for t in result.kb_deadend_texts),
                         )
                         LOG.info("deadend warnings injected code=%s n=%s", code, len(result.kb_deadend_texts))
                 except Exception as exc:  # noqa: BLE001
