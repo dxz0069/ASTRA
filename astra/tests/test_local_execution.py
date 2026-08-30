@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+
+import pytest
 
 from astra.dispatcher.config import DispatchConfig
 from astra.dispatcher.runtime.local_containers import LocalContainerManager, build_container_manager
@@ -55,6 +58,42 @@ def test_local_process_timeout_kills() -> None:
     result = proc.communicate(timeout=1)
     assert result.timed_out
     assert result.returncode != 0
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows 孙进程树杀回归")
+def test_local_process_timeout_kills_windows_grandchild_tree() -> None:
+    """审计15轮：超时杀进程必须连孙进程一起收（r7 实测 node 被杀后探针孙进程成孤儿）。
+
+    链：LocalProcess(cmd) → cmd → ping（孙进程）。超时后树杀，ping 必须消失。
+    """
+    import subprocess as _sp
+
+    marker = "-n 97"
+    proc = LocalProcess(
+        ["cmd", "/c", f"cmd /c ping {marker} 127.0.0.1 > NUL"],
+        {},
+        timeout_seconds=1,
+    )
+    proc.start()
+    result = proc.communicate(timeout=1)
+    assert result.timed_out
+
+    def _survivors() -> list[str]:
+        out = _sp.run(
+            ["powershell", "-NoProfile", "-Command",
+             "Get-CimInstance Win32_Process -Filter \"Name='ping.exe'\" | "
+             "Where-Object CommandLine -like '*-n 97*' | ForEach-Object ProcessId"],
+            capture_output=True, text=True, timeout=30,
+        )
+        return [l.strip() for l in out.stdout.splitlines() if l.strip().isdigit()]
+
+    # 树杀后给 OS 一点收尸时间，轮询确认孙进程消失
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        if not _survivors():
+            break
+        time.sleep(1)
+    assert not _survivors(), "超时树杀后 ping 孙进程仍存活（Windows 进程树泄漏复发）"
 
 
 def test_local_container_manager_workspace_and_paths() -> None:

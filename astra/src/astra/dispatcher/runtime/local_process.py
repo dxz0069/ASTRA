@@ -133,16 +133,33 @@ class LocalProcess:
         if self._process is None or self._process.poll() is not None:
             return
         LOG.info("terminating local process pid=%s command=%s", self._process.pid, self.command[:1])
-        try:
-            if sys.platform == "win32":
+        if sys.platform == "win32":
+            # 审计15轮：Windows 无 killpg——CTRL_BREAK 只达同组控制台进程，
+            # TerminateProcess 只杀直接子进程（node）；pi 的 bash 工具派生的孙进程
+            # （nmap/curl/python 探针）会逃逸成孤儿（r7 收车实测残留探针进程）。
+            # 长跑数百步累积 = CPU/内存耗尽。宽限后 taskkill /T /F 按进程树强收。
+            try:
                 self._process.send_signal(signal.CTRL_BREAK_EVENT)
-            else:
-                # P1-3：按进程组发 SIGTERM——连同 CLI 派生的孙进程一起回收；
-                # 进程恰好已退出（竞态）时忽略 ProcessLookupError
+            except OSError:
+                pass
+            deadline = time.monotonic() + max(self._kill_after_seconds, 1.0)
+            while time.monotonic() < deadline and self._process.poll() is None:
+                time.sleep(0.1)
+            # 无论 node 是否已随 CTRL_BREAK 退出都树杀兜底——node 先死时其子进程
+            # 可能仍挂管道活着（pid 已消失时 taskkill 报 not found，无害）
+            self._taskkill_tree()
+            if self._process.poll() is None:
                 try:
-                    os.killpg(os.getpgid(self._process.pid), signal.SIGTERM)
-                except ProcessLookupError:
+                    self._process.kill()
+                except OSError:
                     pass
+            return
+        # POSIX：按进程组发 SIGTERM——连同 CLI 派生的孙进程一起回收；
+        # 进程恰好已退出（竞态）时忽略 ProcessLookupError
+        try:
+            os.killpg(os.getpgid(self._process.pid), signal.SIGTERM)
+        except ProcessLookupError:
+            pass
         except OSError:
             pass
         deadline = time.monotonic() + max(self._kill_after_seconds, 1.0)
@@ -150,17 +167,26 @@ class LocalProcess:
             time.sleep(0.1)
         if self._process.poll() is None:
             LOG.warning("force killing local process pid=%s", self._process.pid)
+            # P1-3：强杀同样按进程组 SIGKILL，杜绝孙进程逃逸成孤儿
             try:
-                if sys.platform == "win32":
-                    self._process.kill()
-                else:
-                    # P1-3：强杀同样按进程组 SIGKILL，杜绝孙进程逃逸成孤儿
-                    try:
-                        os.killpg(os.getpgid(self._process.pid), signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
+                os.killpg(os.getpgid(self._process.pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
             except OSError:
                 pass
+
+    def _taskkill_tree(self) -> None:
+        """Windows 进程树强杀（taskkill /T /F）——杀 pid 及其全部后代。"""
+        assert self._process is not None
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(self._process.pid), "/T", "/F"],
+                capture_output=True,
+                timeout=20,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
 
     def cancel(self, reason: str) -> None:
         if self._cancel_reason is None:
