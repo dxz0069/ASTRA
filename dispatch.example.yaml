@@ -2,9 +2,10 @@
 server: "http://astra-server:8000"
 
 # Shared environment variables merged into every worker.
-common_env:
-  TSEC_SERVER_HOST: "<SERVER_HOST>:8000"
-  TSEC_AGENT_TOKEN: "xxx"
+# （审计32轮：上游遗留 TSEC_* 变量本栈不使用，示例改为注释占位；
+#   平台凭证 BENCHMARK_TOKEN/BASE_URL 由 runner 进程持有，不进 worker env）
+# common_env:
+#   FOO: "bar"
 
 runtime:
   # Scheduler tick interval in seconds.
@@ -19,7 +20,9 @@ runtime:
   healthcheck_timeout: 20
   # "startup_and_task" checks at dispatcher startup and before every task.
   # "startup_only" checks only at startup. "disabled" skips automatic worker checks.
-  worker_healthcheck: "startup_only"
+  # pi 工作器必用 disabled：LLM 冷启动首调常超 30s，任何档位健康检查都会
+  # 在冷启动期误杀全舰队（本地实测教训；引擎渲染的 dispatch.yaml 已固定 disabled）
+  worker_healthcheck: "disabled"
   # Prompt set loaded from astra/src/astra/dispatcher/prompts/.
   prompt_group: "default"
 
