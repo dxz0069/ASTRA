@@ -10,67 +10,51 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
-TaskType = Literal["reason", "explore", "bootstrap", "consolidate"]
-WorkerType = Literal["claudecode", "codex", "pi", "mock", "dsh"]
+TaskType = Literal["decide", "execute", "bootstrap"]
+# v0.2 星图架构重建（2026-08-29）：执行底座只留 pi（最原始、完全可控）；
+# claudecode/codex/dsh 适配器全部移除。
+WorkerType = Literal["pi", "mock"]
 CompletedAction = Literal["remove", "stop"]
 WorkerHealthcheckMode = Literal["startup_and_task", "startup_only", "disabled"]
 
 WORKER_ENV_KEYS: dict[WorkerType, tuple[str, ...]] = {
-    "claudecode": (
-        "ANTHROPIC_MODEL",
-        "ANTHROPIC_BASE_URL",
-        "ANTHROPIC_AUTH_TOKEN",
-    ),
-    "codex": (
-        "CODEX_MODEL",
-        "CODEX_BASE_URL",
-        "OPENAI_API_KEY",
-    ),
     "pi": (
         "PI_MODEL",
         "PI_BASE_URL",
         "PI_API_KEY",
         "PI_PROVIDER_API",
     ),
-    # DeepSeek Harness 无头模式：必填校验统一在 _validate_dsh_env（合并报
-    # DSH_MODEL + 凭据）。可选 DEEPSEEK_BASE_URL / ANTHROPIC_BASE_URL /
-    # DSH_PATCH / DSH_RESUME / DSH_HOME / DSH_PERMISSION_MODE
-    "dsh": (),
     "mock": (),
 }
 
 DEFAULT_PROMPT_REQUIRED_TOKENS: dict[str, tuple[str, ...]] = {
-    "reason.md": ("{graph_yaml}", "{fact_ids}", "{open_intents}", "{max_intents}"),
-    "explore.md": ("{graph_yaml}", "{intent_id}", "{intent_description}"),
-    "explore_conclude.md": ("{graph_yaml}", "{intent_id}", "{intent_description}"),
+    "decide.md": ("{graph_yaml}", "{fact_ids}", "{open_steps}", "{max_steps}"),
+    "execute.md": ("{graph_yaml}", "{step_id}", "{step_description}"),
+    "execute_conclude.md": ("{graph_yaml}", "{step_id}", "{step_description}"),
     "bootstrap.md": ("{origin}", "{goal}", "{hints}"),
     "bootstrap_conclude.md": ("{origin}", "{goal}", "{hints}"),
-    "consolidate.md": ("{goal}", "{stale_facts}"),
-    "challenge.md": ("{graph_yaml}", "{goal}", "{proposal}"),
-    "verdict.md": ("{graph_yaml}", "{goal}", "{proposal}", "{challenge}"),
+    "challenge.md": ("{graph_yaml}", "{claim}", "{claim_context}"),
 }
 
 PROMPT_REQUIRED_TOKENS_BY_GROUP: dict[str, dict[str, tuple[str, ...]]] = {
     "mock": {
-        "reason.md": ("{fact_ids}", "{open_intents}", "{max_intents}"),
-        "explore.md": ("{intent_id}",),
-        "explore_conclude.md": ("{intent_id}",),
+        "decide.md": ("{fact_ids}", "{open_steps}", "{max_steps}"),
+        "execute.md": ("{step_id}",),
+        "execute_conclude.md": ("{step_id}",),
         "bootstrap.md": ("{origin}", "{goal}", "{hints}"),
         "bootstrap_conclude.md": ("{origin}", "{goal}", "{hints}"),
-        "consolidate.md": ("{goal}", "{stale_facts}"),
-        "challenge.md": ("{proposal}",),
-        "verdict.md": ("{proposal}", "{challenge}"),
+        "challenge.md": (),
     }
 }
 
 MOCK_ALLOWED_OUTCOMES: dict[str, frozenset[str]] = {
     "healthcheck": frozenset({"ok", "fail"}),
-    "reason": frozenset({"complete", "intent", "noop", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
-    "explore_execute": frozenset({"fact", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
-    "explore_conclude": frozenset({"fact", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
+    "decide": frozenset({"complete", "ops", "noop", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
+    "execute_execute": frozenset({"fact", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
+    "execute_conclude": frozenset({"fact", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
     "bootstrap": frozenset({"complete", "fact", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
     "bootstrap_conclude": frozenset({"fact", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
-    "consolidate": frozenset({"fact", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
+    "challenge": frozenset({"uphold", "refute", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
 }
 
 MOCK_DEFAULT_BEHAVIOR: dict[str, dict[str, Any]] = {
@@ -78,11 +62,11 @@ MOCK_DEFAULT_BEHAVIOR: dict[str, dict[str, Any]] = {
         "delay": [0.05, 0.15],
         "outcomes": {"ok": "1.0", "fail": "0.0"},
     },
-    "reason": {
+    "decide": {
         "delay": [0.05, 0.3],
         "outcomes": {
             "complete": "0.0",
-            "intent": "1.0",
+            "ops": "1.0",
             "noop": "0.0",
             "rejected": "0.0",
             "invalid_json": "0.0",
@@ -90,7 +74,7 @@ MOCK_DEFAULT_BEHAVIOR: dict[str, dict[str, Any]] = {
             "command_fail": "0.0",
         },
     },
-    "explore_execute": {
+    "execute_execute": {
         "delay": [0.05, 0.3],
         "outcomes": {
             "fact": "1.0",
@@ -100,7 +84,7 @@ MOCK_DEFAULT_BEHAVIOR: dict[str, dict[str, Any]] = {
             "command_fail": "0.0",
         },
     },
-    "explore_conclude": {
+    "execute_conclude": {
         "delay": [0.05, 0.3],
         "outcomes": {
             "fact": "1.0",
@@ -131,10 +115,11 @@ MOCK_DEFAULT_BEHAVIOR: dict[str, dict[str, Any]] = {
             "command_fail": "0.0",
         },
     },
-    "consolidate": {
-        "delay": [0.05, 0.3],
+    "challenge": {
+        "delay": [0.05, 0.15],
         "outcomes": {
-            "fact": "1.0",
+            "uphold": "1.0",
+            "refute": "0.0",
             "rejected": "0.0",
             "invalid_json": "0.0",
             "invalid_payload": "0.0",
@@ -148,12 +133,12 @@ MOCK_ALLOWED_ENV_KEYS = frozenset(
 )
 
 
-class ReasonTaskConfig(BaseModel):
+class DecideTaskConfig(BaseModel):
     timeout: int = Field(gt=0)
-    max_intents: int = Field(gt=0, default=3)
+    max_steps: int = Field(gt=0, default=3)
 
 
-class ExploreTaskConfig(BaseModel):
+class ExecuteTaskConfig(BaseModel):
     timeout: int = Field(gt=0)
     conclude_timeout: int = Field(gt=0)
 
@@ -163,20 +148,21 @@ class BootstrapTaskConfig(BaseModel):
     conclude_timeout: int = Field(gt=0)
 
 
-class ConsolidateTaskConfig(BaseModel):
-    timeout: int = Field(gt=0)
-
-
 class ChallengeTaskConfig(BaseModel):
+    """质询星探（对抗审查）：complete 把关与关键事实审计共用此预算。
+
+    ASTRA_CHALLENGE_MODE=0 整体关闭（托管跑分默认关）。
+    """
+
     timeout: int = Field(gt=0, default=120)
+    max_per_project: int = Field(gt=0, default=4)
 
 
 class TasksConfig(BaseModel):
     bootstrap: BootstrapTaskConfig
-    reason: ReasonTaskConfig
-    explore: ExploreTaskConfig
-    consolidate: ConsolidateTaskConfig = Field(default_factory=lambda: ConsolidateTaskConfig(timeout=180))
-    challenge: ChallengeTaskConfig = Field(default_factory=lambda: ChallengeTaskConfig(timeout=120))
+    decide: DecideTaskConfig
+    execute: ExecuteTaskConfig
+    challenge: ChallengeTaskConfig = Field(default_factory=ChallengeTaskConfig)
 
 
 class ContainerConfig(BaseModel):
@@ -187,10 +173,10 @@ class ContainerConfig(BaseModel):
 
 
 class ContextBudget(BaseModel):
-    """星尘记忆：prompt 内联上下文的硬上限（完整星图仍以文件引用提供）。"""
+    """prompt 内联上下文的硬上限（完整图仍以文件引用提供）。"""
 
     max_inline_facts: int = Field(default=60, ge=1)
-    max_inline_intents: int = Field(default=12, ge=1)
+    max_inline_steps: int = Field(default=12, ge=1)
     max_inline_hints: int = Field(default=8, ge=1)
 
 
@@ -233,8 +219,6 @@ class WorkerConfig(BaseModel):
             raise ValueError(f"worker {self.name} missing env keys: {', '.join(missing)}")
         if self.type == "pi":
             _validate_optional_positive_int_env(self.name, self.env, "PI_MODEL_CONTEXT_WINDOW")
-        if self.type == "dsh":
-            _validate_dsh_env(self.name, self.env)
         if self.type == "mock":
             resolve_mock_behavior(self.name, self.env)
         return self
@@ -309,31 +293,6 @@ def _validate_optional_positive_int_env(worker_name: str, env: dict[str, str], k
         raise ValueError(f"worker {worker_name} env {key} must be an integer") from exc
     if parsed <= 0:
         raise ValueError(f"worker {worker_name} env {key} must be greater than 0")
-
-
-def _validate_dsh_env(worker_name: str, env: dict[str, str]) -> None:
-    """dsh worker 凭据按 DSH_PROVIDER 分派：deepseek → DEEPSEEK_API_KEY；
-    anthropic → ANTHROPIC_AUTH_TOKEN（Anthropic Messages 协议，适配 Kimi /
-    DeepSeek /anthropic 兼容端点等）；zhipu → ZHIPU_API_KEY（智谱 coding
-    端点 chat-completions，GLM-5.3）。模型路由均由 container/dsh/ 扩展的
-    llm-pi-ai 路由提供。"""
-    provider = env.get("DSH_PROVIDER", "deepseek")
-    missing: list[str] = []
-    if not env.get("DSH_MODEL"):
-        missing.append("DSH_MODEL")
-    if provider == "anthropic":
-        if not env.get("ANTHROPIC_AUTH_TOKEN"):
-            missing.append("ANTHROPIC_AUTH_TOKEN")
-    elif provider == "deepseek":
-        if not env.get("DEEPSEEK_API_KEY"):
-            missing.append("DEEPSEEK_API_KEY")
-    elif provider == "zhipu":
-        if not env.get("ZHIPU_API_KEY"):
-            missing.append("ZHIPU_API_KEY")
-    else:
-        raise ValueError(f"worker {worker_name} DSH_PROVIDER must be deepseek, anthropic or zhipu, got {provider}")
-    if missing:
-        raise ValueError(f"worker {worker_name} missing env keys: {', '.join(missing)}")
 
 
 def validate_prompt_resources(prompt_group: str) -> None:
@@ -411,11 +370,11 @@ def resolve_mock_behavior(worker_name: str, env: dict[str, str]) -> dict[str, di
                     if not isinstance(value, int) or value < 0:
                         raise ValueError(f"worker {worker_name} {prefix}.rules[{index}].fact_ids_lte must be a non-negative integer")
                     entry["fact_ids_lte"] = value
-                if "open_intents_empty" in rule:
-                    value = rule["open_intents_empty"]
+                if "open_steps_empty" in rule:
+                    value = rule["open_steps_empty"]
                     if not isinstance(value, bool):
-                        raise ValueError(f"worker {worker_name} {prefix}.rules[{index}].open_intents_empty must be boolean")
-                    entry["open_intents_empty"] = value
+                        raise ValueError(f"worker {worker_name} {prefix}.rules[{index}].open_steps_empty must be boolean")
+                    entry["open_steps_empty"] = value
                 normalized_rules.append(entry)
             behavior[phase]["rules"] = normalized_rules
     return behavior

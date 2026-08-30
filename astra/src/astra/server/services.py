@@ -5,7 +5,8 @@ from datetime import datetime, timezone
 
 from fastapi import HTTPException
 
-from astra.server.models import Intent, ProjectMeta, ProjectReason
+from astra.server.models import ProjectDecide, ProjectMeta, Step
+
 
 def utcnow() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -40,12 +41,20 @@ def next_fact_id(conn: sqlite3.Connection, project_id: str) -> str:
     return _next_scoped_id(conn, "fact", "f", project_id)
 
 
-def next_intent_id(conn: sqlite3.Connection, project_id: str) -> str:
-    return _next_scoped_id(conn, "intent", "i", project_id)
+def next_step_id(conn: sqlite3.Connection, project_id: str) -> str:
+    return _next_scoped_id(conn, "step", "s", project_id)
 
 
 def next_hint_id(conn: sqlite3.Connection, project_id: str) -> str:
     return _next_scoped_id(conn, "hint", "h", project_id)
+
+
+def next_finding_id(conn: sqlite3.Connection, project_id: str) -> str:
+    return _next_scoped_id(conn, "finding", "fnd", project_id)
+
+
+def next_subgoal_id(conn: sqlite3.Connection, project_id: str) -> str:
+    return _next_scoped_id(conn, "subgoal", "sg", project_id)
 
 
 def create_fact(
@@ -55,7 +64,6 @@ def create_fact(
     kind: str = "regular",
     creator: str = "system",
 ) -> str:
-    """写入一条新星记（支持摘要星记 kind=summary）。"""
     check_project_active(conn, project_id)
     fact_id = next_fact_id(conn, project_id)
     conn.execute(
@@ -65,42 +73,14 @@ def create_fact(
     return fact_id
 
 
-def archive_facts(
-    conn: sqlite3.Connection, project_id: str, fact_ids: list[str]
-) -> dict[str, object]:
-    """删除一批星记（记忆整理后回收被压缩的原始星记）。
-
-    引用完整性保护：origin/goal 与仍被 intent.to_fact_id 引用的星记不可归档
-    （删了会让 intent.to 悬挂，前端建边抛异常、YAML 导出数据不一致）。
-    返回 {"deleted": 删除数, "skipped": 被保护跳过的 id 列表}。
-    """
+def create_finding(conn: sqlite3.Connection, project_id: str, description: str) -> str:
     check_project_active(conn, project_id)
-    if not fact_ids:
-        return {"deleted": 0, "skipped": []}
-    referenced = {
-        row["to_fact_id"]
-        for row in conn.execute(
-            "SELECT DISTINCT to_fact_id FROM intents WHERE project_id = ? AND to_fact_id IS NOT NULL",
-            (project_id,),
-        )
-    }
-    protected = {"origin", "goal"} | referenced
-    deletable = [fid for fid in dict.fromkeys(fact_ids) if fid not in protected]
-    skipped = [fid for fid in dict.fromkeys(fact_ids) if fid in protected]
-    if not deletable:
-        return {"deleted": 0, "skipped": skipped}
-    placeholders = ",".join("?" for _ in deletable)
-    params: list[object] = [project_id, *deletable]
-    # 先清悬挂的来源引用，再删除星记
+    finding_id = next_finding_id(conn, project_id)
     conn.execute(
-        f"DELETE FROM intent_sources WHERE project_id = ? AND fact_id IN ({placeholders})",
-        params,
+        "INSERT INTO findings (id, project_id, description, created_at) VALUES (?, ?, ?, ?)",
+        (finding_id, project_id, description, utcnow()),
     )
-    cursor = conn.execute(
-        f"DELETE FROM facts WHERE project_id = ? AND id IN ({placeholders})",
-        params,
-    )
-    return {"deleted": cursor.rowcount, "skipped": skipped}
+    return finding_id
 
 
 def get_project_or_404(conn: sqlite3.Connection, project_id: str) -> sqlite3.Row:
@@ -147,106 +127,199 @@ def validate_goal_not_in_sources(fact_ids: list[str]) -> None:
         raise HTTPException(400, "goal cannot be used in from")
 
 
-def validate_intent_creator_worker(creator: str, worker: str | None) -> None:
+def validate_step_creator_worker(creator: str, worker: str | None) -> None:
     if worker is not None and worker != creator:
         raise HTTPException(400, "worker must be null or equal to creator")
 
 
-def get_intent_or_404(
-    conn: sqlite3.Connection, project_id: str, intent_id: str
+def get_step_or_404(
+    conn: sqlite3.Connection, project_id: str, step_id: str
 ) -> sqlite3.Row:
     row = conn.execute(
-        "SELECT * FROM intents WHERE id = ? AND project_id = ?",
-        (intent_id, project_id),
+        "SELECT * FROM steps WHERE id = ? AND project_id = ?",
+        (step_id, project_id),
     ).fetchone()
     if row is None:
-        raise HTTPException(404, "Intent not found")
+        raise HTTPException(404, "Step not found")
     return row
 
 
-def get_claimable_open_intent_or_404(
-    conn: sqlite3.Connection, project_id: str, intent_id: str, worker: str
+def claim_step_atomic(
+    conn: sqlite3.Connection, project_id: str, step_id: str, worker: str
+) -> None:
+    """守卫式原子认领：WHERE 条件在写入时重估，消灭 SELECT-检查-UPDATE 的 TOCTOU 窗口。
+
+    高并发下两个请求同时通过预检查时，只有第一个 UPDATE 生效（rowcount=1）；
+    第二个 rowcount=0 → 重读行产出精确 409。认领即登记派发计数（CASE 原子判定）。
+    """
+    expire_workers(conn, project_id)  # 过期租约先清（语义与旧 get_claimable 对齐）
+    now = utcnow()
+    cursor = conn.execute(
+        """
+        UPDATE steps
+        SET worker = ?,
+            last_heartbeat_at = ?,
+            dispatch_count = dispatch_count + (CASE WHEN worker IS NULL OR worker != ? THEN 1 ELSE 0 END)
+        WHERE id = ? AND project_id = ?
+          AND status = 'open'
+          AND to_fact_id IS NULL
+          AND (worker IS NULL OR worker = ?)
+        """,
+        (worker, now, worker, step_id, project_id, worker),
+    )
+    if cursor.rowcount == 0:
+        row = get_step_or_404(conn, project_id, step_id)
+        if row["status"] == "closed":
+            raise HTTPException(409, "Step is closed")
+        if row["to_fact_id"] is not None:
+            raise HTTPException(409, "Step already concluded")
+        raise HTTPException(409, f"Step is currently claimed by {row['worker']}")
+
+
+def conclude_step_atomic(
+    conn: sqlite3.Connection, project_id: str, step_id: str, worker: str
+) -> str:
+    """原子收束预留：抢到写权（worker 钉为本请求）后返回 utcnow；失败抛 409。
+
+    后续 fact 插入 + to_fact_id 终写与本预留同处一个请求事务（get_conn 统一
+    commit/rollback），不存在孤儿数据。
+    """
+    expire_workers(conn, project_id)  # 过期租约先清（语义与旧 get_claimable 对齐）
+    now = utcnow()
+    cursor = conn.execute(
+        """
+        UPDATE steps
+        SET worker = ?, last_heartbeat_at = ?
+        WHERE id = ? AND project_id = ?
+          AND status = 'open'
+          AND to_fact_id IS NULL
+          AND (worker IS NULL OR worker = ?)
+        """,
+        (worker, now, step_id, project_id, worker),
+    )
+    if cursor.rowcount == 0:
+        row = get_step_or_404(conn, project_id, step_id)
+        if row["status"] == "closed":
+            raise HTTPException(409, "Step is closed")
+        if row["to_fact_id"] is not None:
+            raise HTTPException(409, "Step already concluded")
+        raise HTTPException(409, f"Step is currently claimed by {row['worker']}")
+    return now
+
+
+def claim_decide_atomic(
+    conn: sqlite3.Connection, project_id: str, worker: str, trigger: str
+) -> str:
+    """原子 decide 认领（同图串行保证）：返回租约令牌；失败抛 409。"""
+    now = utcnow()
+    lease_token = __import__("secrets").token_hex(16)
+    cursor = conn.execute(
+        """
+        UPDATE projects
+        SET decide_worker = ?, decide_trigger = ?, decide_started_at = ?,
+            decide_last_heartbeat_at = ?, decide_token = ?
+        WHERE id = ? AND status = 'active'
+          AND (decide_worker IS NULL OR decide_worker = ?)
+        """,
+        (worker, trigger, now, now, lease_token, project_id, worker),
+    )
+    if cursor.rowcount == 0:
+        row = get_project_or_404(conn, project_id)
+        if row["status"] != "active":
+            raise HTTPException(403, f"Project is {row['status']}")
+        raise HTTPException(409, f"Project decide is currently claimed by {row['decide_worker']}")
+    return lease_token
+
+
+def get_claimable_open_step_or_404(
+    conn: sqlite3.Connection, project_id: str, step_id: str, worker: str
 ) -> sqlite3.Row:
     expire_workers(conn, project_id)
-    row = get_intent_or_404(conn, project_id, intent_id)
+    row = get_step_or_404(conn, project_id, step_id)
+    if row["status"] == "closed":
+        raise HTTPException(409, "Step is closed")
     if row["to_fact_id"] is not None:
-        raise HTTPException(409, "Intent already concluded")
+        raise HTTPException(409, "Step already concluded")
     if row["worker"] is not None and row["worker"] != worker:
-        raise HTTPException(409, f"Intent is currently claimed by {row['worker']}")
+        raise HTTPException(409, f"Step is currently claimed by {row['worker']}")
     return row
 
 
-def get_releasable_open_intent_or_404(
-    conn: sqlite3.Connection, project_id: str, intent_id: str, worker: str
+def get_releasable_open_step_or_404(
+    conn: sqlite3.Connection, project_id: str, step_id: str, worker: str
 ) -> sqlite3.Row:
     expire_workers(conn, project_id)
-    row = get_intent_or_404(conn, project_id, intent_id)
+    row = get_step_or_404(conn, project_id, step_id)
     if row["to_fact_id"] is not None:
-        raise HTTPException(409, "Intent already concluded")
+        raise HTTPException(409, "Step already concluded")
     if row["worker"] is None:
         return row
     if row["worker"] != worker:
-        raise HTTPException(409, f"Intent is currently claimed by {row['worker']}")
+        raise HTTPException(409, f"Step is currently claimed by {row['worker']}")
     return row
 
 
-def get_completion_intent_or_409(conn: sqlite3.Connection, project_id: str) -> sqlite3.Row:
+def get_completion_step_or_409(conn: sqlite3.Connection, project_id: str) -> sqlite3.Row:
     rows = conn.execute(
-        "SELECT * FROM intents WHERE project_id = ? AND to_fact_id = 'goal'",
+        "SELECT * FROM steps WHERE project_id = ? AND to_fact_id = 'goal'",
         (project_id,),
     ).fetchall()
     if not rows:
-        raise HTTPException(409, "Completed project is missing its completion intent")
+        raise HTTPException(409, "Completed project is missing its completion step")
     if len(rows) != 1:
-        raise HTTPException(409, "Completed project has multiple completion intents")
+        raise HTTPException(409, "Completed project has multiple completion steps")
     return rows[0]
 
 
-def intent_to_model(conn: sqlite3.Connection, row: sqlite3.Row, project_id: str) -> Intent:
+def step_to_model(conn: sqlite3.Connection, row: sqlite3.Row, project_id: str) -> Step:
     sources = conn.execute(
-        "SELECT fact_id FROM intent_sources WHERE intent_id = ? AND project_id = ? ORDER BY rowid",
+        "SELECT fact_id FROM step_sources WHERE step_id = ? AND project_id = ? ORDER BY rowid",
         (row["id"], project_id),
     ).fetchall()
-    return Intent(
+    return Step(
         id=row["id"],
         **{"from": [s["fact_id"] for s in sources]},
         to=row["to_fact_id"],
         description=row["description"],
+        expect=row["expect"],
+        status=row["status"],
+        close_reason=row["close_reason"],
+        closed_at=row["closed_at"],
         creator=row["creator"],
         worker=row["worker"],
         last_heartbeat_at=row["last_heartbeat_at"],
+        dispatch_count=int(row["dispatch_count"] or 0),
         created_at=row["created_at"],
         concluded_at=row["concluded_at"],
-        challenged=bool(row["challenged"]),
     )
 
 
-def build_intents(conn: sqlite3.Connection, project_id: str) -> list[Intent]:
+def build_steps(conn: sqlite3.Connection, project_id: str) -> list[Step]:
     rows = conn.execute(
-        "SELECT * FROM intents WHERE project_id = ? ORDER BY created_at",
+        "SELECT * FROM steps WHERE project_id = ? ORDER BY created_at",
         (project_id,),
     ).fetchall()
-    return [intent_to_model(conn, r, project_id) for r in rows]
+    return [step_to_model(conn, r, project_id) for r in rows]
 
 
-def get_intent_timeout(conn: sqlite3.Connection) -> int:
-    row = conn.execute("SELECT intent_timeout FROM settings WHERE rowid = 1").fetchone()
-    return row["intent_timeout"]
+def get_step_timeout(conn: sqlite3.Connection) -> int:
+    row = conn.execute("SELECT step_timeout FROM settings WHERE rowid = 1").fetchone()
+    return row["step_timeout"]
 
 
-def get_reason_timeout(conn: sqlite3.Connection) -> int:
-    row = conn.execute("SELECT reason_timeout FROM settings WHERE rowid = 1").fetchone()
-    return row["reason_timeout"]
+def get_decide_timeout(conn: sqlite3.Connection) -> int:
+    row = conn.execute("SELECT decide_timeout FROM settings WHERE rowid = 1").fetchone()
+    return row["decide_timeout"]
 
 
-def project_reason_from_row(row: sqlite3.Row) -> ProjectReason | None:
-    if row["reason_worker"] is None:
+def project_decide_from_row(row: sqlite3.Row) -> ProjectDecide | None:
+    if row["decide_worker"] is None:
         return None
-    return ProjectReason(
-        worker=row["reason_worker"],
-        trigger=row["reason_trigger"],
-        started_at=row["reason_started_at"],
-        last_heartbeat_at=row["reason_last_heartbeat_at"],
+    return ProjectDecide(
+        worker=row["decide_worker"],
+        trigger=row["decide_trigger"],
+        started_at=row["decide_started_at"],
+        last_heartbeat_at=row["decide_last_heartbeat_at"],
     )
 
 
@@ -257,18 +330,19 @@ def project_meta_from_row(row: sqlite3.Row) -> ProjectMeta:
         status=row["status"],
         bootstrap_enabled=bool(row["bootstrap_enabled"]),
         created_at=row["created_at"],
-        reason=project_reason_from_row(row),
+        decide=project_decide_from_row(row),
     )
 
 
-def clear_project_reason(conn: sqlite3.Connection, project_id: str) -> None:
+def clear_project_decide(conn: sqlite3.Connection, project_id: str) -> None:
     conn.execute(
         """
         UPDATE projects
-        SET reason_worker = NULL,
-            reason_trigger = NULL,
-            reason_started_at = NULL,
-            reason_last_heartbeat_at = NULL
+        SET decide_worker = NULL,
+            decide_trigger = NULL,
+            decide_started_at = NULL,
+            decide_last_heartbeat_at = NULL,
+            decide_token = NULL
         WHERE id = ?
         """,
         (project_id,),
@@ -276,12 +350,13 @@ def clear_project_reason(conn: sqlite3.Connection, project_id: str) -> None:
 
 
 def expire_workers(conn: sqlite3.Connection, project_id: str | None = None) -> None:
-    timeout = get_intent_timeout(conn)
+    timeout = get_step_timeout(conn)
     now = utcnow()
     query = """
-        UPDATE intents
+        UPDATE steps
         SET worker = NULL
         WHERE to_fact_id IS NULL
+          AND status = 'open'
           AND worker IS NOT NULL
           AND last_heartbeat_at IS NOT NULL
           AND (julianday(?) - julianday(last_heartbeat_at)) * 86400 > ?
@@ -293,18 +368,19 @@ def expire_workers(conn: sqlite3.Connection, project_id: str | None = None) -> N
     conn.execute(query, params)
 
 
-def expire_reason_leases(conn: sqlite3.Connection, project_id: str | None = None) -> None:
-    timeout = get_reason_timeout(conn)
+def expire_decide_leases(conn: sqlite3.Connection, project_id: str | None = None) -> None:
+    timeout = get_decide_timeout(conn)
     now = utcnow()
     query = """
         UPDATE projects
-        SET reason_worker = NULL,
-            reason_trigger = NULL,
-            reason_started_at = NULL,
-            reason_last_heartbeat_at = NULL
-        WHERE reason_worker IS NOT NULL
-          AND reason_last_heartbeat_at IS NOT NULL
-          AND (julianday(?) - julianday(reason_last_heartbeat_at)) * 86400 > ?
+        SET decide_worker = NULL,
+            decide_trigger = NULL,
+            decide_started_at = NULL,
+            decide_last_heartbeat_at = NULL,
+            decide_token = NULL
+        WHERE decide_worker IS NOT NULL
+          AND decide_last_heartbeat_at IS NOT NULL
+          AND (julianday(?) - julianday(decide_last_heartbeat_at)) * 86400 > ?
     """
     params: tuple = (now, timeout)
     if project_id is not None:

@@ -1,12 +1,54 @@
+import os
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
 from datetime import datetime
 import yaml
 
+from astra.dispatcher.context import _CRITICAL_RE
 from astra.server.db import get_conn
-from astra.server.services import expire_reason_leases, expire_workers, get_project_or_404
+from astra.server.services import expire_decide_leases, expire_workers, get_project_or_404
 
 router = APIRouter(tags=["export"])
+
+
+# ---------------- Epitome：图导出层的自动摘要压缩 ----------------
+
+def _epitome_enabled() -> bool:
+    return os.environ.get("ASTRA_EPITOME", "1") not in ("0", "false", "no")
+
+
+def _epitome_threshold() -> int:
+    try:
+        return max(10, int(os.environ.get("ASTRA_EPITOME_THRESHOLD", "120")))
+    except ValueError:
+        return 120
+
+
+def _fold_fact_description(description: str, limit: int = 80) -> str:
+    """折叠为单行索引：首行截断。原文本仍在数据库——导出视图压缩，零审计损失。"""
+    text = (description or "").strip()
+    if not text:
+        return text
+    first = text.splitlines()[0].strip()
+    if len(first) > limit:
+        first = first[:limit].rstrip() + "…"
+    return first
+
+
+def _epitome_keep_full_ids(facts, steps, sources_by_step, recent_keep: int = 30) -> set[str]:
+    """不折叠集合：origin/goal、负结果、凭据/flag 级关键事实、因果骨架上的一切
+    事实（任一步骤的来源或落点）、以及最近写入的事实。折叠的只有"老旧且脱离
+    因果链"的浅层侦察记录。"""
+    keep = {"origin", "goal"}
+    for f in facts:
+        if f["kind"] == "negative" or _CRITICAL_RE.search(f["description"] or ""):
+            keep.add(f["id"])
+    for s in steps:
+        keep.update(sources_by_step.get(s["id"], []))
+        if s["to_fact_id"]:
+            keep.add(s["to_fact_id"])
+    keep.update(f["id"] for f in facts[-recent_keep:])
+    return keep
 
 
 def format_export_timestamp(value: str | None) -> str | None:
@@ -21,35 +63,43 @@ def format_export_timestamp(value: str | None) -> str | None:
 
 def _load_project_data(conn, project_id: str):
     expire_workers(conn, project_id)
-    expire_reason_leases(conn, project_id)
+    expire_decide_leases(conn, project_id)
     proj = get_project_or_404(conn, project_id)
 
     facts = conn.execute(
-        "SELECT id, description, kind, confidence, evidence, challenged FROM facts WHERE project_id = ?",
+        "SELECT id, description, kind FROM facts WHERE project_id = ?",
         (project_id,),
     ).fetchall()
     hints = conn.execute(
         "SELECT content, creator, created_at FROM hints WHERE project_id = ? ORDER BY created_at",
         (project_id,),
     ).fetchall()
-    intents = conn.execute(
-        "SELECT * FROM intents WHERE project_id = ? ORDER BY created_at",
+    steps = conn.execute(
+        "SELECT * FROM steps WHERE project_id = ? ORDER BY created_at",
+        (project_id,),
+    ).fetchall()
+    findings = conn.execute(
+        "SELECT * FROM findings WHERE project_id = ? ORDER BY created_at",
+        (project_id,),
+    ).fetchall()
+    subgoals = conn.execute(
+        "SELECT * FROM subgoals WHERE project_id = ? ORDER BY created_at",
         (project_id,),
     ).fetchall()
 
-    sources_by_intent = {}
-    for i in intents:
+    sources_by_step = {}
+    for s in steps:
         rows = conn.execute(
-            "SELECT fact_id FROM intent_sources WHERE intent_id = ? AND project_id = ? ORDER BY rowid",
-            (i["id"], project_id),
+            "SELECT fact_id FROM step_sources WHERE step_id = ? AND project_id = ? ORDER BY rowid",
+            (s["id"], project_id),
         ).fetchall()
-        sources_by_intent[i["id"]] = [r["fact_id"] for r in rows]
+        sources_by_step[s["id"]] = [r["fact_id"] for r in rows]
 
-    return proj, facts, hints, intents, sources_by_intent
+    return proj, facts, hints, steps, findings, subgoals, sources_by_step
 
 
 def _export_yaml(conn, project_id: str) -> str:
-    proj, facts, hints, intents, sources_by_intent = _load_project_data(conn, project_id)
+    proj, facts, hints, steps, findings, subgoals, sources_by_step = _load_project_data(conn, project_id)
 
     origin_desc = ""
     goal_desc = ""
@@ -78,40 +128,79 @@ def _export_yaml(conn, project_id: str) -> str:
             for h in hints
         ]
 
-    data["facts"] = [
-        {
-            "id": f["id"],
-            "description": f["description"],
-            "kind": f["kind"],
-            "confidence": f["confidence"],
-            "evidence": f["evidence"],
-            "challenged": bool(f["challenged"]),
+    # Epitome 自动摘要压缩：事实数超阈值才启用；只折叠"老旧且脱离因果链"的
+    # 浅层事实（保留集见 _epitome_keep_full_ids），折叠为单行索引 + [Epitome] 标记。
+    folded_count = 0
+    keep_full: set[str] | None = None
+    if _epitome_enabled() and len(facts) > _epitome_threshold():
+        keep_full = _epitome_keep_full_ids(facts, steps, sources_by_step)
+    fact_rows = []
+    for f in facts:
+        description = f["description"]
+        if keep_full is not None and f["id"] not in keep_full:
+            folded = _fold_fact_description(description)
+            if folded != description:
+                description = folded + " [Epitome]"
+                folded_count += 1
+        fact_rows.append({"id": f["id"], "description": description, "kind": f["kind"]})
+    data["facts"] = fact_rows
+    if folded_count:
+        data["epitome"] = {
+            "folded_facts": folded_count,
+            "note": "stale unreferenced facts folded to one-line index (full text kept in DB)",
         }
-        for f in facts
-    ]
 
-    intent_list = []
-    for i in intents:
+    step_list = []
+    for s in steps:
         entry: dict = {
-            "from": sources_by_intent.get(i["id"], []),
-            "to": i["to_fact_id"],
-            "description": i["description"],
-            "creator": i["creator"],
-            "worker": i["worker"],
-            "created_at": format_export_timestamp(i["created_at"]),
-            "concluded_at": format_export_timestamp(i["concluded_at"]),
-            "challenged": bool(i["challenged"]),
+            "from": sources_by_step.get(s["id"], []),
+            "to": s["to_fact_id"],
+            "description": s["description"],
+            "status": s["status"],
+            "creator": s["creator"],
+            "worker": s["worker"],
+            "created_at": format_export_timestamp(s["created_at"]),
+            "concluded_at": format_export_timestamp(s["concluded_at"]),
         }
-        intent_list.append(entry)
+        if s["expect"]:
+            entry["expect"] = s["expect"]
+        if s["close_reason"]:
+            entry["close_reason"] = s["close_reason"]
+            entry["closed_at"] = format_export_timestamp(s["closed_at"])
+        step_list.append(entry)
 
-    if intent_list:
-        data["intents"] = intent_list
+    if step_list:
+        data["steps"] = step_list
 
+    if findings:
+        data["findings"] = [
+            {
+                "id": f["id"],
+                "description": f["description"],
+                "created_at": format_export_timestamp(f["created_at"]),
+            }
+            for f in findings
+        ]
+
+    active_subgoals = [sg for sg in subgoals if sg["status"] == "active"]
+    if active_subgoals:
+        data["subgoals"] = [
+            {"id": sg["id"], "description": sg["description"]}
+            for sg in active_subgoals
+        ]
+
+    # 大图防护——事实数超阈值时拒绝导出（防 yaml.dump 全量序列化 OOM）
+    max_export_facts = int(os.environ.get("ASTRA_MAX_EXPORT_FACTS", "10000"))
+    if len(facts) > max_export_facts:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Project too large to export ({len(facts)} facts > {max_export_facts} limit)",
+        )
     return yaml.dump(data, allow_unicode=True, default_flow_style=False, sort_keys=False)
 
 
 def _export_timeline(conn, project_id: str) -> str:
-    proj, facts, hints, intents, sources_by_intent = _load_project_data(conn, project_id)
+    proj, facts, hints, steps, findings, subgoals, sources_by_step = _load_project_data(conn, project_id)
 
     facts_by_id = {f["id"]: f["description"] for f in facts}
 
@@ -131,31 +220,48 @@ def _export_timeline(conn, project_id: str) -> str:
         events.append((h["created_at"] or "", order, block))
         order += 1
 
-    for i in intents:
-        src = sources_by_intent.get(i["id"], [])
-        from_str = ", ".join(src)
-
-        ts = format_export_timestamp(i["created_at"]) or ""
-        meta = f"  from: {from_str}"
-        if i["worker"] and not i["concluded_at"]:
-            meta += f"\n  worker: {i['worker']} (in progress)"
-        block = f"[{ts}] INTENT DECLARED {i['id']} by {i['creator']}\n{meta}\n  {i['description']}"
-        events.append((i["created_at"] or "", order, block))
+    for sg in subgoals:
+        ts = format_export_timestamp(sg["created_at"]) or ""
+        block = f"[{ts}] SUBGOAL {sg['id']} ({sg['status']})\n  {sg['description']}"
+        events.append((sg["created_at"] or "", order, block))
         order += 1
 
-        if not i["concluded_at"] or not i["to_fact_id"]:
+    for s in steps:
+        src = sources_by_step.get(s["id"], [])
+        from_str = ", ".join(src)
+
+        ts = format_export_timestamp(s["created_at"]) or ""
+        meta = f"  from: {from_str}"
+        if s["worker"] and not s["concluded_at"]:
+            meta += f"\n  worker: {s['worker']} (in progress)"
+        block = f"[{ts}] STEP DECLARED {s['id']} by {s['creator']}\n{meta}\n  {s['description']}"
+        events.append((s["created_at"] or "", order, block))
+        order += 1
+
+        if s["status"] == "closed" and s["close_reason"] and not s["to_fact_id"]:
+            ts = format_export_timestamp(s["closed_at"] or s["created_at"] or "") or ""
+            block = f"[{ts}] STEP CLOSED {s['id']}\n  reason: {s['close_reason']}"
+            events.append((s["closed_at"] or s["created_at"] or "", order, block))
+            order += 1
+
+        if not s["concluded_at"] or not s["to_fact_id"]:
             continue
 
-        ts = format_export_timestamp(i["concluded_at"]) or ""
-        actor = i["worker"] or i["creator"]
+        ts = format_export_timestamp(s["concluded_at"]) or ""
+        actor = s["worker"] or s["creator"]
 
-        if i["to_fact_id"] == "goal":
-            block = f"[{ts}] PROJECT COMPLETED by {actor}\n  via: {i['id']} from {from_str}"
+        if s["to_fact_id"] == "goal":
+            block = f"[{ts}] PROJECT COMPLETED by {actor}\n  via: {s['id']} from {from_str}"
         else:
-            fact_desc = facts_by_id.get(i["to_fact_id"], "")
-            block = f"[{ts}] INTENT CONCLUDED {i['id']} by {actor}\n  from: {from_str}\n  produced: {i['to_fact_id']}\n  {fact_desc}"
+            fact_desc = facts_by_id.get(s["to_fact_id"], "")
+            block = f"[{ts}] STEP CONCLUDED {s['id']} by {actor}\n  from: {from_str}\n  produced: {s['to_fact_id']}\n  {fact_desc}"
+        events.append((s["concluded_at"] or "", order, block))
+        order += 1
 
-        events.append((i["concluded_at"] or "", order, block))
+    for f in findings:
+        ts = format_export_timestamp(f["created_at"]) or ""
+        block = f"[{ts}] FINDING {f['id']}\n  {f['description']}"
+        events.append((f["created_at"] or "", order, block))
         order += 1
 
     events.sort(key=lambda e: (e[0], e[1]))

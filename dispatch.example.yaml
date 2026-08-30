@@ -29,13 +29,13 @@ tasks:
     timeout: 300
     # Time budget for conclude fallback after the main phase times out or returns unusable output.
     conclude_timeout: 90
-  reason:
-    # Reason decides whether the goal is met and whether new intents should be proposed.
+  decide:
+    # Decide judges whether Goal is satisfied and adds/closes steps on the graph.
     timeout: 300
-    # Hard cap on how many new intents one reason step may create.
-    max_intents: 2
-  explore:
-    # Main execution timeout for exploring a claimed intent.
+    # Hard cap on how many new steps one decide run may create.
+    max_steps: 2
+  execute:
+    # Main execution timeout for working on a claimed step.
     timeout: 300
     # Time budget for conclude fallback used to summarize confirmed findings from the same session.
     conclude_timeout: 90
@@ -55,98 +55,31 @@ container:
 workers:
   # Worker priority is ascending: lower numbers are preferred first.
   # max_running is per-worker concurrency. Slower backends such as Pi usually benefit from lower values.
-  - name: "claudecode_deepseek-v4-pro"
-    type: "claudecode"
-    task_types: [bootstrap, reason, explore]
-    max_running: 2
-    priority: 0
-    env:
-      ANTHROPIC_MODEL: "deepseek-v4-pro"
-      ANTHROPIC_BASE_URL: "https://api.deepseek.com/anthropic"
-      ANTHROPIC_AUTH_TOKEN: "sk-xxx"
-
-  - name: "codex_qwen3.6-plus"
-    type: "codex"
-    task_types: [bootstrap,reason,explore]
-    max_running: 2
-    priority: 0
-    env:
-      CODEX_MODEL: "deepseek-v4-pro"
-      CODEX_BASE_URL: "https://api.deepseek.com/v1"
-      OPENAI_API_KEY: "sk-xxx"
-
-  - name: "pi_qwen3.6-plus"
+  # v0.2（2026-08-29）：执行底座只留 pi（旧适配器已移除）
+  - name: "pi_deepseek-execute"
     type: "pi"
-    task_types: [bootstrap,reason,explore]
-    max_running: 2
+    task_types: [bootstrap, execute]
+    max_running: 3
     priority: 0
     env:
-      PI_MODEL: "deepseek-v4-pro"
-      PI_BASE_URL: "https://api.deepseek.com/v1"
+      PI_MODEL: "deepseek-v4-flash"
+      PI_BASE_URL: "https://api.deepseek.com/anthropic"
       PI_API_KEY: "sk-xxx"
-      PI_PROVIDER_API: "openai-completions"
-      PI_MODEL_CONTEXT_WINDOW: "262144"
+      PI_PROVIDER_API: "anthropic-messages"
+      PI_MODEL_CONTEXT_WINDOW: "131072"
 
-  # ---- DeepSeek Harness（dsh）worker ----
-  # 无头模式：dsh --profile headless "<task>"，等价 claude -p。
-  # 前提：容器内已安装 @deepseek-ai/dsh，且 DSH_PATCH 指向本仓库自带的
-  # astra headless 扩展（container/dsh/astra-headless.patch.yml，提供
-  # --session 会话续接 = 等价 claude 的 --session-id / -r）。
-  # DSH_PERMISSION_MODE=danger-full-access 等价 claude 的 --dangerously-skip-permissions。
-  # DSH_HOME 指向每 worker 独立目录，避免会话/凭据跨项目污染（等价 CLAUDE_CONFIG_DIR）。
-  # DSH_PROVIDER 选择模型路由（默认 deepseek → DEEPSEEK_API_KEY 官方 chat-completions；
-  # anthropic → ANTHROPIC_AUTH_TOKEN/ANTHROPIC_BASE_URL，适配 Kimi / DeepSeek /anthropic 兼容端点）。
-  - name: "dsh_deepseek-v4-pro"
-    type: "dsh"
-    task_types: [bootstrap, reason, explore]
+  - name: "pi_glm-decide"
+    type: "pi"
+    task_types: [decide]
     max_running: 2
-    priority: 0
+    priority: 1
     env:
-      DSH_MODEL: "deepseek-v4-pro"
-      DSH_PROVIDER: "deepseek"
-      DEEPSEEK_API_KEY: "sk-xxx"
-      # DEEPSEEK_BASE_URL: "https://api.deepseek.com"   # 可选，默认官方地址
-      DSH_PATCH: "/opt/astra/dsh/astra-headless.patch.yml"  # 可选；未配置时设 DSH_RESUME=0 走无状态模式
-      DSH_PERMISSION_MODE: "danger-full-access"
-      # DSH_HOME: "/tmp/astra-dsh/dsh_deepseek-v4-pro"   # 可选数据隔离目录
+      PI_MODEL: "glm-5.3"
+      PI_BASE_URL: "https://open.bigmodel.cn/api/anthropic"
+      PI_API_KEY: "sk-xxx"
+      PI_PROVIDER_API: "anthropic-messages"
 
-  # dsh worker 的 anthropic 模式示例（用 Anthropic 兼容端点，如 Kimi）：
-  # - name: "dsh_kimi-k3"
-  #   type: "dsh"
-  #   task_types: [bootstrap, reason, explore]
-  #   max_running: 2
-  #   priority: 0
-  #   env:
-  #     DSH_MODEL: "k3"
-  #     DSH_PROVIDER: "anthropic"
-  #     ANTHROPIC_AUTH_TOKEN: "sk-xxx"
-  #     ANTHROPIC_BASE_URL: "https://api.kimi.com/coding/"
-  #     DSH_PATCH: "/opt/astra/dsh/astra-headless.patch.yml"
-  #     DSH_PERMISSION_MODE: "danger-full-access"
-
-  # ---- 混合模型示例（降本：决策用便宜模型、探索用强模型，技术方案 §3.2）----
-  # dispatch.yaml 已支持按 task_types 路由 worker：reason/consolidate/审查用便宜
-  # 模型（priority 0 优先），bootstrap/explore 用强模型。每个 dsh worker 独立
-  # DSH_HOME（会话隔离，explore 的 execute→conclude 走同一 worker 不串）。
-  # - name: "dsh_reason_cheap"
-  #   type: "dsh"
-  #   task_types: [reason, consolidate]
-  #   max_running: 2
-  #   priority: 0
-  #   env:
-  #     DSH_MODEL: "deepseek-v4-flash"
-  #     DSH_PROVIDER: "deepseek"
-  #     DEEPSEEK_API_KEY: "sk-xxx"
-  #     DSH_PATCH: "/opt/astra/dsh/astra-headless.patch.yml"
-  #     DSH_PERMISSION_MODE: "danger-full-access"
-  # - name: "dsh_explore_strong"
-  #   type: "dsh"
-  #   task_types: [bootstrap, explore]
-  #   max_running: 2
-  #   priority: 0
-  #   env:
-  #     DSH_MODEL: "deepseek-v4-pro"
-  #     DSH_PROVIDER: "deepseek"
-  #     DEEPSEEK_API_KEY: "sk-xxx"
-  #     DSH_PATCH: "/opt/astra/dsh/astra-headless.patch.yml"
-  #     DSH_PERMISSION_MODE: "danger-full-access"
+  # ---- 旧执行适配器已于 2026-08-29（v0.2）全部移除，底座仅 pi ----
+  # 如需 Kimi/GLM 等其他 anthropic 兼容端点：复制上方 pi worker 块，
+  # 改 PI_BASE_URL / PI_API_KEY / PI_MODEL 即可。
+  # 每个 pi worker 独立 PI_CODING_AGENT_DIR（会话隔离，execute→conclude 走同一 worker 不串）。

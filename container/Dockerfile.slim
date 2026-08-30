@@ -1,4 +1,10 @@
 # SLIM 变体：apt 层仅装技能库实际用到的工具（构建 ~20-30 分钟 vs 全家桶 ~2h+）
+# 08-27 构建网络黑洞期补充：第三方二进制（katana/nuclei/dalfox/cloudfox/kerbrute +
+# nuclei-templates）优先从本机 v5s 镜像拷贝（零网络依赖；sha256 已在 v5s 构建时校验）。
+# 本地无 v5s 时该 stage 不可用——用 --build-arg 不行（FROM 不支持条件），需删除本块
+# 回落文件中部标注的 wget 分支。比赛方/CI 全新环境走 wget 分支。
+FROM astra-slim:v5s AS pinned-bins
+
 FROM --platform=amd64 kalilinux/kali-rolling:latest
 
 # apt 源显式固定（基础镜像把源放在 /etc/apt/sources.list.d/*.sources，其中东软镜像
@@ -8,9 +14,9 @@ ARG KALI_MIRROR="http://http.kali.org/kali"
 RUN rm -f /etc/apt/sources.list.d/* && \
     echo "deb ${KALI_MIRROR} kali-rolling main non-free contrib" > /etc/apt/sources.list && \
     apt update && \
-    (apt -y install python3 python3-pip python3-dev build-essential git curl wget jq tmux openssh-client sshpass socat ncat netcat-openbsd zip unzip zstd xz-utils file binutils gdb nmap sqlmap ffuf hashcat hydra john binwalk exiftool openjdk-21-jre-headless ruby ripgrep fd-find bsdextrautils iputils-ping rlwrap || (sleep 5 && apt -y install python3 python3-pip python3-dev build-essential git curl wget jq tmux openssh-client sshpass socat ncat netcat-openbsd zip unzip zstd xz-utils file binutils gdb nmap sqlmap ffuf hashcat hydra john binwalk exiftool openjdk-21-jre-headless ruby ripgrep fd-find bsdextrautils iputils-ping rlwrap)) && \
+    (apt -y install python3 python3-pip git curl wget jq tmux openssh-client sshpass socat ncat netcat-openbsd zip unzip zstd xz-utils file binutils gdb nmap sqlmap ffuf hashcat hydra john binwalk exiftool ruby ripgrep fd-find bsdextrautils iputils-ping rlwrap || (sleep 5 && apt -y install python3 python3-pip git curl wget jq tmux openssh-client sshpass socat ncat netcat-openbsd zip unzip zstd xz-utils file binutils gdb nmap sqlmap ffuf hashcat hydra john binwalk exiftool ruby ripgrep fd-find bsdextrautils iputils-ping rlwrap)) && \
     apt clean && \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/* /usr/share/man /usr/share/doc /usr/share/locale/??
 
 RUN useradd -m -s /bin/bash kali && \
     echo "kali ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
@@ -21,97 +27,91 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get update && \
     rm -rf /var/lib/apt/lists/*
 USER kali
 
-RUN sudo apt update && \
-    sudo apt install -y bsdextrautils npm jq iputils-ping sshpass ncat rlwrap \
+# 工具层（V2 能力层追加 jadx/apktool：Android 静态逆向——run 10089 两题 Android 因无反编译
+# 工具被迫走模拟器死路，FileBox 手写 DEX 解析器 6min；加层缓存失效属预期）
+# V9 弱项补强（托管雷达 f=二进制 6/13、a=Web 缺 PHP）：radare2+r2ghidra 反编译、
+# upx 脱壳、qemu-user 跨架构仿真（f2 固件/MCU）、php-cli（a 系源码审计/利用开发）、
+# z3-solver（f2 序列号约束求解）；ropper 弃用（filebytes 源码构建必炸，pwntools ROP 类全覆盖）
+RUN sudo rm -f /etc/apt/sources.list.d/* && \
+    echo "deb ${KALI_MIRROR} kali-rolling main non-free contrib" | sudo tee /etc/apt/sources.list >/dev/null && \
+    (sudo apt update || (sleep 5 && sudo apt update)) && \
+    (sudo apt install -y bsdextrautils npm jq iputils-ping sshpass ncat rlwrap \
     bloodyad coercer enum4linux-ng pwncat chisel-common-binaries \
-    dirsearch yq krb5-user gitleaks naabu nikto netexec adb && \
+    dirsearch yq krb5-user gitleaks naabu nikto netexec adb python3-pwntools \
+    jadx apktool radare2 rizin rz-ghidra upx-ucl strace xxd php-cli qemu-user \
+    || (sleep 10 && sudo apt update && sudo apt install -y bsdextrautils npm jq iputils-ping sshpass ncat rlwrap \
+    bloodyad coercer enum4linux-ng pwncat chisel-common-binaries \
+    dirsearch yq krb5-user gitleaks naabu nikto netexec adb python3-pwntools \
+    jadx apktool radare2 rizin rz-ghidra upx-ucl strace xxd php-cli qemu-user)) && \
     sudo apt clean && \
     sudo rm -rf /var/lib/apt/lists/* && \
-    sudo apt install -y python3-pwntools && pip3 install pymongo --break-system-packages && \
-    sudo npm install -g @playwright/cli@latest && \
-    cd /tmp && playwright-cli install
+    (for i in 1 2 3; do pip3 install -i http://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn pymongo z3-solver --break-system-packages && break || sleep $((i*8)); done)
 
-# 第三方二进制固定版本 + sha256 校验（供应链防护：上游 release 被替换/CDN 劫持即构建失败）。
-# katana/nuclei 哈希取自官方 release checksums.txt；dalfox/cloudfox/kerbrute 上游不提供
-# 校验文件，哈希为对官方 release 资产（尺寸已与 GitHub API 核对）本地 sha256 计算值。
-RUN cd /tmp && \
-    wget -q "https://github.com/projectdiscovery/katana/releases/download/v1.5.0/katana_1.5.0_linux_amd64.zip" -O katana.zip && \
-    wget -q "https://github.com/projectdiscovery/nuclei/releases/download/v3.7.1/nuclei_3.7.1_linux_amd64.zip" -O nuclei.zip && \
-    wget -q "https://github.com/hahwul/dalfox/releases/download/v2.12.0/dalfox-linux-amd64.tar.gz" -O dalfox.tar.gz && \
-    wget -q "https://github.com/BishopFox/cloudfox/releases/download/v2.0.1/cloudfox-linux-amd64.zip" -O cloudfox.zip && \
-    wget -q "https://github.com/ropnop/kerbrute/releases/download/v1.0.3/kerbrute_linux_amd64" -O kerbrute && \
-    echo "592890e5febaf5706d0a962d96299512418d6eccce6388cf1600e1f078ed359d  katana.zip" | sha256sum -c - && \
-    echo "72dbc77e87b3a6751adc151e514b15f51e2c94e493a561fc9e1138397c6e22c6  nuclei.zip" | sha256sum -c - && \
-    echo "56ea86c91f04dd64c675897cc7c9317630d6b65e610b16a079ef25c964ec8ab0  dalfox.tar.gz" | sha256sum -c - && \
-    echo "73b0cc7be28a4cdfbfabe7ef1e217e3c871624fc355f01689c12b63893506c3d  cloudfox.zip" | sha256sum -c - && \
-    echo "710a9d2653c8bd3689e451778dab9daec0de4c4c75f900788ccf23ef254b122a  kerbrute" | sha256sum -c - && \
-    git clone --depth 1 "https://github.com/projectdiscovery/nuclei-templates.git" /home/kali/.local/nuclei-templates && \
-    unzip -q katana.zip katana && sudo mv katana /usr/local/bin/ && \
-    unzip -q nuclei.zip nuclei && sudo mv nuclei /usr/local/bin/ && \
-    tar -xzf dalfox.tar.gz && sudo mv dalfox-linux-amd64 /usr/local/bin/dalfox && \
-    unzip -q cloudfox.zip cloudfox/cloudfox && sudo mv cloudfox/cloudfox /usr/local/bin/ && \
-    sudo cp kerbrute /usr/local/bin/ && \
-    nuclei -ut && \
-    sudo rm -rf /tmp/*
+# playwright CLI（独立层：npm 用国内源直连 + 三次重试，失败不拖垮 apt 层）
+RUN for i in 1 2 3; do \
+      sudo npm install -g --registry=https://registry.npmmirror.com @playwright/cli@latest && break || sleep 8; \
+    done && \
+    (cd /tmp && for i in 1 2 3; do playwright-cli install && break || sleep 8; done) && \
+    sudo rm -rf /root/.npm /home/kali/.npm /home/kali/.cache /tmp/* 2>/dev/null; true
 
-RUN mkdir -p /home/kali/knowledges && cd /home/kali/knowledges && \
-    git clone --depth=1 https://github.com/swisskyrepo/PayloadsAllTheThings.git && \
-    git clone --depth=1 https://github.com/swisskyrepo/InternalAllTheThings.git && \
-    git clone --depth=1 https://github.com/HackTricks-wiki/hacktricks.git && \
-    git clone --depth=1 https://github.com/HackTricks-wiki/hacktricks-cloud.git
+# 第三方二进制固定版本 + sha256 校验（供应链防护）。
+# 08-27 网络黑洞期改走 pinned-bins 拷贝（v5s 构建时已做 sha256 校验，二进制同版本）。
+# 回落分支（比赛方/CI 本地无 v5s 时改用）：原 wget+sha256 六连 fetch 脚本见 git 历史
+# （5e97ce1 前的 Dockerfile.slim 本层）。
+COPY --from=pinned-bins /usr/local/bin/katana /usr/local/bin/nuclei /usr/local/bin/dalfox /usr/local/bin/cloudfox /usr/local/bin/kerbrute /usr/local/bin/aliyun /usr/local/bin/
+COPY --from=pinned-bins /home/kali/.local/nuclei-templates /home/kali/.local/nuclei-templates
 
-RUN mkdir -p /home/kali/tools && cd /home/kali/tools && \
-    wget -q "https://github.com/frohoff/ysoserial/releases/download/v0.0.6/ysoserial-all.jar" -O ysoserial.jar && \
-    echo "2c9bddd6a1a4ec66c1078ea97dacb61eb66d1c41aec7b6d21e3c72214ce170f1  ysoserial.jar" | sha256sum -c - && \
-    git clone --depth=1 https://github.com/ticarpi/jwt_tool.git && \
-    cd jwt_tool && pip3 install -r requirements.txt --break-system-packages && \
-    git clone --depth=1 https://github.com/IOActive/jdwp-shellifier.git
+# 知识库 + 工具 + PoC 库：全部从 v5s 拷贝（08-27 网络黑洞期 github 克隆大面积失败：
+# hacktricks/hacktricks-cloud 被跳过、ysoserial 层是硬失败链会拖死构建——golden source
+# 统一为 v5s，零网络依赖。回落分支（全新环境）见 git 历史 5e97ce1 前的同名 RUN 层）。
+COPY --from=pinned-bins /home/kali/knowledges /home/kali/knowledges
+COPY --from=pinned-bins /home/kali/tools /home/kali/tools
+COPY --from=pinned-bins /home/kali/pocs /home/kali/pocs
 
-RUN mkdir -p /home/kali/pocs && cd /home/kali/pocs && \
-    git clone --depth=1 https://github.com/iSee857/CVE-PoC.git && \
-    git clone --depth=1 https://github.com/zhzyker/exphub.git && \
-    git clone --depth=1 https://github.com/passwa11/2023Hvv_.git && \
-    git clone --depth=1 https://github.com/Threekiii/Awesome-POC.git && \
-    git clone --depth=1 https://github.com/vulhub/vulhub.git
+# ripgrep/fd 已由基础层 apt 提供（ripgrep、fd-find），无需 GitHub deb 层
+# aliyun CLI 已随 pinned-bins 拷贝（原 github release + sha256 层见 git 历史）
 
-RUN cd /tmp && \
-    wget -q "https://github.com/BurntSushi/ripgrep/releases/download/15.1.0/ripgrep_15.1.0-1_amd64.deb" -O ripgrep.deb && \
-    wget -q "https://github.com/sharkdp/fd/releases/download/v10.4.2/fd_10.4.2_amd64.deb" -O fd.deb && \
-    echo "62ce186675c71edbc7c48a67dc36f986974551354d6ce63726adc2d85aad802c  ripgrep.deb" | sha256sum -c - && \
-    echo "0e44eb5fca93f09bc6f5430b90acdf44c8e069d0a903700aeb4820629337b67b  fd.deb" | sha256sum -c - && \
-    sudo apt install ./ripgrep.deb ./fd.deb && \
-    sudo rm -rf /tmp/* && \
-    sudo apt clean && \
-    sudo rm -rf /var/lib/apt/lists/*
-
-# aliyun CLI：弃用 pipe-to-bash 安装脚本，改为固定版本 release + sha256 校验
-RUN cd /tmp && \
-    wget -q "https://github.com/aliyun/aliyun-cli/releases/download/v3.4.11/aliyun-cli-linux-3.4.11-amd64.tgz" -O aliyun-cli.tgz && \
-    echo "a7e3df497db14c10d4d7587795e9fa7849b0c51dfce02908b9de5a41fe717d5c  aliyun-cli.tgz" | sha256sum -c - && \
-    tar -xzf aliyun-cli.tgz && sudo mv aliyun /usr/local/bin/aliyun && \
-    rm -f /tmp/aliyun-cli.tgz
-
-RUN pip3 install tccli awscli --break-system-packages
+# pip 统一模式：tuna/aliyun 双镜像交替 ×3 轮，全部失败则层硬失败（for-loop 里 sleep 会
+# 把失败吞成 0 退出码——08-27 v6 首建三层 pip 全被吞，astra/tccli/awscli/z3 静默缺席）
+RUN ok=""; for idx in 1 2 3; do \
+      if pip3 install -i http://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn pymongo z3-solver tccli awscli --break-system-packages; then ok=1; break; fi; \
+      sleep $((idx*5)); \
+      if pip3 install -i http://mirrors.aliyun.com/pypi/simple --trusted-host mirrors.aliyun.com pymongo z3-solver tccli awscli --break-system-packages; then ok=1; break; fi; \
+      sleep $((idx*5)); \
+    done; [ -n "$ok" ]
 
 # astra 引擎（server + dispatcher）与靶场接入编排器
 COPY ./astra /opt/astra
-RUN cd /opt/astra && pip3 install uv_build --break-system-packages && pip3 install . --break-system-packages
-RUN pip3 install tsec-benchmark --break-system-packages
+RUN cd /opt/astra && ok=""; for idx in 1 2 3; do \
+      if pip3 install -i http://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn uv_build --break-system-packages && pip3 install -i http://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn . --break-system-packages; then ok=1; break; fi; \
+      sleep $((idx*5)); \
+      if pip3 install -i http://mirrors.aliyun.com/pypi/simple --trusted-host mirrors.aliyun.com uv_build --break-system-packages && pip3 install -i http://mirrors.aliyun.com/pypi/simple --trusted-host mirrors.aliyun.com . --break-system-packages; then ok=1; break; fi; \
+      sleep $((idx*5)); \
+    done; [ -n "$ok" ]
+RUN ok=""; for idx in 1 2 3; do \
+      if pip3 install -i http://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn tsec-benchmark --break-system-packages; then ok=1; break; fi; \
+      sleep $((idx*5)); \
+      if pip3 install -i http://mirrors.aliyun.com/pypi/simple --trusted-host mirrors.aliyun.com tsec-benchmark --break-system-packages; then ok=1; break; fi; \
+      sleep $((idx*5)); \
+    done; [ -n "$ok" ]
 COPY ./container/astra_runner /opt/astra-runner
-# ASTRA 定制的 dsh headless 扩展（--session 会话续接，见 container/dsh/README.md）
-COPY ./container/dsh /opt/astra/dsh
+# V2-6 知识库（runner 按 /opt/knowledge/challenge-approaches.md 读取，ASTRA_KNOWLEDGE_FILE 可覆盖）
+COPY ./container/knowledge /opt/knowledge
 
 # 镜像默认入口：astra-runner（本地模式可手动执行 python3 /opt/astra-runner/runner.py）
 ENTRYPOINT ["python3", "/opt/astra-runner/runner.py"]
 
-RUN sudo npm install -g @openai/codex@0.118.0
-RUN sudo npm install -g @anthropic-ai/claude-code@2.1.98
-RUN sudo npm install -g @mariozechner/pi-coding-agent@0.73.0
-# DeepSeek Harness 无头模式 + ASTRA runner 插件（复制进 dsh 包 lib/，供 --patch 以裸说明符加载）
-RUN sudo npm install -g @deepseek-ai/dsh@0.1.0-rc.6 && \
-    sudo cp /opt/astra/dsh/astra-headless-runner.js "$(sudo npm root -g)/@deepseek-ai/dsh/lib/astra-headless-runner.js"
-# Playwright MCP（headless 通过 mcp-client 接入，Web 类题目用真实浏览器；npx -y 现场下载的替代）
-RUN sudo npm install -g @playwright/mcp@latest
+# 2026-08-29 v0.2 FGS 重建：执行底座只留 pi（@mariozechner/pi-coding-agent）——
+# 最原始、完全可控的 Agent Loop（Less is More）。claude-code 与 playwright-mcp
+# （CC 经 .claude.json 注入）整体移除；浏览器类需求由 worker 经 bash 直驱。
+# 硬失败纪律：双镜像源装不上直接断构建；装完必须能输出版本号。
+RUN ok=""; \
+    for reg in https://registry.npmmirror.com https://registry.npmjs.org; do \
+      echo "[pi] trying $reg"; \
+      if sudo npm install -g --registry=$reg @mariozechner/pi-coding-agent@0.73.0; then ok=1; break; fi; \
+      sleep $((RANDOM % 5 + 3)); \
+    done; \
+    [ -n "$ok" ] && pi --version
 
 RUN sudo chmod +x /usr/local/bin/kerbrute
 RUN mkdir -p /home/kali/.config/nuclei && \
@@ -119,18 +119,60 @@ RUN mkdir -p /home/kali/.config/nuclei && \
     echo "disable-update-check: true" >> /home/kali/.config/nuclei/config.yaml && \
     echo "update-template-dir: /home/kali/.local/nuclei-templates" >> /home/kali/.config/nuclei/config.yaml && \
     rm -rf /home/kali/nuclei-templates
-RUN sudo rm -rf /usr/lib/llvm-*/build && \
-    sudo chmod o+rx /usr/lib/mysql/plugin/auth_pam_tool_dir /etc/ssl/private
+RUN sudo rm -rf /usr/lib/llvm-*/build || true; \
+    (test -d /usr/lib/mysql/plugin/auth_pam_tool_dir && sudo chmod o+rx /usr/lib/mysql/plugin/auth_pam_tool_dir /etc/ssl/private || true)
 RUN printf '%s\n' 'PS1="${PS1%\\n*} \[\033[0;36m\]\D{%y-%m-%d} - \t\[\033[;32m\]\n${PS1##*\\n}"' >> /home/kali/.bashrc && \
     mkdir -p /home/kali/workspace && cd /home/kali/workspace && git init
+ENV PATH="/home/kali/.local/bin:${PATH}"
 ENV TZ=Asia/Shanghai
-ENV PLAYWRIGHT_MCP_BROWSER=chromium
-ENV CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 ENV PYTHONUNBUFFERED=1
+# 0.3.0 星尘记忆新机制：本地默认开、托管默认关（跑分吞吐优先，机制经本地轮实测后再开）
+# ASTRA_CHALLENGE_MODE=0 质询星探；ASTRA_EPITOME=0 图导出压缩；ASTRA_AUTO_DISTILL=0 赛后自动蒸馏
+ENV ASTRA_CHALLENGE_MODE=0 \
+    ASTRA_EPITOME=0 \
+    ASTRA_AUTO_DISTILL=0
 
 COPY ./container/.agents /home/kali/workspace/.agents
-COPY ./container/.agents /home/kali/workspace/.claude
 COPY ./container/AGENTS.md /home/kali/workspace/AGENTS.md
-COPY ./container/AGENTS.md /home/kali/workspace/CLAUDE.md
+COPY ./container/knowledge /home/kali/workspace/knowledge
+
+# V9 体积治理（托管 3G 上传硬限，裸 fs 8.6G→目标 ~7G）：
+# - 砍 OpenCL 整链 hashcat→pocl→clang-21→llvm-21（~776M；容器无 GPU，pocl 只是 CPU 模拟，
+#   john+z3 全覆盖 f2 爆破场景，历届得分从未依赖 hashcat）。
+#   教训：apt purge 带通配名时有不存在项会整批中止且被 || true 吞掉——首版静默失败，
+#   OpenCL 链全留在镜像里。改为 dpkg 查实名再 purge。
+# - UPX 压 Go 巨型二进制（cloudfox 311M/nuclei 122M/aliyun 90M/katana 46M/dalfox 33M/
+#   kerbrute 8M → 合计省 ~380M；压后逐个 --version 验证，失败自动还原）
+# - Awesome-POC 砍"网络设备漏洞"（94M，两靶场均无路由器/交换机题）
+# - tencentcloud SDK 只留常用服务目录（全量 356M 装了 200+ 服务的 API 模型）
+# - chisel 只留 linux_amd64/linux_arm64（隧道目标只会是 Linux）
+# - 后装包的 doc/man/locale 复扫（layer1 清过，工具层又装回来一部分）
+RUN set -e; purge_list=$(dpkg -l 2>/dev/null | grep -E "^ii\s+(hashcat|pocl|clang|llvm)-?[0-9]*" | awk '{print $2}' || true); \
+    if [ -n "$purge_list" ]; then sudo apt-get purge -y $purge_list || true; sudo apt-get autoremove -y || true; fi; \
+    for bin in cloudfox nuclei aliyun katana dalfox kerbrute; do \
+      if [ -f "/usr/local/bin/$bin" ]; then \
+        sudo cp "/usr/local/bin/$bin" "/tmp/$bin.bak"; \
+        if sudo upx -9 --lzma -q "/usr/local/bin/$bin" >/dev/null 2>&1 && "/usr/local/bin/$bin" --version >/dev/null 2>&1 || "/usr/local/bin/$bin" -h >/dev/null 2>&1 || "/usr/local/bin/$bin" help >/dev/null 2>&1; then \
+          echo "upx ok: $bin"; sudo rm -f "/tmp/$bin.bak"; \
+        else \
+          echo "upx failed, restore: $bin"; sudo cp "/tmp/$bin.bak" "/usr/local/bin/$bin"; sudo rm -f "/tmp/$bin.bak"; \
+        fi; \
+      fi; \
+    done; \
+    sudo rm -rf "/home/kali/pocs/Awesome-POC/网络设备漏洞" \
+                /usr/share/chisel-common-binaries/chisel_*_darwin_* \
+                /usr/share/chisel-common-binaries/chisel_*_openbsd_* \
+                /usr/share/chisel-common-binaries/chisel_*_linux_386 \
+                /usr/share/doc /usr/share/man /usr/share/locale \
+                /var/cache/apt /var/log/*.log /tmp/* 2>/dev/null || true; \
+    if cd /home/kali/.local/lib/python3.14/site-packages/tencentcloud 2>/dev/null; then \
+      for d in */; do \
+        case "${d%/}" in \
+          common|cvm|vpc|scf|cam|sts|cls|monitor|cdb|redis|mysql|ckafka|clb|ssl|cdn|dnspod|tcr|cr|as|tag|organization) ;; \
+          *) sudo rm -rf "$d" 2>/dev/null || true ;; \
+        esac; \
+      done; \
+    fi; \
+    sudo apt-get clean 2>/dev/null || true; true
 
 WORKDIR /home/kali/workspace

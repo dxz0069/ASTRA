@@ -11,11 +11,9 @@ _db_path: Path | None = None
 
 SCHEMA = """\
 CREATE TABLE IF NOT EXISTS settings (
-    intent_timeout INTEGER NOT NULL DEFAULT 15,
-    reason_timeout INTEGER NOT NULL DEFAULT 15
+    step_timeout INTEGER NOT NULL DEFAULT 15,
+    decide_timeout INTEGER NOT NULL DEFAULT 15
 );
-
-INSERT OR IGNORE INTO settings (rowid, intent_timeout, reason_timeout) VALUES (1, 15, 15);
 
 CREATE TABLE IF NOT EXISTS projects (
     id TEXT PRIMARY KEY,
@@ -23,10 +21,11 @@ CREATE TABLE IF NOT EXISTS projects (
     status TEXT NOT NULL DEFAULT 'active',
     bootstrap_enabled INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
-    reason_worker TEXT,
-    reason_trigger TEXT,
-    reason_started_at TEXT,
-    reason_last_heartbeat_at TEXT
+    decide_worker TEXT,
+    decide_trigger TEXT,
+    decide_started_at TEXT,
+    decide_last_heartbeat_at TEXT,
+    decide_token TEXT
 );
 
 CREATE TABLE IF NOT EXISTS facts (
@@ -34,32 +33,50 @@ CREATE TABLE IF NOT EXISTS facts (
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     description TEXT NOT NULL,
     kind TEXT NOT NULL DEFAULT 'regular',
-    confidence TEXT NOT NULL DEFAULT 'medium',
-    evidence TEXT,
-    challenged INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (id, project_id)
 );
 
-CREATE TABLE IF NOT EXISTS intents (
+CREATE TABLE IF NOT EXISTS steps (
     id TEXT NOT NULL,
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     to_fact_id TEXT,
     description TEXT NOT NULL,
+    expect TEXT,
+    status TEXT NOT NULL DEFAULT 'open',
+    close_reason TEXT,
+    closed_at TEXT,
     creator TEXT NOT NULL,
     worker TEXT,
+    dispatch_count INTEGER NOT NULL DEFAULT 0,
     last_heartbeat_at TEXT,
     created_at TEXT NOT NULL,
     concluded_at TEXT,
-    challenged INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (id, project_id)
 );
 
-CREATE TABLE IF NOT EXISTS intent_sources (
-    intent_id TEXT NOT NULL,
+CREATE TABLE IF NOT EXISTS step_sources (
+    step_id TEXT NOT NULL,
     project_id TEXT NOT NULL,
     fact_id TEXT NOT NULL,
-    PRIMARY KEY (intent_id, project_id, fact_id),
-    FOREIGN KEY (intent_id, project_id) REFERENCES intents(id, project_id) ON DELETE CASCADE
+    PRIMARY KEY (step_id, project_id, fact_id),
+    FOREIGN KEY (step_id, project_id) REFERENCES steps(id, project_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS findings (
+    id TEXT NOT NULL,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    description TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (id, project_id)
+);
+
+CREATE TABLE IF NOT EXISTS subgoals (
+    id TEXT NOT NULL,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    description TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (id, project_id)
 );
 
 CREATE TABLE IF NOT EXISTS hints (
@@ -95,37 +112,96 @@ def configure(path: Path) -> None:
     _db_path.parent.mkdir(parents=True, exist_ok=True)
     with get_conn() as conn:
         conn.executescript(SCHEMA)
-        _ensure_project_columns(conn)
-        _ensure_fact_columns(conn)
-        _ensure_intent_columns(conn)
+        _migrate_legacy(conn)
+        conn.execute(
+            "INSERT OR IGNORE INTO settings (rowid, step_timeout, decide_timeout) VALUES (1, 15, 15)"
+        )
 
 
-def _ensure_fact_columns(conn: sqlite3.Connection) -> None:
-    columns = {row["name"] for row in conn.execute("PRAGMA table_info(facts)")}
-    if "kind" not in columns:
-        conn.execute("ALTER TABLE facts ADD COLUMN kind TEXT NOT NULL DEFAULT 'regular'")
-    if "confidence" not in columns:
-        conn.execute("ALTER TABLE facts ADD COLUMN confidence TEXT NOT NULL DEFAULT 'medium'")
-    if "evidence" not in columns:
-        conn.execute("ALTER TABLE facts ADD COLUMN evidence TEXT")
-    if "challenged" not in columns:
-        conn.execute("ALTER TABLE facts ADD COLUMN challenged INTEGER NOT NULL DEFAULT 0")
+def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)
+    ).fetchone()
+    return row is not None
 
 
-def _ensure_intent_columns(conn: sqlite3.Connection) -> None:
-    columns = {row["name"] for row in conn.execute("PRAGMA table_info(intents)")}
-    if "challenged" not in columns:
-        conn.execute("ALTER TABLE intents ADD COLUMN challenged INTEGER NOT NULL DEFAULT 0")
+def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
 
 
-def _ensure_project_columns(conn: sqlite3.Connection) -> None:
-    columns = {row["name"] for row in conn.execute("PRAGMA table_info(projects)")}
-    if "bootstrap_enabled" not in columns:
+def _migrate_legacy(conn: sqlite3.Connection) -> None:
+    """旧库（intents/reason_* 命名、confidence/evidence 审查字段）→ 星图架构 v2。
+
+    生产环境每轮全新建库，本迁移只服务本地开发库的平滑升级；
+    步骤/事实数据全量保留，审查链遗产字段（confidence/evidence/challenged）丢弃。
+    """
+    # settings：列改名（老库才有旧列）
+    settings_cols = _columns(conn, "settings")
+    if "intent_timeout" in settings_cols:
+        conn.execute("ALTER TABLE settings RENAME COLUMN intent_timeout TO step_timeout")
+    if "reason_timeout" in settings_cols:
+        conn.execute("ALTER TABLE settings RENAME COLUMN reason_timeout TO decide_timeout")
+
+    # projects：decide 租约列改名
+    project_cols = _columns(conn, "projects")
+    renames = {
+        "reason_worker": "decide_worker",
+        "reason_trigger": "decide_trigger",
+        "reason_started_at": "decide_started_at",
+        "reason_last_heartbeat_at": "decide_last_heartbeat_at",
+        "reason_token": "decide_token",
+    }
+    for old, new in renames.items():
+        if old in project_cols:
+            conn.execute(f"ALTER TABLE projects RENAME COLUMN {old} TO {new}")
+    # 更老的库：bootstrap_enabled / bootstrap_mode 列补齐
+    project_cols = _columns(conn, "projects")
+    if "bootstrap_enabled" not in project_cols:
         conn.execute("ALTER TABLE projects ADD COLUMN bootstrap_enabled INTEGER NOT NULL DEFAULT 1")
-        if "bootstrap_mode" in columns:
+        if "bootstrap_mode" in project_cols:
             conn.execute(
                 "UPDATE projects SET bootstrap_enabled = CASE WHEN bootstrap_mode = 'disabled' THEN 0 ELSE 1 END"
             )
+
+    # facts：丢弃审查链字段；summary kind 并入 regular（consolidate 已移除）
+    fact_cols = _columns(conn, "facts")
+    if "summary" not in fact_cols and "kind" not in fact_cols:
+        conn.execute("ALTER TABLE facts ADD COLUMN kind TEXT NOT NULL DEFAULT 'regular'")
+    for legacy_col in ("confidence", "evidence", "challenged"):
+        if legacy_col in fact_cols:
+            conn.execute(f"ALTER TABLE facts DROP COLUMN {legacy_col}")
+    conn.execute("UPDATE facts SET kind = 'regular' WHERE kind = 'summary'")
+
+    # intents → steps（数据搬迁，保留全部行）
+    if _table_exists(conn, "intents"):
+        conn.execute(
+            """
+            INSERT INTO steps (id, project_id, to_fact_id, description, creator, worker,
+                               dispatch_count, last_heartbeat_at, created_at, concluded_at)
+            SELECT id, project_id, to_fact_id, description, creator, worker,
+                   dispatch_count, last_heartbeat_at, created_at, concluded_at
+            FROM intents
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO step_sources (step_id, project_id, fact_id)
+            SELECT intent_id, project_id, fact_id FROM intent_sources
+            """
+        )
+        conn.execute("DROP TABLE intent_sources")
+        conn.execute("DROP TABLE intents")
+
+    # steps 新列补齐（防中途版本库）
+    step_cols = _columns(conn, "steps")
+    if "expect" not in step_cols:
+        conn.execute("ALTER TABLE steps ADD COLUMN expect TEXT")
+    if "status" not in step_cols:
+        conn.execute("ALTER TABLE steps ADD COLUMN status TEXT NOT NULL DEFAULT 'open'")
+    if "close_reason" not in step_cols:
+        conn.execute("ALTER TABLE steps ADD COLUMN close_reason TEXT")
+    if "closed_at" not in step_cols:
+        conn.execute("ALTER TABLE steps ADD COLUMN closed_at TEXT")
 
 
 @contextmanager

@@ -103,14 +103,14 @@ function astraApp(){
     projects: [], selectedId: null, current: null,
     tab: 'detail', refreshing: false, modal: null,
     selectedNode: null, cy: null,
-    toasts: [], intentFrom: [], completeFrom: [],
+    toasts: [], stepFrom: [], completeFrom: [],
     filterText: '',
     consoleOpen: false, ui: loadUIPrefs(),
     graphQuery: '', _hits: [],
     createForm: {title:'', origin:'', goal:'', hints:'', bootstrap:true},
-    intentForm: {description:''}, concludeForm: {intentId:'', description:''},
+    stepForm: {description:'', expect:''}, concludeForm: {stepId:'', description:''},
     completeForm: {description:''}, hintForm: {content:''}, settingsForm: {},
-    _nodeCount: -1,
+    _nodeCount: -1, actionBusy: false,
 
     init(){
       window.__astra_apply_ui = () => this.applyUI(false);
@@ -184,7 +184,7 @@ function astraApp(){
         const prev=this.current;
         this.current=p;
         this.renderGraph(p);
-        if(prev && prev.project.id===p.project.id && (prev.facts.length!==p.facts.length || prev.hints.length!==p.hints.length)) this.toast(`星图更新：${p.facts.length} 星记 / ${p.hints.length} 指引`);
+        if(prev && prev.project.id===p.project.id && (prev.facts.length!==p.facts.length || prev.hints.length!==p.hints.length)) this.toast(`星图更新：${p.facts.length} 天枢 / ${p.hints.length} 辅星`);
       }).catch(e=>{ if(!silent) this.toast(e.message,'err'); });
     },
     refreshAll(){
@@ -202,14 +202,14 @@ function astraApp(){
       for(const f of p.facts){
         const type = f.id==='goal' ? 'goal' : f.id==='origin' ? 'origin' : 'fact';
         els.push({data:{id:'f:'+f.id, nodeType:type, label:f.id, description:f.description,
-          confidence:f.confidence, evidence:f.evidence, challenged:f.challenged, kind:f.kind, nodeId:f.id}});
+          kind:f.kind, nodeId:f.id}});
       }
-      for(const it of p.intents){
-        els.push({data:{id:'i:'+it.id, nodeType:'intent', label:it.id, description:it.description,
-          to:it.to, worker:it.worker, concluded:!!it.to, nodeId:it.id}});
-        const fromIds = it.from_ || it.from || [];
-        for(const from of fromIds){ els.push({data:{id:'e:'+it.id+':'+from, source:'f:'+from, target:'i:'+it.id}}); }
-        if(it.to){ els.push({data:{id:'ec:'+it.id+':'+it.to, source:'i:'+it.id, target:'f:'+it.to}}); }
+      for(const s of p.steps){
+        els.push({data:{id:'s:'+s.id, nodeType:'step', label:s.id, description:s.description,
+          expect:s.expect, status:s.status, to:s.to, worker:s.worker, concluded:!!s.to, nodeId:s.id}});
+        const fromIds = s.from_ || s.from || [];
+        for(const from of fromIds){ els.push({data:{id:'e:'+s.id+':'+from, source:'f:'+from, target:'s:'+s.id}}); }
+        if(s.to){ els.push({data:{id:'ec:'+s.id+':'+s.to, source:'s:'+s.id, target:'f:'+s.to}}); }
       }
       return els;
     },
@@ -226,12 +226,11 @@ function astraApp(){
         {selector:'node[nodeType="origin"]', style:{'background-color':NEUTRAL}},
         {selector:'node[nodeType="goal"]', style:{'background-color':GOAL,'shape':'star','width':S*1.4,'height':S*1.4,
           'border-color':'rgba(232,195,53,.8)','border-width':2}},
-        {selector:'node[nodeType="intent"]', style:{'background-color':'#141d2e','shape':'round-rectangle',
+        {selector:'node[nodeType="step"]', style:{'background-color':'#141d2e','shape':'round-rectangle',
           'width':S*1.25,'height':S,'border-color':ACCENT,'border-width':1.5}},
         {selector:'node[?concluded]', style:{'opacity':0.55}},
-        {selector:'node[?challenged]', style:{'border-color':BAD,'border-width':2,'border-style':'dashed'}},
-        {selector:'node[confidence="high"]', style:{'border-color':OK,'border-width':2.5}},
-        {selector:'node[confidence="low"]', style:{'border-color':BAD,'border-width':2,'border-style':'dashed'}},
+        {selector:'node[nodeType="step"][status="closed"]', style:{'opacity':0.35,'border-style':'dashed'}},
+        {selector:'node[kind="negative"]', style:{'border-color':NEUTRAL,'border-style':'dashed'}},
         {selector:':selected', style:{'overlay-color':ACCENT,'overlay-opacity':0.16,'overlay-padding':7}},
         {selector:'node.dim', style:{'opacity':0.15}},
         {selector:'edge.dim', style:{'opacity':0.07}},
@@ -304,7 +303,7 @@ function astraApp(){
       const hits=[];
       cy.nodes().forEach(n=>{
         const d=n.data();
-        const hay=[d.label, d.description, d.evidence, d.worker].filter(Boolean).join('\n').toLowerCase();
+        const hay=[d.label, d.description, d.expect, d.worker].filter(Boolean).join('\n').toLowerCase();
         if(hay.includes(q)){ n.removeClass('dim'); n.addClass('hit'); hits.push(n.id()); }
         else { n.removeClass('hit'); n.addClass('dim'); }
       });
@@ -336,74 +335,98 @@ function astraApp(){
 
     nodeTypeLabel(n){
       const t=n.data.nodeType;
-      return t==='fact'?'星记':t==='intent'?'航向':t==='goal'?'目标':t==='origin'?'起点':'节点';
+      return t==='fact'?'天枢':t==='step'?'斗柄':t==='goal'?'北辰':t==='origin'?'起点':'节点';
     },
     nodeBadgeClass(n){
       return n.data.nodeType==='goal' ? 'medium' : 'summary';
     },
-    confidenceText(c){ return {low:'低置信',medium:'中置信',high:'高置信'}[c]||c; },
-
-    copyEvidence(text){
-      navigator.clipboard.writeText(text||'').then(
-        ()=>this.toast('证据已复制到剪贴板'),
-        ()=>this.toast('复制失败','err'));
-    },
-
     /* ---- 操作 ---- */
+    /* in-flight 防抖：写操作进行中禁用全部提交按钮（双击曾致重复步骤/重复指引） */
+    guard(fn){
+      if(this.actionBusy) return;
+      this.actionBusy=true;
+      const done=()=>{ this.actionBusy=false; };
+      try{
+        const r=fn();
+        if(r && typeof r.finally==='function'){ r.finally(done); } else { done(); }
+      }catch(e){ done(); throw e; }
+    },
     selectableFacts(){ return (this.current?.facts||[]).filter(f=>f.id!=='goal'&&f.id!=='origin'); },
-    toggleIntentFrom(id){ const i=this.intentFrom.indexOf(id); i>=0?this.intentFrom.splice(i,1):this.intentFrom.push(id); },
+    toggleStepFrom(id){ const i=this.stepFrom.indexOf(id); i>=0?this.stepFrom.splice(i,1):this.stepFrom.push(id); },
     toggleCompleteFrom(id){ const i=this.completeFrom.indexOf(id); i>=0?this.completeFrom.splice(i,1):this.completeFrom.push(id); },
 
     openCreate(){ this.createForm={title:'',origin:'',goal:'',hints:'',bootstrap:true}; this.modal='create'; },
     createProject(){
       if(!this.createForm.title.trim()){ this.toast('请填写星域标题','err'); return; }
-      const hints=(this.createForm.hints||'').split('\n').map(s=>s.trim()).filter(Boolean).map(c=>({content:c,creator:'human'}));
-      this.api('POST','/projects',{title:this.createForm.title, origin:this.createForm.origin,
-        goal:this.createForm.goal, bootstrap_enabled:this.createForm.bootstrap, hints}).then(p=>{
-        this.modal=null; this.loadProjects(); this.selectProject(p.project.id);
-      }).catch(e=>this.toast(e.message,'err'));
+      if(!this.createForm.origin.trim() || !this.createForm.goal.trim()){ this.toast('起点与北辰必填','err'); return; }
+      this.guard(()=>{
+        const hints=(this.createForm.hints||'').split('\n').map(s=>s.trim()).filter(Boolean).map(c=>({content:c,creator:'human'}));
+        return this.api('POST','/projects',{title:this.createForm.title, origin:this.createForm.origin,
+          goal:this.createForm.goal, bootstrap_enabled:this.createForm.bootstrap, hints}).then(p=>{
+          this.modal=null; this.loadProjects(); this.selectProject(p.project.id);
+        }).catch(e=>this.toast(e.message,'err'));
+      });
     },
-    openCreateIntent(){ this.intentFrom=[]; this.intentForm.description=''; this.modal='intent'; },
-    createIntent(){
-      if(!this.intentFrom.length){ this.toast('至少选择一个源自星记','err'); return; }
-      this.api('POST',`/projects/${this.selectedId}/intents`,{from:this.intentFrom,
-        description:this.intentForm.description, creator:'human', worker:null}).then(()=>{
-        this.modal=null; this.loadProject(this.selectedId);
-      }).catch(e=>this.toast(e.message,'err'));
+    openCreateStep(){ this.stepFrom=[]; this.stepForm={description:'', expect:''}; this.modal='step'; },
+    createStep(){
+      if(!this.stepFrom.length){ this.toast('至少选择一个源自天枢','err'); return; }
+      if(!this.stepForm.description.trim()){ this.toast('请填写斗柄指向','err'); return; }
+      this.guard(()=>{
+        const body={from:this.stepFrom, description:this.stepForm.description, creator:'human', worker:null};
+        if(this.stepForm.expect && this.stepForm.expect.trim()) body.expect=this.stepForm.expect.trim();
+        return this.api('POST',`/projects/${this.selectedId}/steps`,body).then(()=>{
+          this.modal=null; this.loadProject(this.selectedId);
+        }).catch(e=>this.toast(e.message,'err'));
+      });
     },
-    openConclude(n){ this.concludeForm={intentId:n.nodeId, description:''}; this.modal='conclude'; },
-    concludeIntent(){
-      this.api('POST',`/projects/${this.selectedId}/intents/${this.concludeForm.intentId}/conclude`,
-        {worker:'human', description:this.concludeForm.description}).then(()=>{
-        this.modal=null; this.loadProject(this.selectedId);
-      }).catch(e=>this.toast(e.message,'err'));
+    openConclude(n){ this.concludeForm={stepId:n.nodeId, description:''}; this.modal='conclude'; },
+    concludeStep(){
+      if(!this.concludeForm.description.trim()){ this.toast('请填写结论天枢','err'); return; }
+      this.guard(()=>{
+        return this.api('POST',`/projects/${this.selectedId}/steps/${this.concludeForm.stepId}/conclude`,
+          {worker:'human', description:this.concludeForm.description}).then(()=>{
+          this.modal=null; this.loadProject(this.selectedId);
+        }).catch(e=>this.toast(e.message,'err'));
+      });
     },
     openComplete(){ this.completeFrom=[]; this.completeForm.description=''; this.modal='complete'; },
     completeProject(){
-      if(!this.completeFrom.length){ this.toast('至少选择一个证据星记','err'); return; }
-      this.api('POST',`/projects/${this.selectedId}/complete`,{from:this.completeFrom,
-        description:this.completeForm.description, worker:'human'}).then(()=>{
-        this.modal=null; this.loadProject(this.selectedId);
-      }).catch(e=>this.toast(e.message,'err'));
+      if(!this.completeFrom.length){ this.toast('至少选择一个完成依据天枢','err'); return; }
+      if(!this.completeForm.description.trim()){ this.toast('请填写完成说明','err'); return; }
+      this.guard(()=>{
+        return this.api('POST',`/projects/${this.selectedId}/complete`,{from:this.completeFrom,
+          description:this.completeForm.description, worker:'human'}).then(()=>{
+          this.modal=null; this.loadProject(this.selectedId);
+        }).catch(e=>this.toast(e.message,'err'));
+      });
     },
     openAddHint(){ this.hintForm.content=''; this.modal='hint'; },
     addHint(){
       if(!this.hintForm.content.trim()){ this.toast('请填写指引内容','err'); return; }
-      this.api('POST',`/projects/${this.selectedId}/hints`,{content:this.hintForm.content, creator:'human'}).then(()=>{
-        this.modal=null; this.loadProject(this.selectedId);
-      }).catch(e=>this.toast(e.message,'err'));
+      this.guard(()=>{
+        return this.api('POST',`/projects/${this.selectedId}/hints`,{content:this.hintForm.content, creator:'human'}).then(()=>{
+          this.modal=null; this.loadProject(this.selectedId);
+        }).catch(e=>this.toast(e.message,'err'));
+      });
     },
     openSettings(){ this.api('GET','/settings').then(s=>{ this.settingsForm={...s}; this.modal='settings'; }).catch(e=>this.toast(e.message,'err')); },
     saveSettings(){
-      this.api('PUT','/settings',this.settingsForm).then(()=>{ this.modal=null; }).catch(e=>this.toast(e.message,'err'));
+      this.guard(()=>{
+        return this.api('PUT','/settings',this.settingsForm).then(()=>{ this.modal=null; }).catch(e=>this.toast(e.message,'err'));
+      });
     },
-    setStatus(status){ this.api('PUT',`/projects/${this.selectedId}/status`,{status}).then(()=>{ this.loadProject(this.selectedId); }).catch(e=>this.toast(e.message,'err')); },
-    reopenProject(){ this.api('POST',`/projects/${this.selectedId}/reopen`,{description:'手动重开', creator:'human'}).then(()=>{ this.loadProject(this.selectedId); }).catch(e=>this.toast(e.message,'err')); },
+    setStatus(status){ this.guard(()=>{ return this.api('PUT',`/projects/${this.selectedId}/status`,{status}).then(()=>{ this.loadProject(this.selectedId); }).catch(e=>this.toast(e.message,'err')); }); },
+    reopenProject(){ this.guard(()=>{ return this.api('POST',`/projects/${this.selectedId}/reopen`,{description:'手动重开', creator:'human'}).then(()=>{ this.loadProject(this.selectedId); }).catch(e=>this.toast(e.message,'err')); }); },
     askDelete(){ this.modal='delete'; },
     deleteProject(){
-      this.api('DELETE',`/projects/${this.selectedId}`).then(()=>{
-        this.modal=null; this.selectedId=null; this.current=null; this._nodeCount=-1; this.loadProjects();
-      }).catch(e=>this.toast(e.message,'err'));
+      this.guard(()=>{
+        return this.api('DELETE',`/projects/${this.selectedId}`).then(()=>{
+          this.modal=null; this.selectedId=null; this.current=null; this._nodeCount=-1;
+          this.selectedNode=null;
+          if(this.cy){ this.cy.elements().remove(); }  // 画布残留已删项目的图（审计十一轮）
+          this.loadProjects();
+        }).catch(e=>this.toast(e.message,'err'));
+      });
     },
     exportYaml(){ window.open(`/projects/${this.selectedId}/export?format=yaml`,'_blank'); },
 
@@ -413,8 +436,7 @@ function astraApp(){
       const hints=this.current?.hints||[];
       for(const h of hints){
         const c=h.content||'';
-        if(c.includes('[审查否决]')) items.push({cls:'review', text:c.replace('[审查否决]','').trim(), time:h.created_at});
-        else if(c.includes('[失败学习]')) items.push({cls:'learn', text:c.replace('[失败学习]','').trim(), time:h.created_at});
+        if(c.includes('[失败学习]')) items.push({cls:'learn', text:c.replace('[失败学习]','').trim(), time:h.created_at});
         else items.push({cls:'hint', text:c, time:h.created_at});
       }
       return items.slice().reverse();
@@ -423,7 +445,6 @@ function astraApp(){
     /* 指引卡: 识别审查/学习前缀, 剥离为徽章 */
     hintMeta(h){
       const c=h.content||'';
-      if(c.includes('[审查否决]')) return {cls:'review', label:'审查否决', text:c.replace('[审查否决]','').trim()};
       if(c.includes('[失败学习]')) return {cls:'learn', label:'失败学习', text:c.replace('[失败学习]','').trim()};
       return {cls:'', label:'', text:c};
     },

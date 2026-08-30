@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
+import sys
+import tempfile
 import time
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 
 from astra.dispatcher.config import DispatchConfig, WorkerConfig
 from astra.dispatcher.protocol.client import ASTRAClient
@@ -18,12 +22,16 @@ HEALTHCHECK_COMMUNICATE_GRACE_SECONDS = 10
 PROCESS_COMMUNICATE_GRACE_SECONDS = 15
 LOG_PREVIEW_LIMIT = 1200
 GRAPH_SNAPSHOT_ROOT = "/tmp/astra-prompts"
+# P1-4：图快照目录最长保留时长——超过即视为陈旧可清理（任务超时远小于该值）
+GRAPH_SNAPSHOT_MAX_AGE_SECONDS = 2 * 3600
+# P1-4：陈旧快照清理节流间隔——不必每次派任务都全量扫描目录
+_GRAPH_SNAPSHOT_CLEANUP_INTERVAL_SECONDS = 600
+_last_snapshot_cleanup_at = [0.0]
 LOG = logging.getLogger(__name__)
 
 FAILURE_HINT_PREFIX = "[失败学习] "
-REVIEW_HINT_PREFIX = "[审查否决] "
 
-# 星记去重：新发现与既有星记描述的 Jaccard 词集合相似度达到该阈值视为重复（防重复侦察）。
+# 天枢去重：新发现与既有天枢描述的 Jaccard 词集合相似度达到该阈值视为重复（防重复侦察）。
 # token 粒度：ASCII 词 + 连续 CJK 段（中文描述按短语段匹配，兼顾中英文混排）。
 FACT_SIMILARITY_THRESHOLD = 0.6
 
@@ -33,7 +41,7 @@ def _fact_tokens(text: str) -> set[str]:
 
 
 def find_duplicate_fact(project: ProjectDetail, description: str, *, exclude_ids: tuple[str, ...] = ("origin", "goal")) -> Fact | None:
-    """在既有星记中找与 description 高度相似的（防重复侦察/重复写回）。
+    """在既有天枢中找与 description 高度相似的（防重复侦察/重复写回）。
 
     - 描述含 flag{...} 的发现不去重（flag 必须完整写回，可能多个 flag 同题）；
     - origin/goal 不参与比较；
@@ -56,36 +64,6 @@ def find_duplicate_fact(project: ProjectDetail, description: str, *, exclude_ids
         if len(target & other) / len(union) >= FACT_SIMILARITY_THRESHOLD:
             return fact
     return None
-
-
-def review_graph_summary(project: ProjectDetail, *, max_facts: int = 15, max_intents: int = 8) -> str:
-    """双星审查的紧凑星图摘要（重构备忘候选 20：减少模型读大图文件的耗时）。
-
-    内联到审查 prompt 的 {graph_yaml} 上下文（文件路径引用之后），模型可先看摘要
-    再按需读完整快照；大图时显著缩短 challenge/verdict 的读图时间。
-    """
-    lines = ["## 星图摘要（快速参考，完整快照见上方文件路径）"]
-    goal = next((f.description for f in project.facts if f.id == "goal"), "")
-    if goal:
-        lines.append(f"- Goal: {goal[:200]}")
-    facts = [f for f in project.facts if f.id not in ("origin", "goal")][:max_facts]
-    if facts:
-        lines.append("- Facts:")
-        for fact in facts:
-            desc = " ".join(fact.description.split())[:120]
-            lines.append(f"  - {fact.id}: {desc}")
-    intents = getattr(project, "intents", None) or []
-    if intents:
-        lines.append("- Open Intents:")
-        for intent in intents[:max_intents]:
-            desc = " ".join(intent.description.split())[:120]
-            lines.append(f"  - {intent.id}: {desc}")
-    hints = getattr(project, "hints", None) or []
-    if hints:
-        previews = ", ".join(" ".join(h.content.split())[:40] for h in hints[:3])
-        suffix = "..." if len(hints) > 3 else ""
-        lines.append(f"- Hints: {len(hints)} 条（{previews}{suffix}）")
-    return "\n".join(lines)
 
 
 def record_failure_hint(
@@ -165,6 +143,37 @@ def task_healthcheck_enabled(config: DispatchConfig) -> bool:
     return config.runtime.worker_healthcheck == "startup_and_task"
 
 
+def _cleanup_stale_graph_snapshots() -> None:
+    """P1-4：清理宿主侧超过 2 小时的旧图快照目录，防止 /tmp/astra-prompts 无限膨胀。
+
+    每次派任务都写一份 <phase>-<uuid>/graph.yaml 且从不清理；本地执行模式下
+    快照落在宿主临时目录（POSIX: $TMPDIR/astra-prompts，Windows: C:\\tmp\\
+    astra-prompts——与 LocalContainerManager._to_host_path 的 /tmp 映射约定一致），
+    跨项目累积成磁盘泄漏；docker 模式容器随项目整体回收，不受此影响。
+    目录 mtime 即创建时间（写 graph.yaml 后不再变动），任务最长超时远小于
+    2 小时，按此判龄不会删到在用快照。清理失败静默忽略——不影响派发主流程。
+    """
+    now = time.time()
+    if now - _last_snapshot_cleanup_at[0] < _GRAPH_SNAPSHOT_CLEANUP_INTERVAL_SECONDS:
+        return
+    _last_snapshot_cleanup_at[0] = now
+    try:
+        if sys.platform == "win32":
+            root = Path("C:/tmp") / "astra-prompts"
+        else:
+            root = Path(tempfile.gettempdir()) / "astra-prompts"
+        if not root.is_dir():
+            return
+        for entry in root.iterdir():
+            try:
+                if entry.is_dir() and now - entry.stat().st_mtime > GRAPH_SNAPSHOT_MAX_AGE_SECONDS:
+                    shutil.rmtree(entry, ignore_errors=True)
+            except OSError:
+                continue  # 单个目录清理失败不影响其余
+    except OSError:
+        pass
+
+
 def write_graph_snapshot_reference(
     container_manager: ContainerManager,
     container_name: str,
@@ -172,6 +181,8 @@ def write_graph_snapshot_reference(
     *,
     phase: str,
 ) -> str:
+    # P1-4：写入新快照前顺手清理陈旧快照目录（节流，见函数内说明）
+    _cleanup_stale_graph_snapshots()
     path = f"{GRAPH_SNAPSHOT_ROOT}/{phase}-{uuid.uuid4().hex[:12]}/graph.yaml"
     container_manager.write_text_file(container_name, path, graph_yaml)
     return (
@@ -233,6 +244,7 @@ def run_worker_process(
         phase,
         timeout_seconds,
     )
+    _pending_usage = {"logged": False}
     process = container_manager.build_exec_process(
         container_name,
         dict(worker.env),
@@ -245,7 +257,9 @@ def run_worker_process(
     if cancellation is not None:
         cancellation.attach_process(process)
     try:
-        return process.communicate(timeout=communicate_timeout(timeout_seconds))
+        result = process.communicate(timeout=communicate_timeout(timeout_seconds))
+        _log_phase_usage(worker.name, phase, result.stdout or "")
+        return result
     finally:
         if lease is not None:
             lease.attach_process(None)
@@ -253,34 +267,59 @@ def run_worker_process(
             cancellation.attach_process(None)
 
 
-def project_allows_conclude_fallback(client: ASTRAClient, project_id: str, *, worker_name: str, intent_id: str) -> bool:
+def _log_phase_usage(worker_name: str, phase: str, stdout: str) -> None:
+    """从 pi 的 json 事件流提取本阶段 token 用量并记日志（会话文件落盘不稳定，
+    stdout 事件才是可靠载体；usage 口径=各 turn 累计）。"""
+    import json as _json
+
+    total = 0
+    hits = 0
+    for line in stdout.splitlines():
+        line = line.strip()
+        if '"usage"' not in line or not line.startswith("{"):
+            continue
+        try:
+            ev = _json.loads(line)
+        except _json.JSONDecodeError:
+            continue
+        msg = ev.get("message") or {}
+        u = msg.get("usage") or {}
+        if not u:
+            continue
+        hits += 1
+        total = max(total, int(u.get("totalTokens") or 0))
+    if hits:
+        LOG.info("phase usage worker=%s phase=%s turns=%s totalTokens~%s", worker_name, phase, hits, total)
+
+
+def project_allows_conclude_fallback(client: ASTRAClient, project_id: str, *, worker_name: str, step_id: str) -> bool:
     project = client.get_project(project_id)
     if project.project.status == "active":
         return True
     LOG.info(
-        "skip conclude fallback because project is no longer active project=%s intent=%s worker=%s status=%s",
+        "skip conclude fallback because project is no longer active project=%s step=%s worker=%s status=%s",
         project_id,
-        intent_id,
+        step_id,
         worker_name,
         project.project.status,
     )
     return False
 
 
-def best_effort_release_reason(client: ASTRAClient, project_id: str, worker_name: str) -> None:
-    response = client.release_reason(project_id, worker_name)
+def best_effort_release_decide(client: ASTRAClient, project_id: str, worker_name: str, lease_token: str | None = None) -> None:
+    response = client.release_decide(project_id, worker_name, lease_token)
     if not response.ok and response.status_code not in (403, 409):
         LOG.warning(
-            "reason release failed project=%s worker=%s status=%s",
+            "decide release failed project=%s worker=%s status=%s",
             project_id,
             worker_name,
             response.status_code,
         )
     elif response.ok:
-        LOG.info("released reason project=%s worker=%s", project_id, worker_name)
+        LOG.info("released decide project=%s worker=%s", project_id, worker_name)
     else:
         LOG.info(
-            "reason release skipped project=%s worker=%s status=%s",
+            "decide release skipped project=%s worker=%s status=%s",
             project_id,
             worker_name,
             response.status_code,
@@ -290,54 +329,50 @@ def best_effort_release_reason(client: ASTRAClient, project_id: str, worker_name
 def write_conclude_result(
     client: ASTRAClient,
     project_id: str,
-    intent_id: str,
+    step_id: str,
     worker_name: str,
     description: str,
     *,
     source: str,
     phase_ms: int,
     total_ms: int | None = None,
-    confidence: str = "medium",
-    evidence: str | None = None,
-    challenged: bool = False,
+    kind: str = "regular",
+    finding: str | None = None,
 ) -> str:
     return write_conclude_result_with_fact_id(
         client,
         project_id,
-        intent_id,
+        step_id,
         worker_name,
         description,
         source=source,
         phase_ms=phase_ms,
         total_ms=total_ms,
-        confidence=confidence,
-        evidence=evidence,
-        challenged=challenged,
+        kind=kind,
+        finding=finding,
     ).status
 
 
 def write_conclude_result_with_fact_id(
     client: ASTRAClient,
     project_id: str,
-    intent_id: str,
+    step_id: str,
     worker_name: str,
     description: str,
     *,
     source: str,
     phase_ms: int,
     total_ms: int | None = None,
-    confidence: str = "medium",
-    evidence: str | None = None,
-    challenged: bool = False,
+    kind: str = "regular",
+    finding: str | None = None,
 ) -> ConcludeWriteResult:
     response = client.conclude(
         project_id,
-        intent_id,
+        step_id,
         worker_name,
         description,
-        confidence=confidence,
-        evidence=evidence,
-        challenged=challenged,
+        kind=kind,
+        finding=finding,
     )
     if response.ok:
         fact_id: str | None = None
@@ -349,61 +384,61 @@ def write_conclude_result_with_fact_id(
                     fact_id = candidate
         if total_ms is None:
             LOG.info(
-                "intent concluded project=%s intent=%s worker=%s source=%s phase_ms=%s",
+                "step concluded project=%s step=%s worker=%s source=%s phase_ms=%s",
                 project_id,
-                intent_id,
+                step_id,
                 worker_name,
                 source,
                 phase_ms,
             )
         else:
             LOG.info(
-                "intent concluded project=%s intent=%s worker=%s source=%s phase_ms=%s total_ms=%s",
+                "step concluded project=%s step=%s worker=%s source=%s phase_ms=%s total_ms=%s",
                 project_id,
-                intent_id,
+                step_id,
                 worker_name,
                 source,
                 phase_ms,
                 total_ms,
             )
         return ConcludeWriteResult(status="success", fact_id=fact_id)
-    if response.status_code == 403:
+    if response.status_code in (403, 404):
         LOG.info(
-            "project became inactive during conclude project=%s intent=%s worker=%s",
+            "project became inactive during conclude project=%s step=%s worker=%s",
             project_id,
-            intent_id,
+            step_id,
             worker_name,
         )
     else:
         LOG.warning(
-            "conclude write failed project=%s intent=%s worker=%s status=%s body=%s",
+            "conclude write failed project=%s step=%s worker=%s status=%s body=%s",
             project_id,
-            intent_id,
+            step_id,
             worker_name,
             response.status_code,
             response.text,
         )
-    best_effort_release(client, project_id, intent_id, worker_name)
+    best_effort_release(client, project_id, step_id, worker_name)
     return ConcludeWriteResult(status="failed", fact_id=None)
 
 
-def best_effort_release(client: ASTRAClient, project_id: str, intent_id: str, worker_name: str) -> None:
-    response = client.release(project_id, intent_id, worker_name)
+def best_effort_release(client: ASTRAClient, project_id: str, step_id: str, worker_name: str) -> None:
+    response = client.release(project_id, step_id, worker_name)
     if not response.ok and response.status_code not in (403, 409):
         LOG.warning(
-            "release failed project=%s intent=%s worker=%s status=%s",
+            "release failed project=%s step=%s worker=%s status=%s",
             project_id,
-            intent_id,
+            step_id,
             worker_name,
             response.status_code,
         )
     elif response.ok:
-        LOG.info("released intent project=%s intent=%s worker=%s", project_id, intent_id, worker_name)
+        LOG.info("released step project=%s step=%s worker=%s", project_id, step_id, worker_name)
     else:
         LOG.info(
-            "release skipped project=%s intent=%s worker=%s status=%s",
+            "release skipped project=%s step=%s worker=%s status=%s",
             project_id,
-            intent_id,
+            step_id,
             worker_name,
             response.status_code,
         )

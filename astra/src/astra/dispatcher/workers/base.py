@@ -21,14 +21,6 @@ class WorkerDriver(abc.ABC):
     def supports_conclude(self) -> bool:
         return True
 
-    def supports_review(self) -> bool:
-        """审查阶段（challenge/verdict）对输出契约稳定性要求高。
-
-        默认支持；个别驱动（如 pi 实测在审查场景偶发提前退出）可声明不支持，
-        由调度层（tasks.reason._resolve_review_worker）回退到可靠的 claudecode worker。
-        """
-        return True
-
     def prepare_session(self) -> str | None:
         return None
 
