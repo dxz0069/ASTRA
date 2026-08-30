@@ -19,3 +19,11 @@ astra/node_modules
 dispatch.yaml
 dispatch.astra.yaml
 dispatch*secret*
+
+# 审计26轮：构建上下文瘦身（不被 COPY 但拖慢上下文上传的目录/大文件）
+projects
+note
+log
+*.pdf
+*.pptx
+*.tar
