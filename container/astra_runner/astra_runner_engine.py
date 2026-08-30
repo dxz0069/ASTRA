@@ -219,16 +219,16 @@ class AstraDaemon:
         # ASTRA_DECIDE_TIMEOUT 新名；ASTRA_REASON_TIMEOUT 旧名回读（env 平滑迁移）
         _decide_timeout = max(
             60,
-            int(os.environ.get("ASTRA_DECIDE_TIMEOUT") or os.environ.get("ASTRA_REASON_TIMEOUT", "900")),
+            int(os.environ.get("ASTRA_DECIDE_TIMEOUT") or os.environ.get("ASTRA_REASON_TIMEOUT", "600")),
         )
         yaml = f"""server: "{ASTRA_SERVER_URL}"
 runtime:
   interval: 3
-  max_workers: 8
-  max_running_projects: 3
-  max_project_workers: 8
-  healthcheck_timeout: 20
-  worker_healthcheck: "startup_only"
+  max_workers: 20
+  max_running_projects: 4
+  max_project_workers: 12
+  healthcheck_timeout: 60
+  worker_healthcheck: "disabled"
   prompt_group: "default"
   execution: "local"
   context_budget:
@@ -237,11 +237,11 @@ runtime:
     max_inline_hints: 8
 tasks:
   bootstrap:
-    timeout: 600
-    conclude_timeout: 120
+    timeout: 450
+    conclude_timeout: 90
   decide:
     timeout: {_decide_timeout}
-    max_steps: 2
+    max_steps: 7
   execute:
     timeout: 600
     conclude_timeout: 120
@@ -282,11 +282,11 @@ workers:
         glm_provider_api = os.environ.get("ZHIPU_PI_PROVIDER_API", "anthropic-messages")
         execute_replicas = max(
             1,
-            int(os.environ.get("ASTRA_EXECUTE_REPLICAS") or os.environ.get("ASTRA_EXPLORE_REPLICAS", "2")),
+            int(os.environ.get("ASTRA_EXECUTE_REPLICAS") or os.environ.get("ASTRA_EXPLORE_REPLICAS", "4")),
         )
         execute_maxrun = max(
             1,
-            int(os.environ.get("ASTRA_EXECUTE_MAXRUN") or os.environ.get("ASTRA_EXPLORE_MAXRUN", "3")),
+            int(os.environ.get("ASTRA_EXECUTE_MAXRUN") or os.environ.get("ASTRA_EXPLORE_MAXRUN", "5")),
         )
         fleet: list[str] = []
         for i in range(execute_replicas):
