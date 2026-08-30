@@ -514,3 +514,18 @@ def test_decide_step_duplicate_of_existing_fact_skipped(monkeypatch) -> None:
 
     assert outcome == "success"
     assert client.created_steps == []  # 重复方向未创建
+
+
+def test_execute_rescue_streamed_facts_capped() -> None:
+    """审计17轮：超时抢救的流式天枢条数封顶——万行 stdout 只入图 MAX_STREAM_FACTS 条。"""
+    from astra.dispatcher.contracts import MAX_STREAM_FACTS
+
+    project = make_project()
+    client = FakeClient(project)
+    stdout = "\n".join(
+        '{"accepted":true,"data":{"description":"端口 80/%d 开放且版本指纹确认存在已知漏洞利用面"' % i + "}}"
+        for i in range(1000)
+    )
+    rescued = execute._rescue_streamed_facts(client, project, make_step(), stdout)
+    assert rescued == MAX_STREAM_FACTS
+    assert len(client.created_facts) == MAX_STREAM_FACTS

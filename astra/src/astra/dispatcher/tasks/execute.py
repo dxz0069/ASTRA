@@ -76,12 +76,16 @@ def _rescue_streamed_facts(client: ASTRAClient, project: ProjectDetail, step: St
 
     兼容两种行格式：bootstrap 形（{"fact":{"description":...}}）与 execute 形
     （{"description":...}）。抢救的行直接 create_fact 入图（步骤本体仍走原收束/回队路径）。
-    返回抢救条数。
+    返回抢救条数。条数封顶 MAX_STREAM_FACTS（审计17轮：万行倾倒防护）。
     """
     import json as _json
 
+    from astra.dispatcher.contracts import MAX_STREAM_FACTS
+
     rescued = 0
     for line in (stdout or "").splitlines():
+        if rescued >= MAX_STREAM_FACTS:
+            break
         line = line.strip()
         if not line.startswith("{"):
             continue

@@ -17,6 +17,9 @@ def parse_json_output(stdout: str) -> dict[str, Any]:
 # 单轮 decide 的图操作封顶（防幻觉/恶意输出倾倒；正常轮次远低于此）
 MAX_CLOSE_STEPS_PER_DECIDE = 20
 MAX_SUBGOALS_PER_DECIDE = 5
+# 流式天枢条数封顶（审计17轮）：bootstrap/超时抢救的 stdout 行解析——失控或恶意
+# worker 可倾倒万行 JSON，条数无界 = DB 膨胀 + worker 线程长阻塞；正常流式 3-10 条
+MAX_STREAM_FACTS = 64
 
 
 def _coerce_accepted(value: Any) -> bool | None:
@@ -228,7 +231,8 @@ def validate_bootstrap_stream(stdout: str) -> tuple[list[str], str | None]:
         except ValueError:
             continue
     if facts:
-        return facts, complete
+        # 审计17轮：条数封顶——失控/恶意 stdout 万行倾倒防护（正常流式 3-10 条）
+        return facts[:MAX_STREAM_FACTS], complete
 
     # 无增量行 → 整段兜底（旧单对象格式：可能带 markdown 围栏/前缀/跨行 pretty）
     try:
