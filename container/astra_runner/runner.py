@@ -1312,6 +1312,33 @@ def _sediment_fact_filter(descriptions: list[str]) -> list[str]:
     return [d for d in descriptions if not any(d.startswith(m) for m in _INJECTED_FACT_MARKERS)]
 
 
+def _auto_distill(progress_file: str | None) -> None:
+    """赛后自动蒸馏：三件套草稿（新条目/修正建议/技能骨架）自动产出，人工只审核不搬运。
+
+    ASTRA_AUTO_DISTILL=0 关闭（托管镜像默认关——knowledge 只读且无人取回草稿）；
+    输出目录：progress 同目录 review-drafts（跑分产物都在一处，便于取回）；
+    任何失败只记日志，绝不影响跑分退出码。
+    """
+    if os.environ.get("ASTRA_AUTO_DISTILL", "1") in ("0", "false", "no"):
+        return
+    try:
+        from astra.distill import auto_distill
+
+        out_root = Path(progress_file).parent / "review-drafts" if progress_file else None
+        out = auto_distill(
+            pending_file=KNOWLEDGE_APPEND_FILE,
+            dd_pending_file=DEADENDS_APPEND_FILE,
+            stats_file=MEMORY_STATS_FILE,
+            kb_file=KNOWLEDGE_FILE,
+            deadends_file=DEADENDS_FILE,
+            out_root=out_root,
+        )
+        if out is not None:
+            LOG.info("赛后自动蒸馏：三件套草稿已生成 → %s（人工审核后经 merge_knowledge 合并）", out)
+    except Exception as exc:  # noqa: BLE001 —— 蒸馏失败不影响跑分
+        LOG.warning("赛后自动蒸馏失败（不影响跑分结果）：%s", exc)
+
+
 def _append_knowledge_entry(result: ChallengeResult, fact_descriptions: list[str]) -> None:
     """V2-6：解出后自动沉淀思路到运行时知识库（progress 同目录，赛后人工合并回仓库文件）。
 
@@ -2124,6 +2151,7 @@ def main(argv: list[str] | None = None) -> int:
             "reasoning": usage["reasoningTokens"],
         }
     LOG.info(json.dumps(report, ensure_ascii=False, indent=2))
+    _auto_distill(args.progress_file)
     return 0
 
 
