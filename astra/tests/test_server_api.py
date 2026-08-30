@@ -350,6 +350,26 @@ def test_auth_token_protects_all_routes(client, monkeypatch) -> None:
     assert client.get("/projects/p000/export?format=yaml").status_code == 401
 
 
+def test_auth_rejects_before_body_read(client, monkeypatch) -> None:
+    """审计22轮：中间件顺序——auth 必须最外层。
+
+    旧序 body 限制在 auth 之前执行：未认证的超大请求也先被完整读入（≤2MB/次）
+    才吃 401，无凭证频率攻击白嫖内存/CPU。修复后未认证 oversized 直接 401。
+    """
+    import astra.server.app as app_module
+
+    monkeypatch.setattr(app_module, "_AUTH_TOKEN", "secret-token-123")
+    oversized = {"title": "x", "origin": "y", "goal": "z" * (3 * 1024 * 1024)}
+    # 无凭证 + 超限体 → 必须是 401（auth 先于 body 读取拒绝）
+    assert client.post("/projects", json=oversized).status_code == 401
+    # 正确凭证 + 超限体 → 413（body 限制对已认证请求照常生效）
+    headers = {"Authorization": "Bearer secret-token-123"}
+    assert client.post("/projects", json=oversized, headers=headers).status_code == 413
+    # 已认证 + 正常体 → 通
+    ok = {"title": "ok", "origin": "o", "goal": "g"}
+    assert client.post("/projects", json=ok, headers=headers).status_code == 201
+
+
 def test_client_sends_auth_header_when_env_set(monkeypatch) -> None:
     """dispatcher 客户端：ASTRA_AUTH_TOKEN 设置时自动带 Bearer（认证生效的前提）。"""
     from astra.dispatcher.protocol.client import ASTRAClient
