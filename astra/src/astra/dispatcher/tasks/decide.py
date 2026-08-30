@@ -16,6 +16,7 @@ from astra.dispatcher.protocol.client import ASTRAClient
 from astra.dispatcher.runtime.cancellation import TaskCancellation
 from astra.dispatcher.runtime.containers import ContainerManager
 from astra.dispatcher.runtime.heartbeat import HeartbeatLease
+from astra.dispatcher.tasks.challenge import gate_complete_claim
 from astra.dispatcher.tasks.common import (
     best_effort_release_decide,
     cancel_reason,
@@ -227,6 +228,34 @@ def run_decide_task(
             if lease.failure is not None:
                 LOG.warning(
                     "decide lease lost before complete, aborting write project=%s worker=%s status=%s",
+                    project.project.id,
+                    worker.name,
+                    lease.failure.status_code,
+                )
+                return "failed"
+            # 质询星探：complete 是关键结论，须经独立对抗审查方可入图。
+            # refute → 拒绝收束留痕（hint），搜索继续（拦提前收束，多旗题受益）；
+            # 任何质询故障 fail-open 放行——质询绝不卡死收束。
+            verdict, refute_reason = gate_complete_claim(
+                config,
+                client,
+                container_manager,
+                project,
+                export_yaml,
+                worker,
+                cancellation,
+                lease,
+                data,
+            )
+            if verdict == "refute":
+                record_failure_hint(
+                    client, project.project.id, "质询星探",
+                    f"complete 收束被驳：{refute_reason[:400]}——补齐验证后可再次提案收束",
+                )
+                return "success"
+            if lease.failure is not None:  # 质询耗时期间租约可能过期
+                LOG.warning(
+                    "decide lease lost during challenge, aborting write project=%s worker=%s status=%s",
                     project.project.id,
                     worker.name,
                     lease.failure.status_code,

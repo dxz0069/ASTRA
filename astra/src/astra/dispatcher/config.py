@@ -33,6 +33,7 @@ DEFAULT_PROMPT_REQUIRED_TOKENS: dict[str, tuple[str, ...]] = {
     "execute_conclude.md": ("{graph_yaml}", "{step_id}", "{step_description}"),
     "bootstrap.md": ("{origin}", "{goal}", "{hints}"),
     "bootstrap_conclude.md": ("{origin}", "{goal}", "{hints}"),
+    "challenge.md": ("{graph_yaml}", "{claim}", "{claim_context}"),
 }
 
 PROMPT_REQUIRED_TOKENS_BY_GROUP: dict[str, dict[str, tuple[str, ...]]] = {
@@ -42,6 +43,7 @@ PROMPT_REQUIRED_TOKENS_BY_GROUP: dict[str, dict[str, tuple[str, ...]]] = {
         "execute_conclude.md": ("{step_id}",),
         "bootstrap.md": ("{origin}", "{goal}", "{hints}"),
         "bootstrap_conclude.md": ("{origin}", "{goal}", "{hints}"),
+        "challenge.md": (),
     }
 }
 
@@ -52,6 +54,7 @@ MOCK_ALLOWED_OUTCOMES: dict[str, frozenset[str]] = {
     "execute_conclude": frozenset({"fact", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
     "bootstrap": frozenset({"complete", "fact", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
     "bootstrap_conclude": frozenset({"fact", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
+    "challenge": frozenset({"uphold", "refute", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
 }
 
 MOCK_DEFAULT_BEHAVIOR: dict[str, dict[str, Any]] = {
@@ -112,6 +115,17 @@ MOCK_DEFAULT_BEHAVIOR: dict[str, dict[str, Any]] = {
             "command_fail": "0.0",
         },
     },
+    "challenge": {
+        "delay": [0.05, 0.15],
+        "outcomes": {
+            "uphold": "1.0",
+            "refute": "0.0",
+            "rejected": "0.0",
+            "invalid_json": "0.0",
+            "invalid_payload": "0.0",
+            "command_fail": "0.0",
+        },
+    },
 }
 
 MOCK_ALLOWED_ENV_KEYS = frozenset(
@@ -134,10 +148,21 @@ class BootstrapTaskConfig(BaseModel):
     conclude_timeout: int = Field(gt=0)
 
 
+class ChallengeTaskConfig(BaseModel):
+    """质询星探（对抗审查）：complete 把关与关键事实审计共用此预算。
+
+    ASTRA_CHALLENGE_MODE=0 整体关闭（托管跑分默认关）。
+    """
+
+    timeout: int = Field(gt=0, default=120)
+    max_per_project: int = Field(gt=0, default=4)
+
+
 class TasksConfig(BaseModel):
     bootstrap: BootstrapTaskConfig
     decide: DecideTaskConfig
     execute: ExecuteTaskConfig
+    challenge: ChallengeTaskConfig = Field(default_factory=ChallengeTaskConfig)
 
 
 class ContainerConfig(BaseModel):

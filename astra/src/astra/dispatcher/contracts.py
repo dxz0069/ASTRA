@@ -284,3 +284,37 @@ def validate_execute_payload(payload: dict[str, Any]) -> tuple[str, dict[str, An
     elif isinstance(finding, str) and finding.strip():
         finding_description = finding.strip()
     return "fact", {"description": description.strip(), "finding": finding_description}
+
+
+# 质询理由封顶（防长篇倾倒；正常反驳一句话说清缺什么验证）
+MAX_CHALLENGE_REASON_CHARS = 2000
+
+
+def validate_challenge_payload(payload: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
+    """质询星探输出契约：对抗审查待审结论，输出 uphold/refute 判定。
+
+    返回 (kind, data)：
+    - ("rejected", None) —— 拒答（按 fail-open 处理）
+    - ("uphold", None) —— 结论经对抗审查站得住，维持原判
+    - ("refute", {"reason": "..."}) —— 反驳成立（结论不应收束/入图），reason 必填
+    """
+    accepted, data = _unwrap_wrapped_payload(payload)
+    if accepted is False:
+        return "rejected", None
+    if accepted is None:
+        if not isinstance(payload, dict) or "verdict" not in payload:
+            raise ValueError("accepted must be true or false")
+        data = payload
+    if not isinstance(data, dict):
+        raise ValueError("accepted must be true or false")
+    verdict = data.get("verdict")
+    if isinstance(verdict, str):
+        verdict = verdict.strip().lower()
+    if verdict in ("uphold", "upheld", "sustain", "confirmed"):
+        return "uphold", None
+    if verdict in ("refute", "refuted", "reject", "rebut"):
+        reason = data.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("reason is required when verdict is refute")
+        return "refute", {"reason": reason.strip()[:MAX_CHALLENGE_REASON_CHARS]}
+    raise ValueError("verdict must be uphold or refute")
