@@ -95,6 +95,14 @@ def _load_project_data(conn, project_id: str):
         ).fetchall()
         sources_by_step[s["id"]] = [r["fact_id"] for r in rows]
 
+    # 大图防护（审计18轮：从 YAML 分支下沉到加载层——timeline 分支此前无帽，
+    # 同一份全量数据照样组装巨型响应；两格式同护，加载后立即拒绝防序列化 OOM）
+    max_export_facts = int(os.environ.get("ASTRA_MAX_EXPORT_FACTS", "10000"))
+    if len(facts) > max_export_facts:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Project too large to export ({len(facts)} facts > {max_export_facts} limit)",
+        )
     return proj, facts, hints, steps, findings, subgoals, sources_by_step
 
 
@@ -189,13 +197,6 @@ def _export_yaml(conn, project_id: str) -> str:
             for sg in active_subgoals
         ]
 
-    # 大图防护——事实数超阈值时拒绝导出（防 yaml.dump 全量序列化 OOM）
-    max_export_facts = int(os.environ.get("ASTRA_MAX_EXPORT_FACTS", "10000"))
-    if len(facts) > max_export_facts:
-        raise HTTPException(
-            status_code=413,
-            detail=f"Project too large to export ({len(facts)} facts > {max_export_facts} limit)",
-        )
     return yaml.dump(data, allow_unicode=True, default_flow_style=False, sort_keys=False)
 
 
