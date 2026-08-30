@@ -101,6 +101,7 @@ try:
         challenge_code,
         collect_flags_from_facts,
         extract_flags,
+        strip_flag_like,
         translate_sdk_error,
     )
 except ImportError:  # pragma: no cover —— 包模式（测试/本地）
@@ -114,6 +115,7 @@ except ImportError:  # pragma: no cover —— 包模式（测试/本地）
         challenge_code,
         collect_flags_from_facts,
         extract_flags,
+        strip_flag_like,
         translate_sdk_error,
     )
 
@@ -885,7 +887,7 @@ def _run_single_challenge(
                             "所有步骤必须实测验证；行为与参考不符时立即放弃参考回到自主探索；"
                             "不得据此猜测/构造 flag 值。"
                             + _memory_reinforcement_text(code)
-                            + "历史攻击链：" + result.kb_entry_text,
+                            + "历史攻击链：" + strip_flag_like(result.kb_entry_text),
                         )
                         LOG.info("knowledge base entry injected code=%s", code)
                 except Exception as exc:  # noqa: BLE001
@@ -900,7 +902,7 @@ def _run_single_challenge(
                             "[同题型经验·举一反三] 以下为知识库中同题型（按实战战绩加权）历史打法，"
                             "仅作方向启发：当前题目与它们不同，禁止照搬步骤，"
                             "每一步仍须针对当前实例验证。"
-                            + "\n".join(result.kb_neighbor_texts),
+                            + "\n".join(strip_flag_like(t) for t in result.kb_neighbor_texts),
                         )
                         LOG.info("neighbor experience injected code=%s n=%s", code, len(result.kb_neighbor_texts))
                 except Exception as exc:  # noqa: BLE001
