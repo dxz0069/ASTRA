@@ -24,7 +24,11 @@ import tempfile as _tempfile
 
 ALERT_FILE = os.path.join(_tempfile.gettempdir(), "astra-model-alert.txt")
 CHECK_INTERVAL = 60
-FAIL_THRESHOLD = 3  # 连续失败次数（R5：端点抖动 2-5 分钟自愈，2 次误报）
+FAIL_THRESHOLD = 3  # 连续失败次数（探针+会话双通道命中时）
+# 审计25轮：纯探针失败（会话通道干净=业务正常）单独放宽到 5——R5 实测 zhipu
+# 端点抖动 2-5 分钟自愈、期间探针×2 即落盘告警属误报；配额真死时会话通道
+# 很快全是 403，仍走 3 次快路径，检出速度不受影响
+PROBE_ONLY_FAIL_THRESHOLD = 5
 
 _ERROR_MARK = re.compile(r"usage limit|permission_error|quota|403|insufficient", re.IGNORECASE)
 
@@ -97,21 +101,29 @@ def main() -> int:
     except OSError:
         pass
     fails = 0
+    probe_only_fails = 0
     last_alert = 0.0
     while True:
         ok, detail = probe_model()
         sess403 = scan_recent_sessions_403()
-        now = time.strftime("%H:%M:%S")
+        # 审计25轮：时间戳带日期——跨夜巡检时 HH:MM:SS 会误导（22:00 的告警
+        # 凌晨 01:00 查看成"一小时前"）
+        now = time.strftime("%m-%d %H:%M:%S")
         if ok and sess403 == 0:
             fails = 0
+            probe_only_fails = 0
         else:
             fails += 1
             # 探针超时单独记日志（端点抖动常见且短时自愈）；真实会话错误才立即升级
             if not ok and sess403 == 0:
-                print(f"[{now}] probe-only failure（端点抖动，观察中）", flush=True)
-            msg = f"[{now}] 模型异常 probe={'OK' if ok else 'FAIL ' + detail} 最近会话错误数={sess403} fails={fails}/{FAIL_THRESHOLD}"
+                probe_only_fails += 1
+                print(f"[{now}] probe-only failure（端点抖动，观察中 {probe_only_fails}/{PROBE_ONLY_FAIL_THRESHOLD}）", flush=True)
+            else:
+                probe_only_fails = 0
+            threshold = PROBE_ONLY_FAIL_THRESHOLD if sess403 == 0 else FAIL_THRESHOLD
+            msg = f"[{now}] 模型异常 probe={'OK' if ok else 'FAIL ' + detail} 最近会话错误数={sess403} fails={fails}/{threshold}"
             print(msg, flush=True)
-            if fails >= FAIL_THRESHOLD and time.monotonic() - last_alert > 300:
+            if fails >= threshold and time.monotonic() - last_alert > 300:
                 last_alert = time.monotonic()
                 alert = f"{now} 模型配额/健康异常！请立即检查：probe={detail} 会话错误={sess403}\n"
                 try:
