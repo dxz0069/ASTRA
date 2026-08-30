@@ -175,6 +175,56 @@ def test_load_deadends_merges_runtime_and_pick_filters_category(tmp_path, monkey
     assert R._pick_deadend_warnings(dd, "new-crypto", "rsa") == []  # 同类无死路不注入
 
 
+# ---------------- 审计13轮：赛中沉淀并发写 + 假旗过滤精度 ----------------
+
+def test_sediment_writers_concurrent_no_lost_update(tmp_path, monkeypatch):
+    """3-4 槽并发收尾：战绩/死路/知识沉淀读改写加锁后并行写不丢条目、不撕裂 JSON。"""
+    import threading
+
+    _isolate(tmp_path, monkeypatch)
+    results = [
+        _result(f"cc-{i:02d}", "并发题", flags_correct=1, elapsed_seconds=10.0)
+        for i in range(12)
+    ]
+    for res in results:
+        res.kb_approach_draft = f"打法 {res.unique_code}"
+        res.kb_entry_text = "参考思路"  # 使 _record_memory_stats 记账
+
+    def worker(res):
+        R._record_memory_stats(res)
+        R._append_deadend_entry(res)
+        R._append_knowledge_entry(res, ["天枢A", "天枢B"])
+
+    threads = [threading.Thread(target=worker, args=(r,)) for r in results]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    stats = json.loads((tmp_path / "stats.json").read_text(encoding="utf-8"))
+    deadends = json.loads((tmp_path / "astra-deadends-append.json").read_text(encoding="utf-8"))
+    knowledge = json.loads((tmp_path / "astra-knowledge-append.json").read_text(encoding="utf-8"))
+    assert set(stats) == {r.unique_code for r in results}, "战绩并发丢更新"
+    assert set(deadends) == {r.unique_code for r in results}, "死路并发丢更新"
+    assert set(knowledge) == {r.unique_code for r in results}, "知识并发丢更新"
+
+
+def test_junk_flag_filter_strict_mask_marker(tmp_path):
+    """掩码标记严格型：纯标记内容=假旗；真旗含标记子串不误杀（丢真旗代价=整题）。"""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "container" / "astra_runner"))
+    from tsecbench_adapter import extract_flags as ef
+
+    # 假旗：变异占位符（r7 实例）与纯标记形态全灭
+    assert ef("星记描述中必须包含完整 flag{...已脱敏...} 字符串") == []
+    assert ef("flag{redacted...}") == []
+    assert ef("flag{[masked]}") == []
+    assert ef("flag{***}") == []
+    # 真旗：内容含标记子串但有实质字符 → 必须提取
+    assert ef("输出 flag{redacted_a3f9c2}") == ["flag{redacted_a3f9c2}"]
+    assert ef("输出 flag{masked_key_9917}") == ["flag{masked_key_9917}"]
+
+
 def test_record_memory_stats_hit_and_miss(tmp_path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     hit = _result("old-web1", flags_correct=2, kb_entry_text="思路", elapsed_seconds=60.0)

@@ -1192,6 +1192,16 @@ def _run_single_challenge(
 KNOWLEDGE_APPEND_FILE = Path(tempfile.gettempdir()) / "astra-knowledge-append.json"
 DEADENDS_APPEND_FILE = Path(tempfile.gettempdir()) / "astra-deadends-append.json"
 _constellation_lock = threading.Lock()  # D4：read→modify→write 串行化（防并发覆盖丢数据）
+# 审计13轮：知识/战绩/死路三处赛中沉淀与 constellation 同型竞态（D4 只修了其一）——
+# 3-4 槽并发收尾时 read→modify→write 交错 = 丢更新 + write_text 撕裂 JSON（下轮加载
+# 静默归 {}，整轮沉淀蒸发）。统一加锁 + 临时文件原子替换（os.replace 同盘原子）。
+_sediment_lock = threading.Lock()
+
+
+def _write_json_atomic(path: Path, data: Any) -> None:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    os.replace(tmp, path)
 
 KNOWLEDGE_FILE = (
     Path(os.environ.get("ASTRA_KNOWLEDGE_FILE"))
@@ -1361,12 +1371,13 @@ def _append_knowledge_entry(result: ChallengeResult, fact_descriptions: list[str
             }
         }
         existing: dict = {}
-        try:
-            existing = json.loads(out.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            pass
-        existing.update(entry)
-        out.write_text(json.dumps(existing, ensure_ascii=False, indent=1), encoding="utf-8")
+        with _sediment_lock:
+            try:
+                existing = json.loads(out.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                pass
+            existing.update(entry)
+            _write_json_atomic(out, existing)
     except OSError:
         pass  # 沉淀失败不影响跑分
 
@@ -1396,18 +1407,17 @@ def _record_memory_stats(result: ChallengeResult) -> None:
     if not getattr(result, "kb_entry_text", None):
         return
     try:
-        stats = _load_memory_stats()
-        entry = stats.setdefault(
-            result.unique_code,
-            {"name": result.unique_code, "hits": 0, "misses": 0, "last_used": ""},
-        )
-        solved = result.flags_correct > 0
-        entry["hits" if solved else "misses"] += 1
-        entry["last_used"] = datetime.now().isoformat(timespec="seconds")
-        MEMORY_STATS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        MEMORY_STATS_FILE.write_text(
-            json.dumps(stats, ensure_ascii=False, indent=1), encoding="utf-8"
-        )
+        with _sediment_lock:
+            stats = _load_memory_stats()
+            entry = stats.setdefault(
+                result.unique_code.lower(),
+                {"name": result.unique_code, "hits": 0, "misses": 0, "last_used": ""},
+            )
+            solved = result.flags_correct > 0
+            entry["hits" if solved else "misses"] += 1
+            entry["last_used"] = datetime.now().isoformat(timespec="seconds")
+            MEMORY_STATS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            _write_json_atomic(MEMORY_STATS_FILE, stats)
     except (OSError, ValueError):
         pass  # 统计失败不影响跑分
 
@@ -1581,7 +1591,7 @@ def _record_constellation(origin: str, recon_facts: list[str]) -> None:
             card["facts"] = card["facts"][-12:]  # 每网段最多 12 条，滚动窗口
             card["updated"] = datetime.now().isoformat(timespec="seconds")
             _constellation_path().parent.mkdir(parents=True, exist_ok=True)
-            _constellation_path().write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+            _write_json_atomic(_constellation_path(), data)
         except (OSError, ValueError):
             pass
 
@@ -1619,8 +1629,9 @@ def _attach_knowledge(queue: Any, knowledge: dict) -> int:
         if entry:
             res.kb_seconds = entry["seconds"]
             # 战绩淘汰：0 命中且 ≥6 未命中（多轮整跑零产出）的精确条目不再注入——
-            # 纯上下文噪音（f1-04 实例：0/24 还在注入全量攻击链）
-            st = stats.get(res.unique_code, {})
+            # 纯上下文噪音（f1-04 实例：0/24 还在注入全量攻击链）。键统一小写
+            # （_record_memory_stats 落键即小写，防平台码大写形态查空失守）
+            st = stats.get(code, {})
             proven_dead = int(st.get("hits", 0)) == 0 and int(st.get("misses", 0)) >= 6
             if entry["approach"] and not res.kb_entry_text and not proven_dead:
                 res.kb_entry_text = entry["approach"]
@@ -1663,12 +1674,13 @@ def _append_deadend_entry(result: ChallengeResult) -> None:
             }
         }
         existing: dict = {}
-        try:
-            existing = json.loads(out.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            pass
-        existing.update(entry)
-        out.write_text(json.dumps(existing, ensure_ascii=False, indent=1), encoding="utf-8")
+        with _sediment_lock:
+            try:
+                existing = json.loads(out.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                pass
+            existing.update(entry)
+            _write_json_atomic(out, existing)
     except OSError:
         pass  # 沉淀失败不影响跑分
 

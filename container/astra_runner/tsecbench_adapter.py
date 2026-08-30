@@ -105,13 +105,20 @@ FLAG_RE = re.compile(r"flag\{[^}\s]{3,}\}", re.IGNORECASE)
 # 排除字面占位符 flag{...}（模型示例诱导）；真实 flag 内容至少 3 字符
 PLACEHOLDER_FLAG_RE = re.compile(r"^flag\{\s*\.{3}\s*\}$", re.IGNORECASE)
 # 掩码/占位内容标记：日志脱敏词等曾借知识库回流成"变异占位符"（flag{...已脱敏...}
-# 实例：PLACEHOLDER 正则漏网 → t=0 错交）。含脱敏标记或无任何字母数字的内容必为假旗。
-MASK_MARKER_RE = re.compile(r"脱敏|打码|redacted|masked", re.IGNORECASE)
+# 实例：PLACEHOLDER 正则漏网 → t=0 错交）。严格型判定——内容**仅为**标记词加省略/
+# 引导符号才算假旗；真旗内容含 "redacted" 等子串（如 flag{redacted_a3f9}）不误杀
+# （丢真旗代价=整题，错交一次代价≈0，不对称下宁可放过）。
+_MASK_JUNK_INNER_RE = re.compile(
+    r"^[\s.*·•…\-—#?？,，{}【】\[\]()（）]*"
+    r"(?:已?脱敏|已?打码|redacted|masked|placeholder)"
+    r"[\s.*·•…\-—#?？,，{}【】\[\]()（）]*$",
+    re.IGNORECASE,
+)
 
 
 def _is_junk_flag(flag: str) -> bool:
     inner = flag[flag.index("{") + 1 : flag.rindex("}")]
-    if MASK_MARKER_RE.search(inner):
+    if _MASK_JUNK_INNER_RE.match(inner):
         return True
     return not re.search(r"[A-Za-z0-9]", inner)
 
