@@ -35,6 +35,10 @@ kill_engine(){
   powershell -Command "Get-CimInstance Win32_Process | Where-Object { \$_.CommandLine -match 'astra serve --port $SERVER_PORT' -or \$_.CommandLine -match 'astra dispatch --config' } | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force -ErrorAction SilentlyContinue }" 2>/dev/null
 }
 
+# 审计25轮：INT/TERM 陷阱——监督器被停时同步收割引擎子进程，防 serve/dispatch
+# 成孤儿占端口（R6 双 serve 事故的手工清场根因之一）
+trap 'log "supervisor stopping, killing engine"; kill_engine; exit 0' INT TERM
+
 start_server(){
   local ts; ts=$(date +%Y%m%d-%H%M%S)
   cleanup_logs "$LOG_DIR"
