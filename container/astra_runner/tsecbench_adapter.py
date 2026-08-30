@@ -118,6 +118,10 @@ _MASK_JUNK_INNER_RE = re.compile(
 
 def _is_junk_flag(flag: str) -> bool:
     inner = flag[flag.index("{") + 1 : flag.rindex("}")]
+    # 审计（r8 c-06 实例）：内容以省略号结尾 = 模型把旗省略截断写进天枢
+    # （"flag{bbfa15fa-..."），真旗内容不会以点串收尾
+    if re.search(r"(?:\.{2,}|…)\s*$", inner):
+        return True
     if _MASK_JUNK_INNER_RE.match(inner):
         return True
     return not re.search(r"[A-Za-z0-9]", inner)
