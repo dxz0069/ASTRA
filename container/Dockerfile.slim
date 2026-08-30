@@ -126,6 +126,11 @@ RUN printf '%s\n' 'PS1="${PS1%\\n*} \[\033[0;36m\]\D{%y-%m-%d} - \t\[\033[;32m\]
 ENV PATH="/home/kali/.local/bin:${PATH}"
 ENV TZ=Asia/Shanghai
 ENV PYTHONUNBUFFERED=1
+# 0.3.0 星尘记忆新机制：本地默认开、托管默认关（跑分吞吐优先，机制经本地轮实测后再开）
+# ASTRA_CHALLENGE_MODE=0 质询星探；ASTRA_EPITOME=0 图导出压缩；ASTRA_AUTO_DISTILL=0 赛后自动蒸馏
+ENV ASTRA_CHALLENGE_MODE=0 \
+    ASTRA_EPITOME=0 \
+    ASTRA_AUTO_DISTILL=0
 
 COPY ./container/.agents /home/kali/workspace/.agents
 COPY ./container/AGENTS.md /home/kali/workspace/AGENTS.md
