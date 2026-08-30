@@ -110,3 +110,19 @@ flash 是大家共同选的**模型**；驱动层主流是 Claude Code（走 Dee
 - 技能库已对齐：`container/.agents → /home/kali/workspace/.claude`（CC skills 格式，虫洞同款用法）。
 - 路线：①本轮立即用回滚 env（dsh 去 pro）重启保底；②下一槽位重建 v7 镜像恢复 claude CLI，
   本地先全链路验证 claudecode worker，再上平台 A/B。
+
+---
+
+## Cairn_Y 最新跑分深度拆解（run 12662，2026-08-31 分析，数据 dist/rivals/cairn_y_12662/）
+
+**总量**：1236 会话 / 15973 调用 / 5.96h 窗口 / 纯 deepseek-v4-flash-202605（openai_chat 自研薄循环）。
+**用量**：input 18.9M + cache_read 450.2M（96% 命中）+ output 14.3M。
+**节奏**：62% 会话 ≤2min（中位 68s）；每会话中位 8 调用；每分钟并发活跃会话中位 13 / 峰值 28。
+**系列投入**：b 系 294 会话/160M tokens 居首（b-02 单题 200 会话/3 波回访/290min）；a 系 370 会话/134M；f2 146/50M。
+**会话结局**：timeout 719 / compacted 517（无 completed 类）——会话级时间帽 + 持续压缩。
+**b-02 图增长**（写时治理效果）：开局 1 fact/1657 字符 → 中段 6 facts/10.6K → 末段 19 facts/36.6K（36K 字符装下 19 事实+25 步骤——我们同规模图 inline 要大一个量级）。
+
+**提示词全文要点（实证）**：
+- decide（944 字符）："在 Fact-Goal-Step 图上做面向目标的判断，不做任何执行"+整图 YAML 内联；判断两件事：事实是否满足目标（satisfy_goal 引用事实 id）/未满足则定下一步。
+- execute（~800 字符）："完成交给你的一个 step，并以恰好一条事实收束"；**submit_fact 草稿（可覆盖）→核对→ commit_step 定稿即结束**；content 只写增量不复述图内已有；**大段数据写文件、content 引用文件名**；共享 cwd 多 agent 并行（新建文件带主题名/改他人文件先读/不动无关内容）；无结果也必须收束（照实记试了什么看到什么）；**禁止"此路不通/已穷尽/勿再试"类绝对否定结论**（防 decide 过度剪枝）。
+- 执行器工具面极简：bash(54)/write(2)/ls(1)——比我们少 read/edit/grep/find。
