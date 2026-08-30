@@ -150,8 +150,18 @@ function astraApp(){
     burstFluid(){ if(window.ASTRA_FLUID) window.ASTRA_FLUID.splat(6); },
 
     api(method, path, body){
-      return fetch(path, {method, headers:{'Content-Type':'application/json'},
+      /* 审计27轮：生产模式（服务端启用 ASTRA_AUTH_TOKEN）下中间件保护全路径——
+         前端不带认证头则所有请求静默 401（界面齐全但全不可用）。令牌存
+         localStorage，首次 401 提示输入一次并重试；已带令牌仍 401 直接抛错防死循环 */
+      const headers={'Content-Type':'application/json'};
+      const tok=localStorage.getItem('astra-auth');
+      if(tok) headers['Authorization']='Bearer '+tok;
+      return fetch(path, {method, headers,
         body: body!==undefined ? JSON.stringify(body) : undefined}).then(async r=>{
+        if(r.status===401 && !localStorage.getItem('astra-auth')){
+          const t=prompt('服务端已启用认证（ASTRA_AUTH_TOKEN），请输入访问令牌：');
+          if(t && t.trim()){ localStorage.setItem('astra-auth', t.trim()); return this.api(method, path, body); }
+        }
         if(!r.ok){ let m='HTTP '+r.status; try{ m=(await r.json()).detail||m }catch(e){} throw new Error(m); }
         return r.status===204 ? null : r.json();
       });
