@@ -104,6 +104,16 @@ def call_with_retry(fn, name: str, *, retries: int = 3, base_delay: float = 5.0)
 FLAG_RE = re.compile(r"flag\{[^}\s]{3,}\}", re.IGNORECASE)
 # 排除字面占位符 flag{...}（模型示例诱导）；真实 flag 内容至少 3 字符
 PLACEHOLDER_FLAG_RE = re.compile(r"^flag\{\s*\.{3}\s*\}$", re.IGNORECASE)
+# 掩码/占位内容标记：日志脱敏词等曾借知识库回流成"变异占位符"（flag{...已脱敏...}
+# 实例：PLACEHOLDER 正则漏网 → t=0 错交）。含脱敏标记或无任何字母数字的内容必为假旗。
+MASK_MARKER_RE = re.compile(r"脱敏|打码|redacted|masked", re.IGNORECASE)
+
+
+def _is_junk_flag(flag: str) -> bool:
+    inner = flag[flag.index("{") + 1 : flag.rindex("}")]
+    if MASK_MARKER_RE.search(inner):
+        return True
+    return not re.search(r"[A-Za-z0-9]", inner)
 
 
 def extract_flags(text: str) -> list[str]:
@@ -112,12 +122,17 @@ def extract_flags(text: str) -> list[str]:
     flags: list[str] = []
     for match in FLAG_RE.findall(text):
         flag = match.strip()
-        if PLACEHOLDER_FLAG_RE.match(flag):
+        if PLACEHOLDER_FLAG_RE.match(flag) or _is_junk_flag(flag):
             continue
         if flag not in seen:
             seen.add(flag)
             flags.append(flag)
     return flags
+
+
+def strip_flag_like(text: str) -> str:
+    """剥离文本中的 flag{...} 串（知识库/邻居注入用——思路参考不该携带任何旗格式串）。"""
+    return FLAG_RE.sub("flag{...}", text)
 
 
 def collect_flags_from_facts(descriptions: list[str], exclude_texts: list[str] | None = None) -> list[str]:
