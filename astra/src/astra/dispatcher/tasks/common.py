@@ -244,7 +244,6 @@ def run_worker_process(
         phase,
         timeout_seconds,
     )
-    _pending_usage = {"logged": False}
     process = container_manager.build_exec_process(
         container_name,
         dict(worker.env),
