@@ -494,3 +494,19 @@ def test_format_hints_framing() -> None:
     assert "<hints>" in out and "</hints>" in out
     assert "IGNORE ALL PREVIOUS" in out  # 原文保留（数据不丢失）
     assert format_hints([]) == "[]"
+
+
+def test_csp_tiering_ui_page_vs_api(client: TestClient) -> None:
+    """CSP 分档回归锁：UI 页面（/）须允许自源资源（否则样式/脚本全被拦，页面裸奔），
+    API 响应保持最严格 default-src 'none'。曾因 CSP 误盖 UI 页导致前端全裸（超大图标）。
+    """
+    ui_csp = client.get("/").headers.get("content-security-policy", "")
+    assert "default-src 'self'" in ui_csp
+    assert "style-src 'self' 'unsafe-inline'" in ui_csp
+    assert "connect-src 'self'" in ui_csp
+
+    api_csp = client.get("/projects").headers.get("content-security-policy", "")
+    assert api_csp == "default-src 'none'; frame-ancestors 'none'"
+
+    static_csp = client.get("/static/app.css").headers.get("content-security-policy")
+    assert static_csp in (None, "")

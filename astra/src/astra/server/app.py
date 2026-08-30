@@ -88,14 +88,23 @@ async def security_headers_middleware(request: Request, call_next):
     """审计修复（CWE-693）：补关键安全响应头。
 
     X-Frame-Options/X-Content-Type-Options/Referrer-Policy 全量附加；
-    CSP 只对 /static 之外附加（静态 UI 需要 inline script/样式，API 响应用最严格的
-    default-src 'none'）。HSTS 仅在 TLS 下有意义，本地 http 部署不加。
+    CSP 分三档：UI 页面（/）用允许自源资源的最小集（样式需 unsafe-inline——
+    图标 sprite 的隐藏 style 属性在标记内）；/static 资源不加 CSP；
+    其余 API 响应用最严格的 default-src 'none'。
+    HSTS 仅在 TLS 下有意义，本地 http 部署不加。
     """
     response = await call_next(request)
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Referrer-Policy", "no-referrer")
-    if not request.url.path.startswith("/static"):
+    if request.url.path == "/":
+        response.headers.setdefault(
+            "Content-Security-Policy",
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data:; font-src 'self'; connect-src 'self'; "
+            "frame-ancestors 'none'",
+        )
+    elif not request.url.path.startswith("/static"):
         response.headers.setdefault(
             "Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'"
         )
