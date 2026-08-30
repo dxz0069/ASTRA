@@ -4,10 +4,51 @@ from fastapi.responses import Response
 from datetime import datetime
 import yaml
 
+from astra.dispatcher.context import _CRITICAL_RE
 from astra.server.db import get_conn
 from astra.server.services import expire_decide_leases, expire_workers, get_project_or_404
 
 router = APIRouter(tags=["export"])
+
+
+# ---------------- Epitome：图导出层的自动摘要压缩 ----------------
+
+def _epitome_enabled() -> bool:
+    return os.environ.get("ASTRA_EPITOME", "1") not in ("0", "false", "no")
+
+
+def _epitome_threshold() -> int:
+    try:
+        return max(10, int(os.environ.get("ASTRA_EPITOME_THRESHOLD", "120")))
+    except ValueError:
+        return 120
+
+
+def _fold_fact_description(description: str, limit: int = 80) -> str:
+    """折叠为单行索引：首行截断。原文本仍在数据库——导出视图压缩，零审计损失。"""
+    text = (description or "").strip()
+    if not text:
+        return text
+    first = text.splitlines()[0].strip()
+    if len(first) > limit:
+        first = first[:limit].rstrip() + "…"
+    return first
+
+
+def _epitome_keep_full_ids(facts, steps, sources_by_step, recent_keep: int = 30) -> set[str]:
+    """不折叠集合：origin/goal、负结果、凭据/flag 级关键事实、因果骨架上的一切
+    事实（任一步骤的来源或落点）、以及最近写入的事实。折叠的只有"老旧且脱离
+    因果链"的浅层侦察记录。"""
+    keep = {"origin", "goal"}
+    for f in facts:
+        if f["kind"] == "negative" or _CRITICAL_RE.search(f["description"] or ""):
+            keep.add(f["id"])
+    for s in steps:
+        keep.update(sources_by_step.get(s["id"], []))
+        if s["to_fact_id"]:
+            keep.add(s["to_fact_id"])
+    keep.update(f["id"] for f in facts[-recent_keep:])
+    return keep
 
 
 def format_export_timestamp(value: str | None) -> str | None:
@@ -87,14 +128,27 @@ def _export_yaml(conn, project_id: str) -> str:
             for h in hints
         ]
 
-    data["facts"] = [
-        {
-            "id": f["id"],
-            "description": f["description"],
-            "kind": f["kind"],
+    # Epitome 自动摘要压缩：事实数超阈值才启用；只折叠"老旧且脱离因果链"的
+    # 浅层事实（保留集见 _epitome_keep_full_ids），折叠为单行索引 + [Epitome] 标记。
+    folded_count = 0
+    keep_full: set[str] | None = None
+    if _epitome_enabled() and len(facts) > _epitome_threshold():
+        keep_full = _epitome_keep_full_ids(facts, steps, sources_by_step)
+    fact_rows = []
+    for f in facts:
+        description = f["description"]
+        if keep_full is not None and f["id"] not in keep_full:
+            folded = _fold_fact_description(description)
+            if folded != description:
+                description = folded + " [Epitome]"
+                folded_count += 1
+        fact_rows.append({"id": f["id"], "description": description, "kind": f["kind"]})
+    data["facts"] = fact_rows
+    if folded_count:
+        data["epitome"] = {
+            "folded_facts": folded_count,
+            "note": "stale unreferenced facts folded to one-line index (full text kept in DB)",
         }
-        for f in facts
-    ]
 
     step_list = []
     for s in steps:
