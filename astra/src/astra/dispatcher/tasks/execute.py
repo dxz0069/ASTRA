@@ -10,10 +10,12 @@ from astra.dispatcher.contracts import (
     validate_execute_payload,
 )
 from astra.dispatcher.prompting import load_prompt, render_prompt
+from astra.dispatcher.context import _CRITICAL_RE
 from astra.dispatcher.protocol.client import ASTRAClient
 from astra.dispatcher.runtime.cancellation import TaskCancellation
 from astra.dispatcher.runtime.containers import ContainerManager
 from astra.dispatcher.runtime.heartbeat import HeartbeatLease
+from astra.dispatcher.tasks.challenge import submit_critical_fact_audit
 from astra.dispatcher.tasks.common import (
     best_effort_release,
     cancel_reason,
@@ -276,7 +278,7 @@ def run_execute_task(
             if not _should_write_fact(client, client.get_project(project.project.id), description):
                 best_effort_release(client, project.project.id, step.id, worker.name)
                 return "success"
-            return write_conclude_result(
+            conclude_status = write_conclude_result(
                 client,
                 project.project.id,
                 step.id,
@@ -288,6 +290,19 @@ def run_execute_task(
                 kind=_infer_fact_kind(description),
                 finding=finding,
             )
+            # 质询星探·关键事实审计：凭据/flag 级发现入图后异步对抗审查
+            # （不阻塞旗提交；质疑成立写 hint 留痕，决策链可回放）
+            if conclude_status == "success" and _CRITICAL_RE.search(description or ""):
+                submit_critical_fact_audit(
+                    config,
+                    client,
+                    container_manager,
+                    project.project.id,
+                    export_yaml,
+                    worker,
+                    description,
+                )
+            return conclude_status
         if did_timeout(first):
             LOG.warning(
                 "execute timed out project=%s step=%s worker=%s execute_ms=%s total_ms=%s stdout_preview=%s stderr_preview=%s",
@@ -488,7 +503,7 @@ def _try_conclude_fallback(
     if not _should_write_fact(client, client.get_project(project_id), description):
         best_effort_release(client, project_id, step.id, worker.name)
         return "success"
-    return write_conclude_result(
+    conclude_status = write_conclude_result(
         client,
         project_id,
         step.id,
@@ -498,6 +513,18 @@ def _try_conclude_fallback(
         phase_ms=conclude_ms,
         finding=finding,
     )
+    # 质询星探·关键事实审计（conclude 兜底路径同样把关）
+    if conclude_status == "success" and _CRITICAL_RE.search(description or ""):
+        submit_critical_fact_audit(
+            config,
+            client,
+            container_manager,
+            project_id,
+            export_yaml,
+            worker,
+            description,
+        )
+    return conclude_status
 
 
 def _run_process(

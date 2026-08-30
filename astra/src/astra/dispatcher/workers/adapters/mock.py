@@ -114,6 +114,17 @@ if phase=="bootstrap_conclude":
         print(json.dumps({"accepted":True,"data":{"complete":{"description":"mock invalid payload"}}}, ensure_ascii=False))
     raise SystemExit(0)
 
+if phase=="challenge":
+    if outcome=="refute":
+        print(json.dumps({"accepted":True,"data":{"verdict":"refute","reason":"mock refutation: claim lacks verification"}}, ensure_ascii=False))
+    elif outcome=="rejected":
+        print(json.dumps({"accepted":False,"reason":"mock_rejected"}, ensure_ascii=False))
+    elif outcome=="uphold":
+        print(json.dumps({"accepted":True,"data":{"verdict":"uphold"}}, ensure_ascii=False))
+    else:
+        print(json.dumps({"accepted":True,"data":{"verdict":"maybe"}}, ensure_ascii=False))
+    raise SystemExit(0)
+
 if outcome=="fact":
     label = prompt.get("step_id") or phase
     print(json.dumps({"accepted":True,"data":{"description":f"mock fact for {label}"}} , ensure_ascii=False))
