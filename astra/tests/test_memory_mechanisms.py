@@ -210,3 +210,36 @@ def test_neighbor_picking_prefers_recent_over_stale_same_record(tmp_path, monkey
     assert len(nb) == 2
     assert "老注入题" in nb[0]  # 近期验证（1 天前）满权重在前
     assert "宽字节" in nb[1]  # 久未使用（120 天前）衰减沉底
+
+
+# ---------------- 沉淀卫生：注入记忆不进知识库 ----------------
+
+def test_sediment_filter_strips_injected_memory_lines():
+    """开局注入的记忆 fact（参考文本）不得混入沉淀——防知识库复读自己的注入。"""
+    descs = [
+        "目标：拿下 web 服务 flag",
+        "[历史思路参考·知识库]（该思路历史战绩：3 次命中/0 次未命中）登录页 sql 注入",
+        "[同题型经验·举一反三][Web安全·老题] 宽字节注入",
+        "[同题型避坑提示·失败经验库][前车之鉴] sqlmap 直跑被 WAF 全拦",
+        "[同网段侦察共享·Constellation] 10.0.0.0/24 开放 80/22",
+        "实测：union 注入拿回 admin 密码哈希",
+    ]
+    kept = R._sediment_fact_filter(descs)
+    assert kept == ["目标：拿下 web 服务 flag", "实测：union 注入拿回 admin 密码哈希"]
+
+
+def test_append_knowledge_entry_excludes_injected_facts(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    res = _result("solved-01", flags_correct=1, elapsed_seconds=300.0)
+    R._append_knowledge_entry(
+        res,
+        [
+            "[历史思路参考·知识库] 登录页 sql 注入打法",
+            "实测 union 注入拿回数据",
+            "flag 提交成功",
+        ],
+    )
+    data = json.loads((tmp_path / "astra-knowledge-append.json").read_text(encoding="utf-8"))
+    approach = data["solved-01"]["approach"]
+    assert "历史思路参考" not in approach
+    assert "union 注入" in approach and "flag 提交成功" in approach

@@ -484,7 +484,7 @@ def run_benchmark(
                         try:
                             list_fn = getattr(engine_factory(), "list_fact_descriptions", None)
                             if callable(list_fn):
-                                _dd = list_fn(result.project_id)
+                                _dd = _sediment_fact_filter(list_fn(result.project_id))
                                 if _dd:
                                     result.kb_approach_draft = "；".join(_dd[-3:])[:800]
                         except Exception:  # noqa: BLE001
@@ -1035,8 +1035,8 @@ def _run_single_challenge(
                             for flag in [f for f in last_flags if f not in result.flags_found]:
                                 _submit_flag_safely(client, code, flag, result, started_at, engine=engine)
                             if last_descs:
-                                # V2-6：删项目前留末段星记（解出后沉淀知识库）
-                                result.kb_approach_draft = "；".join(last_descs[-3:])[:800]
+                                # V2-6：删项目前留末段星记（解出后沉淀知识库）；注入记忆剔除
+                                result.kb_approach_draft = "；".join(_sediment_fact_filter(last_descs)[-3:])[:800]
                                 # V7 Constellation：网络级侦察结论跨项目共享
                                 try:
                                     _record_constellation(origin, _extract_recon_facts(last_descs))
@@ -1149,7 +1149,7 @@ def _run_single_challenge(
         # V2-6：末段星记浓缩（项目仍在时兜底采集；完成路径删项目前已采）
         if project_id and not result.kb_approach_draft and not project_gone:
             try:
-                _descs = engine.list_fact_descriptions(project_id)
+                _descs = _sediment_fact_filter(engine.list_fact_descriptions(project_id))
                 if _descs:
                     result.kb_approach_draft = "；".join(_descs[-3:])[:800]
                     try:
@@ -1296,6 +1296,22 @@ def _parse_order_codes(cli_value: str | None, env_value: str | None) -> list[str
     return [c for c in (x.strip() for x in raw.split(",")) if c]
 
 
+# 沉淀卫生：开局注入的记忆 fact 以这些标记开头——它们是"给 agent 的参考"而非
+# "agent 打出来的发现"，混入沉淀会让知识库复读自己的注入文本（V8 轮 dead-ends
+# 已见此类污染）。所有沉淀采集点统一过滤。
+_INJECTED_FACT_MARKERS: tuple[str, ...] = (
+    "[历史思路参考",
+    "[同题型经验",
+    "[同题型避坑提示",
+    "[同网段侦察共享",
+    "[质询星探",
+)
+
+
+def _sediment_fact_filter(descriptions: list[str]) -> list[str]:
+    return [d for d in descriptions if not any(d.startswith(m) for m in _INJECTED_FACT_MARKERS)]
+
+
 def _append_knowledge_entry(result: ChallengeResult, fact_descriptions: list[str]) -> None:
     """V2-6：解出后自动沉淀思路到运行时知识库（progress 同目录，赛后人工合并回仓库文件）。
 
@@ -1312,7 +1328,7 @@ def _append_knowledge_entry(result: ChallengeResult, fact_descriptions: list[str
                 "first_flag_seconds": result.first_flag_seconds,
                 "elapsed_seconds": round(result.elapsed_seconds),
                 "awarded": result.awarded,
-                "approach": _sanitize_kb_text("；".join(fact_descriptions[-3:]))[:800],
+                "approach": _sanitize_kb_text("；".join(_sediment_fact_filter(fact_descriptions)[-3:]))[:800],
             }
         }
         existing: dict = {}
