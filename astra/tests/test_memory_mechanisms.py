@@ -336,3 +336,24 @@ def test_pending_new_flags_dedupes_case_variants() -> None:
     found = ["flag{abc123}"]
     pending = _pending_new_flags(["flag{abc123}", "FLAG{abc123}", "flag{xyz789}"], found)
     assert pending == ["flag{xyz789}"]  # 精确重复与大小写变体都跳过，新旗保留
+
+
+def test_pending_new_flags_intra_batch_case_dedup() -> None:
+    """r8 c-06 实例：同一批内 flag{/FLAG{ 双形态只交一次（历史折叠盖不住同批）。"""
+    from astra_runner.runner import _pending_new_flags
+
+    batch = ["flag{abc123}", "FLAG{ABC123}", "flag{real456}"]
+    assert _pending_new_flags(batch, []) == ["flag{abc123}", "flag{real456}"]
+
+
+def test_junk_flag_rejects_ellipsis_truncated() -> None:
+    """r8 c-06 实例：模型省略号截断的旗（flag{bbfa15fa-...}）不得当真旗。"""
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "container" / "astra_runner"))
+    from tsecbench_adapter import extract_flags as ef
+
+    assert ef("模型写道 flag{bbfa15fa-... 随后截断") == [] or ef("flag{bbfa15fa-...}") == []
+    assert ef("截断形态 flag{bbfa15fa-...} 与 FLAG{BBFA15FA-...} 双双拒收") == []
+    # 真旗不受影响（内容含点但非结尾点串）
+    assert ef("实测 flag{a.b.c-99}") == ["flag{a.b.c-99}"]

@@ -794,14 +794,23 @@ def run_benchmark(
 
 
 def _pending_new_flags(flags: list[str], flags_found: list[str]) -> list[str]:
-    """待提交旗过滤：精确去重 + 大小写形态去重。
+    """待提交旗过滤：精确去重 + 大小写形态去重（历史与批内双重）。
 
     r7 实测（b-02）：同一 flag 的 flag{x}/FLAG{x} 双形态从天枢各提取一次、
     各错交一次——平台旗大小写敏感，已交形态的大小写变体几乎必是同一（错）旗，
-    白烧错交预算；这里按小写折叠一并跳过。
+    白烧错交预算；这里按小写折叠一并跳过。r8 实测（c-06）：同批双形态绕过
+    历史折叠（提交前 flags_found 未含彼此），补批内折叠去重。
     """
     seen_folded = {f.lower() for f in flags_found}
-    return [f for f in flags if f not in flags_found and f.lower() not in seen_folded]
+    out: list[str] = []
+    batch_folded: set[str] = set()
+    for f in flags:
+        folded = f.lower()
+        if f in flags_found or folded in seen_folded or folded in batch_folded:
+            continue
+        batch_folded.add(folded)
+        out.append(f)
+    return out
 
 
 def _run_single_challenge(
