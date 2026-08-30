@@ -685,6 +685,8 @@ def test_render_dispatch_config_dual_channel_fleet(monkeypatch, tmp_path) -> Non
     monkeypatch.setenv("PI_API_KEY", "sk-ds-test")
     monkeypatch.setenv("ZHIPU_API_KEY", "zk-glm-test")
     monkeypatch.setenv("ASTRA_PI_HOME", str(tmp_path / "pi-home"))
+    monkeypatch.setenv("ASTRA_EXECUTE_REPLICAS", "2")
+    monkeypatch.setenv("ASTRA_DECIDE_TIMEOUT", "900")
 
     path = AstraDaemon()._render_dispatch_config()
     config = DispatchConfig.load(path)

@@ -286,7 +286,7 @@ workers:
         )
         execute_maxrun = max(
             1,
-            int(os.environ.get("ASTRA_EXECUTE_MAXRUN") or os.environ.get("ASTRA_EXPLORE_MAXRUN", "5")),
+            int(os.environ.get("ASTRA_EXECUTE_MAXRUN") or os.environ.get("ASTRA_EXPLORE_MAXRUN", "3")),
         )
         fleet: list[str] = []
         for i in range(execute_replicas):
