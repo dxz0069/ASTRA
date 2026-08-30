@@ -793,6 +793,17 @@ def run_benchmark(
     return ordered
 
 
+def _pending_new_flags(flags: list[str], flags_found: list[str]) -> list[str]:
+    """待提交旗过滤：精确去重 + 大小写形态去重。
+
+    r7 实测（b-02）：同一 flag 的 flag{x}/FLAG{x} 双形态从天枢各提取一次、
+    各错交一次——平台旗大小写敏感，已交形态的大小写变体几乎必是同一（错）旗，
+    白烧错交预算；这里按小写折叠一并跳过。
+    """
+    seen_folded = {f.lower() for f in flags_found}
+    return [f for f in flags if f not in flags_found and f.lower() not in seen_folded]
+
+
 def _run_single_challenge(
     client: BenchmarkClient,
     engine_factory,
@@ -983,7 +994,7 @@ def _run_single_challenge(
                 fact_descs = engine.list_fact_descriptions(project_id)
                 fact_count = len(fact_descs)
                 flags = collect_flags_from_facts(fact_descs, [result.description])
-                pending = [flag for flag in flags if flag not in result.flags_found]
+                pending = _pending_new_flags(flags, result.flags_found)
                 for flag in pending:
                     _submit_flag_safely(client, code, flag, result, started_at, engine=engine)
             except Exception:  # noqa: BLE001 —— 引擎 API 偶发失败不中断等待
@@ -1034,7 +1045,7 @@ def _run_single_challenge(
                         try:
                             last_descs = engine.list_fact_descriptions(project_id)
                             last_flags = collect_flags_from_facts(last_descs, [result.description])
-                            for flag in [f for f in last_flags if f not in result.flags_found]:
+                            for flag in _pending_new_flags(last_flags, result.flags_found):
                                 _submit_flag_safely(client, code, flag, result, started_at, engine=engine)
                             if last_descs:
                                 # V2-6：删项目前留末段天枢（解出后沉淀知识库）；注入记忆剔除
@@ -1073,7 +1084,7 @@ def _run_single_challenge(
         if not done:
             # 引擎未完成：最后收一次 flag
             flags = collect_flags_from_facts(engine.list_fact_descriptions(project_id), [goal])
-            pending = [flag for flag in flags if flag not in result.flags_found]
+            pending = _pending_new_flags(flags, result.flags_found)
             for flag in pending:
                 _submit_flag_safely(client, code, flag, result, started_at, engine=engine)
             expected = result.flag_count or 1
@@ -1117,7 +1128,7 @@ def _run_single_challenge(
         deadline = time.monotonic() + (DONE_FLAG_WAIT_SECONDS if continue_flag_wait and not project_gone else 0)
         while not project_gone and time.monotonic() < deadline:
             flags = collect_flags_from_facts(engine.list_fact_descriptions(project_id), [goal])
-            pending = [flag for flag in flags if flag not in result.flags_found]
+            pending = _pending_new_flags(flags, result.flags_found)
             if not pending:
                 if flags:
                     break  # 全部已提交

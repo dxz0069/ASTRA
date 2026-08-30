@@ -327,3 +327,12 @@ def test_append_knowledge_entry_excludes_injected_facts(tmp_path, monkeypatch):
     approach = data["solved-01"]["approach"]
     assert "历史思路参考" not in approach
     assert "union 注入" in approach and "flag 提交成功" in approach
+
+
+def test_pending_new_flags_dedupes_case_variants() -> None:
+    """审计27轮：b-02 大小写双交修复——已交形态的大小写变体不再重复提交。"""
+    from astra_runner.runner import _pending_new_flags
+
+    found = ["flag{abc123}"]
+    pending = _pending_new_flags(["flag{abc123}", "FLAG{abc123}", "flag{xyz789}"], found)
+    assert pending == ["flag{xyz789}"]  # 精确重复与大小写变体都跳过，新旗保留
