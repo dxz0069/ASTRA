@@ -274,6 +274,22 @@ def test_project_creation_persists_disabled_bootstrap_and_exports_it(client: Tes
     assert "bootstrap_enabled: false" in client.get(f"/projects/{project_id}/export?format=yaml").text
 
 
+def test_export_rejects_oversized_project_for_both_formats(client: TestClient, monkeypatch) -> None:
+    """审计18轮：大图 413 防护必须覆盖 yaml 与 timeline 两分支（旧版只护 yaml）。"""
+    monkeypatch.setenv("ASTRA_MAX_EXPORT_FACTS", "5")
+    project_id = _create_project(client)
+    for i in range(6):
+        client.post(f"/projects/{project_id}/facts", json={"description": f"事实{i}的确认结论"})
+    for fmt in ("yaml", "timeline"):
+        response = client.get(f"/projects/{project_id}/export?format={fmt}")
+        assert response.status_code == 413, fmt
+    # 阈值内项目两格式正常导出
+    ok_project = _create_project(client)
+    client.post(f"/projects/{ok_project}/facts", json={"description": "单条事实确认结论"})
+    assert client.get(f"/projects/{ok_project}/export?format=yaml").status_code == 200
+    assert client.get(f"/projects/{ok_project}/export?format=timeline").status_code == 200
+
+
 def test_project_creation_rejects_invalid_bootstrap_enabled(client: TestClient) -> None:
     response = client.post(
         "/projects",
