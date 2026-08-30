@@ -354,7 +354,7 @@ def run_benchmark(
     # V2-6/V2-5/V4：知识库挂载（期望预算 + 思路条目 + 同题型邻居），在排序前统一附加到 result
     knowledge = _load_runtime_knowledge()
     if knowledge:
-        attached = _attach_knowledge(queue, knowledge)
+        attached = _attach_knowledge(queue, knowledge, queue_lock)
         LOG.info("knowledge base loaded entries=%s attached=%s file=%s", len(knowledge), attached, KNOWLEDGE_FILE)
 
     def _code_of(item) -> str:
@@ -742,7 +742,7 @@ def run_benchmark(
             # V4：赛中实时记忆复用——本轮解出的题立即成为未开题者的参考（越打越强）
             try:
                 fresh_kb = _load_runtime_knowledge()
-                fresh_attached = _attach_knowledge(queue, fresh_kb)
+                fresh_attached = _attach_knowledge(queue, fresh_kb, queue_lock)
                 if fresh_attached:
                     LOG.info("live memory reload：新增 %s 条思路挂到未开题队列", fresh_attached)
             except Exception as exc:  # noqa: BLE001
@@ -1614,16 +1614,23 @@ def _constellation_text(origin: str) -> str:
     )
 
 
-def _attach_knowledge(queue: Any, knowledge: dict) -> int:
+def _attach_knowledge(queue: Any, knowledge: dict, queue_lock: Any = None) -> int:
     """V4：把知识库条目/邻居经验挂到队列中未开题的 result 上（初始挂载与赛中热加载共用）。
 
     迭代前快照：主循环热加载与 _work 线程的 requeue（appendleft/append）并发，
     直接迭代 deque 会 RuntimeError: deque mutated during iteration（实测刷屏）。
+    审计24轮：快照创建本身也要持锁——list(deque) 在并发 append 时同样可能
+    触发迭代器突变异常，锁内快照才是完整闭合。
     """
+    if queue_lock is not None:
+        with queue_lock:
+            snapshot = list(queue)
+    else:
+        snapshot = list(queue)
     attached = 0
     deadends = _load_deadends()
     stats = _load_memory_stats()
-    for ch_item, res in list(queue):
+    for ch_item, res in snapshot:
         if res.started:
             continue  # 已开题不回填——注入 fact 只在项目创建时做
         code = res.unique_code.lower()
