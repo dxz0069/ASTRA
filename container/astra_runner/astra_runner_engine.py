@@ -1,13 +1,14 @@
 """LocalAstraEngine —— 本地模式 ASTRA 引擎封装（server + dispatcher 进程管理 + API）。
 
 - server/dispatcher 为进程级共享单例（幂等启动，最后 shutdown）
-- dispatch.yaml 由环境变量动态生成：execution=local，DeepSeek 主力（claudecode +
-  ANTHROPIC 兼容端点），reason 任务与双星审查复用同一 worker 配置
+- dispatch.yaml 由环境变量动态生成：execution=local，PI 唯一执行底座
+  （v0.2 星图架构重建：最原始、完全可控的 Agent Loop），Decide/Execute 双活动
 - 每个题目一个 ASTRA 项目，origin=靶场地址，goal=题目描述
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
@@ -30,17 +31,56 @@ ASTRA_DISPATCH_CMD = os.environ.get("ASTRA_DISPATCH_CMD", "astra dispatch")
 PROJECT_COMPLETED_STATUSES = {"completed", "stopped"}
 
 
-def _dsh_home_root() -> str:
-    """dsh worker 会话根目录：优先 ASTRA_DSH_HOME（ASTRA 专用覆盖键，兼容历史
-    单 worker 语义——作为根目录使用，worker 目录拼在其下）。刻意不用环境变量
-    DSH_HOME——用户机器常有全局 DSH_HOME（~/.dsh），会让所有 worker 共享
-    会话/凭据目录导致跨项目混杂。"""
-    return os.environ.get("ASTRA_DSH_HOME") or str(Path(tempfile.gettempdir()) / "astra-dsh")
+def _pi_agent_root() -> str:
+    """pi worker 的 PI_CODING_AGENT_DIR 根目录（ASTRA_PI_HOME 可覆盖）。
+    按 worker 稳定命名（不加 uuid）：引擎崩溃重启后 pi --session <id> 仍能
+    找回会话，defer 续跑跨重启存活（R5 会话丢失税教训）。"""
+    return os.environ.get("ASTRA_PI_HOME") or str(Path(tempfile.gettempdir()) / "astra-pi")
 
 
-def _dsh_home(worker_name: str) -> str:
-    """按 worker 隔离的 DSH_HOME（会话/凭据互不串扰）。"""
-    return str(Path(_dsh_home_root()) / worker_name)
+def _pi_agent_dir(worker_name: str) -> Path:
+    return Path(_pi_agent_root()) / worker_name
+
+
+def _sanitize_polluted_env() -> None:
+    """清洗会污染 pi worker 的环境变量（spike 实证 2026-08-30）。
+
+    pi-ai 的 anthropic-messages 层会优先读进程环境里的 ANTHROPIC_AUTH_TOKEN/
+    ANTHROPIC_API_KEY，覆盖 models.json 的 apiKey——宿主 shell 若残留旧栈
+    （claudecode 时代）的失效 key，pi worker 会全量 401。v0.2 起 ANTHROPIC_*
+    不再是本系统的合法变量，启动即剥除。
+    """
+    polluted = [k for k in os.environ if k.startswith("ANTHROPIC_") or k in ("OPENAI_API_KEY", "CLAUDE_CODE_SUBAGENT_MODEL")]
+    for k in polluted:
+        os.environ.pop(k, None)
+    if polluted:
+        LOG.warning("sanitized polluted env vars (pi worker 防污染): %s", sorted(polluted))
+
+
+def _cleanup_stale_engine_files(keep_dbs: int = 5) -> None:
+    """文件系统审计：清理旧引擎 db 文件与含密钥的 dispatch yaml。
+
+    每次引擎重启产生新 uuid db（含 WAL/SHM），自愈重启频繁时 temp 目录膨胀。
+    保留最近 keep_dbs 个（正在使用的排最近），超过的删除。
+    dispatch yaml 含 API key 明文，进程退出后必须删除。
+    """
+    temp_dir = Path(tempfile.gettempdir())
+    # 旧 db 文件（按 mtime 排序，保留最新几个）
+    db_files = sorted(temp_dir.glob("astra-runner-*.db*"), key=lambda p: p.stat().st_mtime)
+    for old in db_files[:-keep_dbs * 3]:  # ×3 因为每个 db 可能带 .db-wal/.db-shm
+        try:
+            old.unlink(missing_ok=True)
+        except OSError:
+            pass
+    # 含密钥的 dispatch yaml（超过 1 小时的）
+    import time as _time
+    cutoff = _time.time() - 3600
+    for yaml_file in temp_dir.glob("astra-dispatch-*.yaml"):
+        try:
+            if yaml_file.stat().st_mtime < cutoff:
+                yaml_file.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 class AstraDaemon:
@@ -62,6 +102,61 @@ class AstraDaemon:
                 cls._instance = cls()
             return cls._instance
 
+    def shutdown(self) -> None:
+        """优雅关闭引擎子进程（execv 自愈重启前必须调用，否则旧进程占端口+烧 token）。
+
+        P0 修复：os.execv 原位替换不清子进程，旧 server 持 8000 端口导致新进程
+        exited early → 整轮报废。此方法在 execv 前被调用，确保干净换血。
+        """
+        import signal as _signal
+
+        for name, proc in [("dispatcher", self._dispatcher), ("server", self._server)]:
+            if proc is not None and proc.poll() is None:
+                try:
+                    # POSIX 下杀整组（claude 的 bun→nmap/curl 孙进程）
+                    if sys.platform != "win32":
+                        try:
+                            os.killpg(os.getpgid(proc.pid), _signal.SIGTERM)
+                        except (ProcessLookupError, PermissionError):
+                            proc.terminate()
+                    else:
+                        proc.terminate()
+                    proc.wait(timeout=10)
+                    LOG.info("daemon %s stopped (pid=%s)", name, proc.pid)
+                except subprocess.TimeoutExpired:
+                    LOG.warning("daemon %s SIGTERM timeout, SIGKILL", name)
+                    proc.kill()
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        pass
+                except Exception as exc:  # noqa: BLE001
+                    LOG.warning("daemon %s stop failed: %s", name, exc)
+        self._server = None
+        self._dispatcher = None
+        # 审计十二轮：回收全部日志句柄（execv 换血前防句柄泄漏累积）
+        while _open_log_handles:
+            try:
+                _open_log_handles.pop(0).close()
+            except OSError:
+                pass
+        # 等 8000 端口真正释放（新进程才能绑定）
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            try:
+                requests.get(f"{ASTRA_SERVER_URL}/projects", headers=_auth_headers(),  timeout=1)
+                time.sleep(0.5)  # 还活着，继续等
+            except Exception:  # noqa: BLE001
+                break  # 连不上 = 端口已释放
+        # 文件系统审计：清理本次引擎的 dispatch yaml（含 API key）与旧 db 文件
+        if self._dispatch_config is not None:
+            try:
+                self._dispatch_config.unlink(missing_ok=True)
+            except OSError:
+                pass
+            self._dispatch_config = None
+        _cleanup_stale_engine_files()
+
     def ensure_started(self) -> None:
         if os.environ.get("ASTRA_EXTERNAL_ENGINE") == "1":
             # 外部引擎模式：server/dispatcher 由外部管理（避免进程组级联退出）
@@ -77,7 +172,9 @@ class AstraDaemon:
             self._start_locked()
 
     def _start_locked(self) -> None:
-        self._cleanup_dsh_home()
+        _sanitize_polluted_env()
+        _cleanup_stale_engine_files()
+        self._cleanup_pi_agent_dirs()
         db_path = Path(tempfile.gettempdir()) / f"astra-runner-{uuid.uuid4().hex[:8]}.db"
         LOG.info("starting astra server db=%s", db_path)
         self._server = _popen([*ASTRA_SERVER_CMD.split(), "--db-path", str(db_path), "--no-access-log"])
@@ -86,7 +183,7 @@ class AstraDaemon:
             if self._server.poll() is not None:
                 raise RuntimeError(f"astra server exited early: {self._server.returncode}")
             try:
-                requests.get(f"{ASTRA_SERVER_URL}/projects", timeout=2).raise_for_status()
+                requests.get(f"{ASTRA_SERVER_URL}/projects", headers=_auth_headers(),  timeout=2).raise_for_status()
                 break
             except Exception:  # noqa: BLE001
                 time.sleep(1)
@@ -104,85 +201,50 @@ class AstraDaemon:
     def _render_dispatch_config(self) -> Path:
         """由环境变量生成 dispatch.yaml（local 执行）。
 
-        ASTRA_WORKER_TYPE 选择 worker：
-          - dsh（默认，2026-08-15 起）：DeepSeek Harness 无头模式；DSH_MODEL /
-            DEEPSEEK_API_KEY，双 key（+ZHIPU_API_KEY）时自动混合舰队。此前默认
-            claudecode 曾导致不带该变量启动时静默回落单模型 claudecode（run 9214
-            实测退步），故默认翻转为 dsh。
-          - claudecode：claude CLI + DeepSeek Anthropic 兼容端点（ANTHROPIC_*）
+        v0.2 星图架构重建（2026-08-29）：执行底座只留 pi——最原始、完全可控的 Agent Loop。
+        任务面收敛为 bootstrap（首次 Execute）/ execute /
+        decide 三类；审查与 consolidate 已随 0.2 重建移除。
         """
-        worker_type = os.environ.get("ASTRA_WORKER_TYPE", "dsh")
-        if worker_type == "claudecode":
-            # 默认/推荐路径是 dsh（run 9214 曾因静默回落 claudecode 退步 1230 分）；
-            # 走到这里说明被显式指定——大声提示，防手滑。
-            LOG.warning(
-                "ASTRA_WORKER_TYPE=claudecode（显式指定）：默认路径是 dsh 混合舰队，"
-                "claudecode 为单模型旧路径，仅应在有意回退时使用",
+        worker_type = os.environ.get("ASTRA_WORKER_TYPE", "pi")
+        if worker_type != "pi":
+            raise RuntimeError(
+                f"不支持的 ASTRA_WORKER_TYPE: {worker_type}（v0.2 起仅 pi）"
             )
-        # 并发副本数：多 worker 并行提升吞吐（默认 2，可 ASTRA_WORKER_REPLICAS 覆盖）
-        replicas = max(1, int(os.environ.get("ASTRA_WORKER_REPLICAS", "2")))
-        # 混合模型分流（默认开）：explore/bootstrap 用强模型，reason/consolidate 用便宜模型
-        mix_models = os.environ.get("ASTRA_MIX_MODELS", "1") == "1"
-        # 混合舰队（2026-08-15）：dsh 模式下 DEEPSEEK_API_KEY 与 ZHIPU_API_KEY 同时
-        # 存在时自动渲染 4 worker 混编（DS 探索 + GLM 探索 + GLM 决策 + DS 兜底），
-        # 同一题的多个 intent 可由不同模型并行探索（多路并进）。设 ASTRA_MIX_PROVIDERS=0 关闭。
-        mix_providers = os.environ.get("ASTRA_MIX_PROVIDERS", "auto")
-        mixed = (
-            worker_type == "dsh"
-            and mix_providers in ("auto", "1", "true")
-            and os.environ.get("DEEPSEEK_API_KEY")
-            and os.environ.get("ZHIPU_API_KEY")
-        )
         common_env = {
             "BENCHMARK_TOKEN": os.environ.get("BENCHMARK_TOKEN", ""),
             "BENCHMARK_BASE_URL": os.environ.get("BENCHMARK_BASE_URL", ""),
         }
         common_env = {k: v for k, v in common_env.items() if v}
-        if worker_type == "dsh":
-            worker_block = self._render_dsh_mixed_workers() if mixed else self._render_dsh_worker()
-        elif worker_type == "claudecode":
-            blocks = []
-            for i in range(replicas):
-                name = "deepseek-main" if replicas == 1 else f"deepseek-main-{i}"
-                if mix_models and replicas >= 2:
-                    # 副本 0：探索+首探（强模型）；副本 1：决策+审查（便宜模型）
-                    if i == 0:
-                        blocks.append(self._render_claudecode_worker(name, ["bootstrap", "explore"]))
-                    else:
-                        blocks.append(self._render_claudecode_worker(name, ["reason", "consolidate"]))
-                else:
-                    blocks.append(self._render_claudecode_worker(name))
-            worker_block = "\n".join(blocks)
-        else:
-            raise RuntimeError(f"不支持的 ASTRA_WORKER_TYPE: {worker_type}（可选 claudecode / dsh）")
+        worker_block = self._render_pi_fleet()
+        # ASTRA_DECIDE_TIMEOUT 新名；ASTRA_REASON_TIMEOUT 旧名回读（env 平滑迁移）
+        _decide_timeout = max(
+            60,
+            int(os.environ.get("ASTRA_DECIDE_TIMEOUT") or os.environ.get("ASTRA_REASON_TIMEOUT", "600")),
+        )
         yaml = f"""server: "{ASTRA_SERVER_URL}"
 runtime:
   interval: 3
-  max_workers: 8
-  max_running_projects: 3
-  max_project_workers: 8
-  healthcheck_timeout: 20
-  worker_healthcheck: "startup_only"
+  max_workers: 20
+  max_running_projects: 4
+  max_project_workers: 12
+  healthcheck_timeout: 60
+  worker_healthcheck: "disabled"
   prompt_group: "default"
   execution: "local"
   context_budget:
     max_inline_facts: 60
-    max_inline_intents: 12
+    max_inline_steps: 12
     max_inline_hints: 8
 tasks:
   bootstrap:
+    timeout: 450
+    conclude_timeout: 90
+  decide:
+    timeout: {_decide_timeout}
+    max_steps: 7
+  execute:
     timeout: 600
     conclude_timeout: 120
-  reason:
-    timeout: 420
-    max_intents: 2
-  explore:
-    timeout: 600
-    conclude_timeout: 120
-  consolidate:
-    timeout: 240
-  challenge:
-    timeout: 600
 container:
   image: "unused"
   network_mode: "host"
@@ -199,233 +261,123 @@ workers:
         self._dispatch_config = path
         return path
 
-    def _render_claudecode_worker(self, worker_name: str = "deepseek-main", task_types: list[str] | None = None) -> str:
-        """claude CLI worker（DeepSeek Anthropic 兼容端点，配置自包含隔离）。
-
-        worker_name：worker 标识（多副本时区分）；task_types：任务分流
-        （None=全部，或按 [bootstrap,explore] / [reason,consolidate] 拆混合模型）。
+    def _render_pi_fleet(self) -> str:
+        """pi 舰队（Decide/Execute 双活动架构）：
+          - deepseek-execute-{i}  p0 bootstrap/execute ×N（ASTRA_EXECUTE_REPLICAS，
+            默认 2）每副本 max_running=3（ASTRA_EXECUTE_MAXRUN）——DS 快攻主力
+          - glm-decide            p1 decide —— GLM-5.3 深思考决策（ZHIPU_API_KEY
+            存在时）；无 GLM key 时 deepseek-decide 兜底
+        Decide 串行性由服务端 decide 租约保证（同图同时只有一个 Decide 在跑）；
+        max_running=2 只用于跨项目并行决策，不破坏单图串行。
         """
-        model = os.environ.get("ANTHROPIC_MODEL", "deepseek-v4-flash")
-        base_url = os.environ.get("ANTHROPIC_BASE_URL", "https://api.deepseek.com/anthropic")
-        auth_token = os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
-        if not auth_token:
-            raise RuntimeError("缺少 ANTHROPIC_AUTH_TOKEN（国内模型密钥）")
-        # claude CLI 配置隔离：不读 ~/.claude/settings.json（避免与用户其他项目的中转配置冲突）
-        claude_dir = Path(tempfile.gettempdir()) / f"astra-claude-{worker_name}-{uuid.uuid4().hex[:8]}"
-        claude_dir.mkdir(parents=True, exist_ok=True)
-        claude_dir_yaml = str(claude_dir).replace("\\", "/")  # YAML 双引号内反斜杠是转义符
-        types_line = ", ".join(task_types) if task_types else "bootstrap, reason, explore, consolidate"
-        return f"""  - name: "{worker_name}"
-    type: "claudecode"
-    task_types: [{types_line}]
-    max_running: 3
-    priority: 0
-    env:
-      ANTHROPIC_MODEL: "{model}"
-      ANTHROPIC_BASE_URL: "{base_url}"
-      ANTHROPIC_AUTH_TOKEN: "{auth_token}"
-      ANTHROPIC_API_KEY: "{auth_token}"
-      CLAUDE_CONFIG_DIR: "{claude_dir_yaml}"
-      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
-      CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT: "1"
-"""
-
-    def _render_dsh_worker(self) -> str:
-        """单模型 dsh worker（历史行为，向后兼容）：环境变量选择 provider/model。
-
-        前置：已安装 @deepseek-ai/dsh，且 container/dsh/astra-headless-runner.js
-        已复制进 dsh 包 lib/（提供 --session 会话续接，见 container/dsh/README.md）。
-        DSH_PROVIDER 选择模型路由（与 container/dsh/astra-headless.patch.yml 的
-        env 表达式一致）：
-          - deepseek（默认）：DEEPSEEK_API_KEY / DEEPSEEK_BASE_URL（官方 chat-completions）
-          - anthropic：ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL（Anthropic Messages，
-            适配 Kimi / DeepSeek /anthropic 兼容端点等）
-          - zhipu：ZHIPU_API_KEY / ZHIPU_BASE_URL（智谱 coding 端点，GLM-5.3）
-        """
-        model = os.environ.get("DSH_MODEL", "deepseek-v4-flash")
-        provider = os.environ.get("DSH_PROVIDER", "deepseek")
-        effort = os.environ.get("DSH_REASONING_EFFORT", "")
-        return self._render_dsh_worker_block(
-            "deepseek-main",
-            ["bootstrap", "reason", "explore", "consolidate"],
-            max_running=3,
-            priority=0,
-            provider=provider,
-            model=model,
-            effort=effort,
+        ds_model = os.environ.get("PI_MODEL", "deepseek-v4-flash")
+        ds_base = os.environ.get("PI_BASE_URL", "https://api.deepseek.com/anthropic")
+        ds_key = os.environ.get("PI_API_KEY", "")
+        if not ds_key:
+            raise RuntimeError("缺少 PI_API_KEY（DeepSeek 端点密钥）")
+        ds_provider_api = os.environ.get("PI_PROVIDER_API", "anthropic-messages")
+        glm_key = os.environ.get("ZHIPU_API_KEY", "")
+        glm_model = os.environ.get("ZHIPU_PI_MODEL", "glm-5.3")
+        glm_base = os.environ.get("ZHIPU_PI_BASE_URL", "https://open.bigmodel.cn/api/anthropic")
+        glm_provider_api = os.environ.get("ZHIPU_PI_PROVIDER_API", "anthropic-messages")
+        execute_replicas = max(
+            1,
+            int(os.environ.get("ASTRA_EXECUTE_REPLICAS") or os.environ.get("ASTRA_EXPLORE_REPLICAS", "4")),
         )
+        execute_maxrun = max(
+            1,
+            int(os.environ.get("ASTRA_EXECUTE_MAXRUN") or os.environ.get("ASTRA_EXPLORE_MAXRUN", "3")),
+        )
+        fleet: list[str] = []
+        for i in range(execute_replicas):
+            name = "deepseek-execute" if execute_replicas == 1 else f"deepseek-execute-{i}"
+            fleet.append(
+                self._render_pi_worker(
+                    name, ["bootstrap", "execute"],
+                    max_running=execute_maxrun, priority=0,
+                    model=ds_model, base_url=ds_base, api_key=ds_key, provider_api=ds_provider_api,
+                )
+            )
+        if glm_key:
+            fleet.append(
+                self._render_pi_worker(
+                    "glm-decide", ["decide"],
+                    max_running=2, priority=1,
+                    model=glm_model, base_url=glm_base, api_key=glm_key, provider_api=glm_provider_api,
+                )
+            )
+        else:
+            fleet.append(
+                self._render_pi_worker(
+                    "deepseek-decide", ["decide"],
+                    max_running=2, priority=1,
+                    model=ds_model, base_url=ds_base, api_key=ds_key, provider_api=ds_provider_api,
+                )
+            )
+        return "\n".join(fleet)
 
-    def _render_dsh_mixed_workers(self) -> str:
-        """混合舰队（DS + GLM 双通道，2026-08-15 榜单数据决策）。
-
-        每道题最多 max_project_workers 个 intent 并行，choose_worker 按
-        （priority, 运行数, 随机）选 worker——同优先级的 DS/GLM 探索位自然轮转，
-        同一道题的多路探索会分到不同模型（快攻 DS + 深挖 GLM）：
-          - deepseek-main   p0 bootstrap/explore ×3 —— tsecbench Top6 全员同款，吞吐主力
-          - glm-main        p0 bootstrap/explore ×2 —— GLM-5.3 high 档（速度档），多路并进
-          - glm-reason      p1 reason/consolidate ×2 —— GLM-5.3 xhigh→max 档（深度档）
-          - deepseek-fallback p3 reason/explore ×2 —— GLM 429/限流时的决策与探索兜底
-
-        环境变量：DEEPSEEK_API_KEY（必填）/ ZHIPU_API_KEY（必填，进入混合模式的前提）/
-        DSH_MODEL（DS 模型，默认 deepseek-v4-flash）/ ZHIPU_MODEL（默认 glm-5.3）/
-        ZHIPU_EXPLORE_EFFORT（默认 high）/ ZHIPU_REASON_EFFORT（默认 xhigh）。
-        """
-        ds_model = os.environ.get("DSH_MODEL", "deepseek-v4-flash")
-        glm_model = os.environ.get("ZHIPU_MODEL", "glm-5.3")
-        explore_effort = os.environ.get("ZHIPU_EXPLORE_EFFORT", "high")
-        reason_effort = os.environ.get("ZHIPU_REASON_EFFORT", "xhigh")
-        blocks = [
-            self._render_dsh_worker_block(
-                "deepseek-main",
-                ["bootstrap", "explore"],
-                max_running=3,
-                priority=0,
-                provider="deepseek",
-                model=ds_model,
-            ),
-            self._render_dsh_worker_block(
-                "glm-main",
-                ["bootstrap", "explore"],
-                max_running=2,
-                priority=0,
-                provider="zhipu",
-                model=glm_model,
-                effort=explore_effort,
-            ),
-            self._render_dsh_worker_block(
-                "glm-reason",
-                ["reason", "consolidate"],
-                max_running=2,
-                priority=1,
-                provider="zhipu",
-                model=glm_model,
-                effort=reason_effort,
-            ),
-            self._render_dsh_worker_block(
-                "deepseek-fallback",
-                ["reason", "explore"],
-                max_running=2,
-                priority=3,
-                provider="deepseek",
-                model=ds_model,
-            ),
-        ]
-        return "\n".join(blocks)
-
-    def _render_dsh_worker_block(
+    def _render_pi_worker(
         self,
         worker_name: str,
         task_types: list[str],
         *,
         max_running: int,
         priority: int,
-        provider: str,
         model: str,
-        effort: str = "",
+        base_url: str,
+        api_key: str,
+        provider_api: str,
     ) -> str:
-        """单个 dsh worker 的 YAML 块（混合舰队与单 worker 共用）。
-
-        provider 决定凭据环境变量；effort 透传给 DSH_REASONING_EFFORT
-        （zhipu 路由下 high→high、xhigh→max，见 patch 的 reasoningEfforts 映射）。
-        """
-        dsh_patch = self._resolve_dsh_patch()
-        dsh_home_yaml = _dsh_home(worker_name).replace("\\", "/")
-        if provider == "anthropic":
-            auth_token = os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
-            if not auth_token:
-                raise RuntimeError("缺少 ANTHROPIC_AUTH_TOKEN（dsh worker，anthropic 模式）")
-            base_url = os.environ.get("ANTHROPIC_BASE_URL", "")
-            base_url_line = f'      ANTHROPIC_BASE_URL: "{base_url}"\n' if base_url else ""
-            credential_line = f'ANTHROPIC_AUTH_TOKEN: "{auth_token}"'
-        elif provider == "deepseek":
-            api_key = os.environ.get("DEEPSEEK_API_KEY", "")
-            if not api_key:
-                raise RuntimeError("缺少 DEEPSEEK_API_KEY（dsh worker，deepseek 模式）")
-            base_url = os.environ.get("DEEPSEEK_BASE_URL", "")
-            base_url_line = f'      DEEPSEEK_BASE_URL: "{base_url}"\n' if base_url else ""
-            credential_line = f'DEEPSEEK_API_KEY: "{api_key}"'
-        elif provider == "zhipu":
-            api_key = os.environ.get("ZHIPU_API_KEY", "")
-            if not api_key:
-                raise RuntimeError("缺少 ZHIPU_API_KEY（dsh worker，zhipu 模式）")
-            base_url = os.environ.get("ZHIPU_BASE_URL", "https://open.bigmodel.cn/api/coding/paas/v4")
-            base_url_line = f'      ZHIPU_BASE_URL: "{base_url}"\n'
-            credential_line = f'ZHIPU_API_KEY: "{api_key}"'
-        else:
-            raise RuntimeError(f"不支持的 DSH_PROVIDER: {provider}（可选 deepseek / anthropic / zhipu）")
-        reasoning_line = f'      DSH_REASONING_EFFORT: "{effort}"\n' if effort else ""
+        """单个 pi worker 的 YAML 块（models.json 由 pi 适配器按 env 注入）。"""
+        agent_dir = _pi_agent_dir(worker_name)
+        agent_dir.mkdir(parents=True, exist_ok=True)
+        agent_dir_yaml = str(agent_dir).replace("\\", "/")  # YAML 双引号内反斜杠是转义符
         types_line = ", ".join(task_types)
+        context_window = os.environ.get("PI_MODEL_CONTEXT_WINDOW", "131072")
+        max_tokens = os.environ.get("PI_MODEL_MAX_TOKENS", "16384")
         return f"""  - name: "{worker_name}"
-    type: "dsh"
+    type: "pi"
     task_types: [{types_line}]
     max_running: {max_running}
     priority: {priority}
     env:
-      DSH_MODEL: "{model}"
-      DSH_PROVIDER: "{provider}"
-      {credential_line}
-{base_url_line}      DSH_PERMISSION_MODE: "danger-full-access"
-      DSH_HOME: "{dsh_home_yaml}"
-      DSH_PATCH: "{dsh_patch}"
-{reasoning_line}"""
+      PI_MODEL: "{model}"
+      PI_BASE_URL: "{base_url}"
+      PI_API_KEY: "{api_key}"
+      PI_PROVIDER_API: "{provider_api}"
+      PI_MODEL_CONTEXT_WINDOW: "{context_window}"
+      PI_MODEL_MAX_TOKENS: "{max_tokens}"
+      PI_CODING_AGENT_DIR: "{agent_dir_yaml}"
+"""
 
     @staticmethod
-    def _resolve_dsh_patch() -> str:
-        """定位 astra-headless.patch.yml：env DSH_PATCH 优先；其次仓库内
-        container/dsh/（本地联调）；兜底容器镜像路径 /opt/astra/dsh/。"""
-        env_patch = os.environ.get("DSH_PATCH")
-        if env_patch:
-            return env_patch.replace("\\", "/")
-        repo_patch = Path(__file__).resolve().parent.parent / "dsh" / "astra-headless.patch.yml"
-        if repo_patch.exists():
-            return str(repo_patch).replace("\\", "/")
-        return "/opt/astra/dsh/astra-headless.patch.yml"
+    def _cleanup_pi_agent_dirs(max_age_hours: float = 72.0) -> None:
+        """启动时清理陈旧的 pi agent 目录（会话文件不自动删除，长跑累积）。
 
-    @staticmethod
-    def _cleanup_dsh_home(keep: int = 50) -> None:
-        """清理 dsh worker 的旧会话目录（DSH 持久化后端不自动删除，长跑会累积）。
-
-        只在**新一轮引擎启动**时执行（上一轮会话已无价值）：扫描所有 worker 的
-        DSH_HOME（<root>/<worker>/sessions），按 mtime 全局保留最近 keep 个会话
-        目录，删除更旧的。execute→conclude 跨进程需要会话存活，因此运行中绝不
-        清理。local 模式下 DSH_HOME 是宿主路径，可直接操作。
+        只在**新一轮引擎启动**时执行；worker 目录按名稳定复用，conclude/defer
+        续跑依赖的近期会话（mtime 新于 max_age_hours）绝不清理——R5 会话丢失
+        教训同一纪律。
         """
-        root = Path(_dsh_home_root())
+        root = Path(_pi_agent_root())
         if not root.is_dir():
             return
-
-        def _is_session_dir(d: Path) -> bool:
-            return (d / "session.jsonl.zstd").exists() or (d / "session.jsonl").exists()
-
-        try:
-            dirs = sorted(
-                (d for d in root.rglob("*") if d.is_dir() and _is_session_dir(d)),
-                key=lambda d: d.stat().st_mtime,
-                reverse=True,
-            )
-        except OSError:
-            return
-        stale = dirs[keep:]
-        if not stale:
-            return
-        for old in stale:
+        cutoff = time.time() - max_age_hours * 3600
+        removed = 0
+        for d in root.iterdir():
+            if not d.is_dir():
+                continue
             try:
-                shutil.rmtree(old, ignore_errors=True)
+                if d.stat().st_mtime < cutoff:
+                    shutil.rmtree(d, ignore_errors=True)
+                    removed += 1
             except OSError:
-                pass
-        LOG.info("cleaned stale dsh sessions dsh_root=%s removed=%s kept=%s", root, len(stale), len(dirs) - len(stale))
+                continue
+        if removed:
+            LOG.info("cleaned stale pi agent dirs root=%s removed=%s", root, removed)
 
-    def shutdown(self) -> None:
-        for process in (self._dispatcher, self._server):
-            if process is not None and process.poll() is None:
-                LOG.info("stopping astra process pid=%s", process.pid)
-                process.terminate()
-                try:
-                    process.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-        self._dispatcher = None
-        self._server = None
+    # 注意：shutdown 只定义一次（类头部的 P0 加固版：killpg+端口等待+含密钥
+    # dispatch yaml 清理）。这里曾残留一个同名的简版 shutdown 把加固版覆盖成
+    # 死代码（Python 类体后定义覆盖前定义），2026-08-28 审计修复删除。
 
 
 _ENGINE_LOG_PREFIX = "astra-engine-"
@@ -444,8 +396,22 @@ def _engine_log_path() -> Path:
     return temp_dir / f"{_ENGINE_LOG_PREFIX}{stamp}.log"
 
 
+def _auth_headers() -> dict[str, str]:
+    """审计修复：服务端启用 ASTRA_AUTH_TOKEN 时引擎直连请求带 Bearer 头。"""
+    token = os.environ.get("ASTRA_AUTH_TOKEN", "")
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
+_open_log_handles: list = []  # 审计十二轮：持有句柄防 GC 关闭 + 关停旧句柄
+
+
 def _popen(argv: list[str]) -> subprocess.Popen:
+    """子进程日志落盘。句柄登记在模块级（旧句柄由 shutdown 统一回收——
+    watchdog 每次重启产生 2 个新句柄，不回收则长跑进程句柄无限累积）。"""
     log_file = open(_engine_log_path(), "ab", buffering=0)
+    _open_log_handles.append(log_file)
+    while len(_open_log_handles) > 6:  # 保留最近 3 轮重启的 server+dispatcher
+        _open_log_handles.pop(0).close()
     return subprocess.Popen(
         argv,
         stdout=log_file,
@@ -468,6 +434,7 @@ class LocalAstraEngine:
     def create_project(self, title: str, origin: str, goal: str) -> str:
         response = requests.post(
             f"{ASTRA_SERVER_URL}/projects",
+            headers=_auth_headers(),
             json={
                 "title": title,
                 "origin": origin,
@@ -484,6 +451,7 @@ class LocalAstraEngine:
         """注入指引（hint）：供 runner 把平台 hint 注入 ASTRA 项目，星探下次读取吸收。"""
         response = requests.post(
             f"{ASTRA_SERVER_URL}/projects/{project_id}/hints",
+            headers=_auth_headers(),
             json={"content": content, "creator": "astra.runner"},
             timeout=15,
         )
@@ -494,7 +462,7 @@ class LocalAstraEngine:
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
             try:
-                response = requests.get(f"{ASTRA_SERVER_URL}/projects/{project_id}", timeout=10)
+                response = requests.get(f"{ASTRA_SERVER_URL}/projects/{project_id}", headers=_auth_headers(),  timeout=10)
                 response.raise_for_status()
                 status = response.json()["project"]["status"]
                 if status in PROJECT_COMPLETED_STATUSES:
@@ -506,26 +474,85 @@ class LocalAstraEngine:
         return False
 
     def list_fact_descriptions(self, project_id: str) -> list[str]:
-        response = requests.get(f"{ASTRA_SERVER_URL}/projects/{project_id}", timeout=10)
+        response = requests.get(f"{ASTRA_SERVER_URL}/projects/{project_id}", headers=_auth_headers(),  timeout=10)
         response.raise_for_status()
         return [fact["description"] for fact in response.json().get("facts", [])]
 
     def delete_project(self, project_id: str) -> None:
         try:
-            requests.delete(f"{ASTRA_SERVER_URL}/projects/{project_id}", timeout=10)
+            requests.delete(f"{ASTRA_SERVER_URL}/projects/{project_id}", headers=_auth_headers(),  timeout=10)
         except requests.RequestException:
             pass
 
+    def stop_project(self, project_id: str) -> None:
+        """defer 时停项目：服务端清 worker 租约与 reason（scheduler 停止派发并取消在途
+        任务），星图数据保留——修复 R5 实测的僵尸项目饿死新题问题。"""
+        try:
+            response = requests.put(
+                f"{ASTRA_SERVER_URL}/projects/{project_id}/status",
+                json={"status": "stopped"},
+                headers=_auth_headers(),
+                timeout=15,
+            )
+            response.raise_for_status()
+            LOG.info("project stopped (defer) project=%s", project_id)
+        except requests.RequestException as exc:
+            LOG.warning("stop_project failed project=%s error=%s", project_id, exc)
+
+    def reactivate_project(self, project_id: str) -> bool:
+        """defer 回队复用：项目置回 active，恢复调度（星图进度无损）。"""
+        try:
+            response = requests.put(
+                f"{ASTRA_SERVER_URL}/projects/{project_id}/status",
+                json={"status": "active"},
+                headers=_auth_headers(),
+                timeout=15,
+            )
+            response.raise_for_status()
+            LOG.info("project reactivated (defer resume) project=%s", project_id)
+            return True
+        except requests.RequestException as exc:
+            # 终态（completed）/不存在的项目不可复用——返回 False 让调用方新建项目，
+            # 否则题线程会永远轮询一个不会再有产出的星图（resume 死锁，实测 19:02 循环）
+            LOG.warning("reactivate_project failed project=%s error=%s（不可复用，应新建）", project_id, exc)
+            return False
+
+    def list_active_projects(self) -> list[dict]:
+        """对账扫描（R5 修复清单 1b）：引擎侧 active 项目 [{id, created_at}]。"""
+        response = requests.get(f"{ASTRA_SERVER_URL}/projects", headers=_auth_headers(),  timeout=15)
+        response.raise_for_status()
+        payload = response.json()
+        items = payload if isinstance(payload, list) else payload.get("projects", [])
+        return [
+            {"id": p["id"], "created_at": p["created_at"]}
+            for p in items
+            if isinstance(p, dict) and p.get("status") == "active"
+        ]
+
+    def create_fact(self, project_id: str, description: str) -> None:
+        """V2-6：注入外部 fact（知识库历史思路参考，开局一次性写入）。"""
+        try:
+            response = requests.post(
+                f"{ASTRA_SERVER_URL}/projects/{project_id}/facts",
+                headers=_auth_headers(),
+            json={"description": description, "kind": "regular", "creator": "astra-runner"},
+                timeout=15,
+            )
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            LOG.warning("create_fact failed project=%s error=%s", project_id, exc)
+
     def stats(self, project_id: str) -> dict[str, int]:
-        """每题统计（评审量化口径）：星记数/指引数/驳回指引数。"""
-        response = requests.get(f"{ASTRA_SERVER_URL}/projects/{project_id}", timeout=10)
+        """每题统计（评审量化口径）：天枢数/指引数/驳回指引数。"""
+        response = requests.get(f"{ASTRA_SERVER_URL}/projects/{project_id}", headers=_auth_headers(),  timeout=10)
         response.raise_for_status()
         payload = response.json()
         hints = payload.get("hints", [])
         return {
             "facts": len(payload.get("facts", [])),
+            "steps": len(payload.get("steps", [])),
+            "findings": len(payload.get("findings", [])),
             "hints": len(hints),
-            "review_hints": sum(1 for h in hints if "[审查否决]" in h.get("content", "")),
             "failure_hints": sum(1 for h in hints if "[失败学习]" in h.get("content", "")),
         }
 

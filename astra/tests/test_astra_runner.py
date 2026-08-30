@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -16,6 +17,14 @@ from astra_runner.runner import (  # noqa: E402
     extract_flags,
     run_benchmark,
 )
+
+# 测试隔离：fake 跑分会写 memory-stats/沉淀 JSON，全部指到临时目录避免污染真实文件
+import astra_runner.runner as _runner_module  # noqa: E402
+_test_tmp = Path(tempfile.mkdtemp())
+_runner_module.MEMORY_STATS_FILE = _test_tmp / "memory-stats.json"
+_runner_module.KNOWLEDGE_APPEND_FILE = _test_tmp / "astra-knowledge-append.json"
+_runner_module.DEADENDS_APPEND_FILE = _test_tmp / "astra-deadends-append.json"
+os.environ["ASTRA_SELF_HEAL"] = "0"  # 测试禁用看门狗（os.execv 自重启会炸掉 pytest）
 
 
 @dataclass
@@ -87,6 +96,18 @@ class FakeEngine:
         self.deleted: list[str] = []
         self.started = 0
         self.stopped = 0
+        self.stop_calls: list[str] = []
+        self.reactivate_calls: list[str] = []
+        self.active_projects: list[dict] = []
+
+    def stop_project(self, project_id: str) -> None:
+        self.stop_calls.append(project_id)
+
+    def reactivate_project(self, project_id: str) -> None:
+        self.reactivate_calls.append(project_id)
+
+    def list_active_projects(self) -> list[dict]:
+        return list(self.active_projects)
 
     def start(self) -> None:
         self.started += 1
@@ -124,20 +145,24 @@ def test_extract_flags_deduplicates() -> None:
     assert collect_flags_from_facts(["x flag{abc}", "y flag{bcd}", "z flag{abc}"]) == ["flag{abc}", "flag{bcd}"]
 
 
-def test_run_benchmark_prefers_easy_order() -> None:
-    """prefer_easy：easy→medium→hard 开题（同难度保持平台顺序，run 9214 饿死教训）。"""
+def test_run_benchmark_value_hybrid_order(monkeypatch) -> None:
+    monkeypatch.setattr(_runner_module, "DONE_FLAG_WAIT_SECONDS", 0.2)
+    """R10 分值密度序：easy 热身（分值降序）→ 其余按分值降序（hard 大分题不再饿死，
+    run 13464 教训：15 道 hard 共 8,200 分从未开题，a 系 hard 500 开题 2 分钟即解）。"""
 
     @dataclass
     class DiffChallenge(FakeChallenge):
         difficulty: str = ""
+        total_score: int = 100
 
-    hard1 = DiffChallenge("x-hard-1", difficulty="hard")
-    easy1 = DiffChallenge("x-easy-1", difficulty="easy")
-    med1 = DiffChallenge("x-med-1", difficulty="medium")
-    easy2 = DiffChallenge("x-easy-2", difficulty="easy")
-    flags = {c.unique_code: ["flag{f}"] for c in (hard1, easy1, med1, easy2)}
+    hard1 = DiffChallenge("x-hard-500", difficulty="hard", total_score=500)
+    big = DiffChallenge("x-hard-1800", difficulty="hard", total_score=1800)
+    easy1 = DiffChallenge("x-easy-90", difficulty="easy", total_score=90)
+    med1 = DiffChallenge("x-med-300", difficulty="medium", total_score=300)
+    easy2 = DiffChallenge("x-easy-250", difficulty="easy", total_score=250)
+    flags = {c.unique_code: ["flag{f}"] for c in (hard1, big, easy1, med1, easy2)}
 
-    client = FakeClient([hard1, easy1, med1, easy2], flags=flags)
+    client = FakeClient([hard1, big, easy1, med1, easy2], flags=flags)
     run_benchmark(
         client,
         lambda: FakeEngine({"proj-0": ["flag{f}"]}),
@@ -145,10 +170,11 @@ def test_run_benchmark_prefers_easy_order() -> None:
         flag_poll_seconds=0.01,
         parallel=1,
     )
-    assert client.started == ["x-easy-1", "x-easy-2", "x-med-1", "x-hard-1"]
+    # easy 池分值降序（250 先于 90），随后分值池 1800→500→300
+    assert client.started == ["x-easy-250", "x-easy-90", "x-hard-1800", "x-hard-500", "x-med-300"]
 
     # --no-prefer-easy：恢复平台原始顺序
-    client2 = FakeClient([hard1, easy1, med1, easy2], flags=flags)
+    client2 = FakeClient([hard1, big, easy1, med1, easy2], flags=flags)
     run_benchmark(
         client2,
         lambda: FakeEngine({"proj-0": ["flag{f}"]}),
@@ -157,7 +183,7 @@ def test_run_benchmark_prefers_easy_order() -> None:
         parallel=1,
         prefer_easy=False,
     )
-    assert client2.started == ["x-hard-1", "x-easy-1", "x-med-1", "x-easy-2"]
+    assert client2.started == ["x-hard-500", "x-hard-1800", "x-easy-90", "x-med-300", "x-easy-250"]
 
 
 def test_run_benchmark_lifecycle() -> None:
@@ -263,8 +289,9 @@ def test_run_benchmark_parallel_window() -> None:
     results = run_benchmark(client, factory, flag_poll_seconds=0, parallel=2)
     assert len(results) == 3
     assert [r.flags_correct for r in results] == [1, 1, 1]
-    assert client.started == ["p-01", "p-02", "p-03"]
-    assert client.closed == ["p-01", "p-02", "p-03"]
+    # 并行下 start/close 的完成顺序由线程调度决定（曾因严格顺序断言在满载下抖动）
+    assert sorted(client.started) == ["p-01", "p-02", "p-03"]
+    assert sorted(client.closed) == ["p-01", "p-02", "p-03"]
 
 
 def test_run_benchmark_auto_expand_to_slot_limit() -> None:
@@ -321,15 +348,20 @@ def test_run_benchmark_progress_file_skips_started_on_restart(tmp_path) -> None:
     results1 = run_benchmark(client1, factory, flag_poll_seconds=0, progress_file=str(progress))
     assert client1.started == ["p001", "p002"]
     data = json.loads(progress.read_text(encoding="utf-8"))
-    assert data["p001"] == "done"
-    assert data["p002"] == "done"
+    # v2 模式：状态 + 战果同存（崩溃重启后报告不丢分）
+    assert data["p001"]["state"] == "done"
+    assert data["p001"]["flags"] == 1
+    assert data["p001"]["awarded"] == 100
+    assert data["p002"]["state"] == "done"
 
-    # 第二轮（模拟重启）：进度文件自动跳过，不再 start
+    # 第二轮（模拟重启）：进度文件自动跳过，不再 start；已解题历史战果回填报告
     client2 = FakeClient(challenges, flags=flags)
     results2 = run_benchmark(client2, factory, flag_poll_seconds=0, progress_file=str(progress))
-    assert client2.started == []
-    assert all(r.started is False for r in results2)
-    assert results2[0].flags_found == []  # 未跑故未提交
+    assert client2.started == []  # 本会话未重跑（不重复 start）
+    # 历史战果回填：报告含上一会话战果；started=True 是诚实语义（上会话确实开跑过）
+    assert results2[0].flags_correct == 1
+    assert results2[0].awarded == 100
+    assert results2[0].started is True
 
     # skip_codes 与 progress 并存：skip_codes 仍生效
     client3 = FakeClient(challenges, flags=flags)
@@ -475,6 +507,76 @@ def test_run_benchmark_defer_resumes_same_project() -> None:
     assert results[0].project_id is not None
 
 
+def test_run_benchmark_multiflag_partial_defers_for_remaining() -> None:
+    """V9 多旗收割：flag_count>已收旗数时 defer 回队续攻，不提前关题丢剩余旗。"""
+    challenges = [FakeChallenge("mflag", total_score=1200, flag_count=4)]
+
+    class PartialEngine(FakeEngine):
+        """永不归航；星图第 1 窗口吐 1 旗、第 2 窗口起吐 2 旗（部分进展）。"""
+
+        def __init__(self, flags_by_project):
+            super().__init__(flags_by_project)
+            self.windows = 0
+
+        def list_fact_descriptions(self, project_id: str) -> list[str]:
+            n = min(2, self.windows) if self.windows else 1
+            return [f"found flag flag{{m{i}_part}}" for i in range(1, n + 1)]
+
+        def wait_project(self, project_id: str, timeout_seconds: float) -> bool:
+            return False  # 不归航：逼 defer 路径
+
+        def start(self) -> None:
+            super().start()
+            self.windows += 1
+
+    engines: list[PartialEngine] = []
+
+    def factory():
+        e = PartialEngine({})
+        engines.append(e)
+        return e
+
+    client = FakeClient(challenges, flags={"mflag": ["flag{m1_part}"]})
+    results = run_benchmark(
+        client, factory,
+        challenge_timeout_seconds=0.2, flag_poll_seconds=0.05,
+        defer_after_seconds=0.2,
+    )
+    r = results[0]
+    # 有正确旗（1 旗）且 flag_count=4 未收满 → 必须 defer 而非关题；预算=2+2*1=4
+    assert r.flags_correct >= 1
+    assert r.defer_count >= 1
+    # 多旗 defer 回队：同题被 start 多次（首攻 + defer 后续攻）
+    assert client.started.count("mflag") >= 2
+
+
+def test_run_benchmark_multiflag_closes_when_all_collected() -> None:
+    """V9 多旗收割：旗收满（flags_correct ≥ flag_count）→ 正常关题不再 defer。"""
+    challenges = [FakeChallenge("mfull", total_score=400, flag_count=2)]
+    client = FakeClient(challenges, flags={"mfull": ["flag{alpha}", "flag{beta}"]})
+
+    class FullEngine(FakeEngine):
+        def wait_project(self, project_id: str, timeout_seconds: float) -> bool:
+            return False
+
+        def list_fact_descriptions(self, project_id: str) -> list[str]:
+            return ["found flag flag{alpha}", "found flag flag{beta}"]
+
+    def factory():
+        return FullEngine({"x": ["flag{a}", "flag{b}"]})
+
+    results = run_benchmark(
+        client, factory,
+        challenge_timeout_seconds=0.2, flag_poll_seconds=0.05,
+        defer_after_seconds=0.2,
+    )
+    r = results[0]
+    assert r.flags_correct == 2
+    # 旗收满：正常关题一次，不回队续攻
+    assert client.started.count("mfull") == 1
+    assert r.defer_count == 0
+
+
 def test_run_benchmark_records_first_flag_seconds() -> None:
     """首次正确提交记录 first_flag_seconds（评审'单高危漏洞发现时长'口径）。"""
     from astra_runner.runner import _submit_flag_safely
@@ -540,224 +642,433 @@ def test_window_allows_start_pure_logic() -> None:
     assert window_allows_start(3_800.0, 2_800.0, now=1_000.0) is False
 
 
-def test_render_dispatch_config_dsh_worker(monkeypatch) -> None:
-    """ASTRA_WORKER_TYPE=dsh 生成 dsh worker 配置（DSH_* env + 权限/隔离目录）。"""
-    import pytest
-
+def test_render_dispatch_config_pi_fleet(monkeypatch, tmp_path) -> None:
+    """默认 ASTRA_WORKER_TYPE=pi：execute×2(p0) + decide×1(p1)，agent 目录隔离。"""
     from astra.dispatcher.config import DispatchConfig
     from astra_runner.astra_runner_engine import AstraDaemon
 
-    monkeypatch.setenv("ASTRA_WORKER_TYPE", "dsh")
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
-    monkeypatch.setenv("DSH_MODEL", "deepseek-v4-pro")
-    monkeypatch.setenv("DSH_PATCH", "/opt/astra/dsh/astra-headless.patch.yml")
-    monkeypatch.delenv("ZHIPU_API_KEY", raising=False)
-    monkeypatch.delenv("ASTRA_MIX_PROVIDERS", raising=False)
+    monkeypatch.delenv("ASTRA_WORKER_TYPE", raising=False)
+    monkeypatch.setenv("PI_API_KEY", "sk-test")
+    monkeypatch.setenv("PI_MODEL", "deepseek-v4-flash")
+    monkeypatch.setenv("PI_BASE_URL", "https://api.deepseek.com/anthropic")
+    monkeypatch.setenv("ASTRA_PI_HOME", str(tmp_path / "pi-home"))
+    monkeypatch.setenv("ASTRA_EXECUTE_REPLICAS", "2")
 
     path = AstraDaemon()._render_dispatch_config()
     yaml = path.read_text(encoding="utf-8")
 
-    assert 'type: "dsh"' in yaml
-    assert 'DSH_MODEL: "deepseek-v4-pro"' in yaml
-    assert 'DEEPSEEK_API_KEY: "sk-test"' in yaml
-    assert 'DSH_PERMISSION_MODE: "danger-full-access"' in yaml
-    assert 'DSH_PATCH: "/opt/astra/dsh/astra-headless.patch.yml"' in yaml
-    assert "DSH_HOME:" in yaml
-    # 生成的配置必须通过 dispatcher 同款 schema 校验（含 prompt 资源检查）
+    assert 'type: "pi"' in yaml
+    assert 'PI_MODEL: "deepseek-v4-flash"' in yaml
+    assert 'PI_BASE_URL: "https://api.deepseek.com/anthropic"' in yaml
     config = DispatchConfig.load(path)
-    assert config.workers[0].type == "dsh"
-    assert config.workers[0].env["DSH_MODEL"] == "deepseek-v4-pro"
+    assert [w.name for w in config.workers] == [
+        "deepseek-execute-0", "deepseek-execute-1", "deepseek-decide",
+    ]
+    by_name = {w.name: w for w in config.workers}
+    assert set(by_name["deepseek-execute-0"].task_types) == {"bootstrap", "execute"}
+    assert set(by_name["deepseek-decide"].task_types) == {"decide"}
+    assert by_name["deepseek-execute-0"].priority == 0
+    assert by_name["deepseek-decide"].priority == 1
+    assert by_name["deepseek-execute-0"].max_running == 3
+    env0 = by_name["deepseek-execute-0"].env
+    assert env0["PI_PROVIDER_API"] == "anthropic-messages"
+    assert env0["PI_API_KEY"] == "sk-test"
+    # agent 目录按 worker 隔离（会话复用/续跑依赖稳定路径）
+    assert env0["PI_CODING_AGENT_DIR"].endswith("deepseek-execute-0")
 
 
-def test_render_dispatch_config_dsh_requires_api_key(monkeypatch) -> None:
-    import pytest
-
-    from astra_runner.astra_runner_engine import AstraDaemon
-
-    monkeypatch.setenv("ASTRA_WORKER_TYPE", "dsh")
-    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
-    monkeypatch.delenv("ZHIPU_API_KEY", raising=False)
-    monkeypatch.delenv("ASTRA_MIX_PROVIDERS", raising=False)
-
-    with pytest.raises(RuntimeError, match="DEEPSEEK_API_KEY"):
-        AstraDaemon()._render_dispatch_config()
-
-
-def test_render_dispatch_config_mixed_fleet(monkeypatch) -> None:
-    """DS+GLM 双 key 齐备 → 混合舰队 4 worker（同题多路并进）。"""
+def test_render_dispatch_config_dual_channel_fleet(monkeypatch, tmp_path) -> None:
+    """ZHIPU_API_KEY 存在 → 双通道：DS execute×2 + GLM decide（智谱 anthropic 端点）。"""
     from astra.dispatcher.config import DispatchConfig
     from astra_runner.astra_runner_engine import AstraDaemon
 
-    monkeypatch.setenv("ASTRA_WORKER_TYPE", "dsh")
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-ds-test")
+    monkeypatch.setenv("PI_API_KEY", "sk-ds-test")
     monkeypatch.setenv("ZHIPU_API_KEY", "zk-glm-test")
-    monkeypatch.setenv("DSH_PATCH", "/opt/astra/dsh/astra-headless.patch.yml")
+    monkeypatch.setenv("ASTRA_PI_HOME", str(tmp_path / "pi-home"))
+    monkeypatch.setenv("ASTRA_EXECUTE_REPLICAS", "2")
+    monkeypatch.setenv("ASTRA_DECIDE_TIMEOUT", "900")
 
     path = AstraDaemon()._render_dispatch_config()
     config = DispatchConfig.load(path)
     assert [w.name for w in config.workers] == [
-        "deepseek-main",
-        "glm-main",
-        "glm-reason",
-        "deepseek-fallback",
+        "deepseek-execute-0", "deepseek-execute-1", "glm-decide",
     ]
-    by_name = {w.name: w for w in config.workers}
-    # 探索双通道同优先级（running-count 轮转 → 同题多路不同模型）
-    assert by_name["deepseek-main"].priority == 0
-    assert by_name["glm-main"].priority == 0
-    assert set(by_name["deepseek-main"].task_types) == {"bootstrap", "explore"}
-    assert set(by_name["glm-main"].task_types) == {"bootstrap", "explore"}
-    # 决策走 GLM 深度档，DS 兜底
-    assert by_name["glm-reason"].priority == 1
-    assert by_name["glm-reason"].env["DSH_REASONING_EFFORT"] == "xhigh"
-    assert set(by_name["glm-reason"].task_types) == {"reason", "consolidate"}
-    assert by_name["deepseek-fallback"].priority == 3
-    # 通道与凭据
-    assert by_name["deepseek-main"].env["DSH_PROVIDER"] == "deepseek"
-    assert by_name["glm-main"].env["DSH_PROVIDER"] == "zhipu"
-    assert by_name["glm-main"].env["ZHIPU_API_KEY"] == "zk-glm-test"
-    assert by_name["glm-main"].env["DSH_REASONING_EFFORT"] == "high"
-    assert by_name["glm-main"].env["DSH_MODEL"] == "glm-5.3"
+    by = {w.name: w for w in config.workers}
+    assert set(by["deepseek-execute-0"].task_types) == {"bootstrap", "execute"}
+    assert set(by["glm-decide"].task_types) == {"decide"}
+    # GLM 通道端点/凭据独立
+    assert by["glm-decide"].env["PI_MODEL"] == "glm-5.3"
+    assert "open.bigmodel.cn/api/anthropic" in by["glm-decide"].env["PI_BASE_URL"]
+    assert by["glm-decide"].env["PI_API_KEY"] == "zk-glm-test"
+    assert by["deepseek-execute-0"].env["PI_MODEL"] == "deepseek-v4-flash"
+    # decide 超时放宽（GLM 深思考单轮长，ASTRA_DECIDE_TIMEOUT 默认 900）
+    assert "timeout: 900" in path.read_text(encoding="utf-8")
 
 
-def test_render_dispatch_config_mixed_fleet_disabled(monkeypatch) -> None:
-    """ASTRA_MIX_PROVIDERS=0 强制单 worker（历史行为）。"""
-    from astra.dispatcher.config import DispatchConfig
-    from astra_runner.astra_runner_engine import AstraDaemon
-
-    monkeypatch.setenv("ASTRA_WORKER_TYPE", "dsh")
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-ds-test")
-    monkeypatch.setenv("ZHIPU_API_KEY", "zk-glm-test")
-    monkeypatch.setenv("ASTRA_MIX_PROVIDERS", "0")
-    monkeypatch.setenv("DSH_PATCH", "/opt/astra/dsh/astra-headless.patch.yml")
-
-    path = AstraDaemon()._render_dispatch_config()
-    config = DispatchConfig.load(path)
-    assert [w.name for w in config.workers] == ["deepseek-main"]
-
-
-def test_render_dispatch_config_dsh_anthropic_mode(monkeypatch) -> None:
-    """DSH_PROVIDER=anthropic → ANTHROPIC_* env（Kimi 等 Anthropic 兼容端点）。"""
-    import pytest
-
-    from astra.dispatcher.config import DispatchConfig
-    from astra_runner.astra_runner_engine import AstraDaemon
-
-    monkeypatch.setenv("ASTRA_WORKER_TYPE", "dsh")
-    monkeypatch.setenv("DSH_PROVIDER", "anthropic")
-    monkeypatch.setenv("DSH_MODEL", "k3")
-    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "sk-kimi")
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.kimi.com/coding/")
-
-    path = AstraDaemon()._render_dispatch_config()
-    yaml = path.read_text(encoding="utf-8")
-
-    assert 'type: "dsh"' in yaml
-    assert 'DSH_PROVIDER: "anthropic"' in yaml
-    assert 'ANTHROPIC_AUTH_TOKEN: "sk-kimi"' in yaml
-    assert 'ANTHROPIC_BASE_URL: "https://api.kimi.com/coding/"' in yaml
-    assert "DEEPSEEK_API_KEY" not in yaml
-    config = DispatchConfig.load(path)
-    assert config.workers[0].env["DSH_PROVIDER"] == "anthropic"
-
-
-def test_render_dispatch_config_dsh_anthropic_requires_token(monkeypatch) -> None:
+def test_render_dispatch_config_pi_requires_token(monkeypatch) -> None:
     import pytest
 
     from astra_runner.astra_runner_engine import AstraDaemon
 
-    monkeypatch.setenv("ASTRA_WORKER_TYPE", "dsh")
-    monkeypatch.setenv("DSH_PROVIDER", "anthropic")
-    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("ASTRA_WORKER_TYPE", raising=False)
+    monkeypatch.delenv("PI_API_KEY", raising=False)
 
-    with pytest.raises(RuntimeError, match="ANTHROPIC_AUTH_TOKEN"):
+    with pytest.raises(RuntimeError, match="PI_API_KEY"):
         AstraDaemon()._render_dispatch_config()
 
 
-def _make_session_dir(root: Path, name: str, age_days: float) -> Path:
-    session_dir = root / f"--cwd--" / name
-    session_dir.mkdir(parents=True, exist_ok=True)
-    (session_dir / "session.jsonl.zstd").write_bytes(b"x")
-    old = time.time() - age_days * 86400
-    os.utime(session_dir, (old, old))
-    os.utime(session_dir / "session.jsonl.zstd", (old, old))
-    return session_dir
+def test_render_dispatch_config_rejects_claudecode(monkeypatch) -> None:
+    """claudecode/dsh 已移除：显式 ASTRA_WORKER_TYPE=claudecode 必须硬失败（防旧 env 静默跑错栈）。"""
+    import pytest
 
-
-def test_cleanup_dsh_home_keeps_recent_and_removes_stale(monkeypatch, tmp_path) -> None:
-    """启动清理：保留最近 keep 个会话目录，删除更旧的（只清会话、不碰其他）。"""
     from astra_runner.astra_runner_engine import AstraDaemon
 
-    dsh_home = tmp_path / "dsh-home"
-    sessions = dsh_home / "sessions"
-    _make_session_dir(sessions, "session-old-1", age_days=30)
-    _make_session_dir(sessions, "session-old-2", age_days=20)
-    _make_session_dir(sessions, "session-new", age_days=0.01)
-    # 非会话文件不应被删
-    keep_me = sessions / "keep.txt"
+    monkeypatch.setenv("ASTRA_WORKER_TYPE", "claudecode")
+
+    with pytest.raises(RuntimeError, match="仅 pi"):
+        AstraDaemon()._render_dispatch_config()
+
+
+def test_render_dispatch_config_single_execute_replica(monkeypatch, tmp_path) -> None:
+    from astra.dispatcher.config import DispatchConfig
+    from astra_runner.astra_runner_engine import AstraDaemon
+
+    monkeypatch.setenv("PI_API_KEY", "sk-test")
+    monkeypatch.setenv("ASTRA_PI_HOME", str(tmp_path / "pi-home"))
+    monkeypatch.setenv("ASTRA_EXECUTE_REPLICAS", "1")
+
+    path = AstraDaemon()._render_dispatch_config()
+    config = DispatchConfig.load(path)
+    assert [w.name for w in config.workers] == ["deepseek-execute", "deepseek-decide"]
+
+
+def _make_pi_worker_dir(root: Path, name: str, age_days: float) -> Path:
+    worker_dir = root / name
+    session = worker_dir / "sessions"
+    session.mkdir(parents=True, exist_ok=True)
+    (session / "session-abc.jsonl").write_text("{}", encoding="utf-8")
+    old = time.time() - age_days * 86400
+    os.utime(worker_dir, (old, old))
+    return worker_dir
+
+
+def test_cleanup_pi_agent_dirs_removes_stale_keeps_recent(monkeypatch, tmp_path) -> None:
+    """启动清理：整 worker 目录按 mtime 判定，近期（72h 内）绝不清理。"""
+    from astra_runner.astra_runner_engine import AstraDaemon
+
+    root = tmp_path / "pi-home"
+    root.mkdir()
+    _make_pi_worker_dir(root, "old-worker", age_days=30)
+    recent = _make_pi_worker_dir(root, "live-worker", age_days=0.01)
+    # 非目录文件不应被动
+    keep_me = root / "keep.txt"
     keep_me.write_text("x", encoding="utf-8")
 
-    monkeypatch.setenv("ASTRA_DSH_HOME", str(dsh_home))
-    AstraDaemon._cleanup_dsh_home(keep=1)
+    monkeypatch.setenv("ASTRA_PI_HOME", str(root))
+    AstraDaemon._cleanup_pi_agent_dirs()
 
-    remaining = sorted(p.name for p in sessions.rglob("*") if p.is_dir() and (p / "session.jsonl.zstd").exists())
-    assert remaining == ["session-new"]
+    assert not (root / "old-worker").exists()
+    assert recent.exists()
     assert keep_me.exists()
 
 
-def test_cleanup_dsh_home_noop_when_absent(monkeypatch, tmp_path) -> None:
+def test_cleanup_pi_agent_dirs_noop_when_absent(monkeypatch, tmp_path) -> None:
     from astra_runner.astra_runner_engine import AstraDaemon
 
-    monkeypatch.setenv("ASTRA_DSH_HOME", str(tmp_path / "missing"))
-    AstraDaemon._cleanup_dsh_home()  # 不应抛异常
+    monkeypatch.setenv("ASTRA_PI_HOME", str(tmp_path / "missing"))
+    AstraDaemon._cleanup_pi_agent_dirs()  # 不应抛异常
 
 
-def test_collect_dsh_usage_aggregates_and_tolerates_bad_lines(monkeypatch, tmp_path) -> None:
-    """token 计量：汇总 $DSH_HOME/usage/astra-usage.jsonl，坏行跳过。"""
-    from astra_runner.runner import collect_dsh_usage
+def test_collect_worker_usage_aggregates_and_tolerates_bad_lines(monkeypatch, tmp_path) -> None:
+    """token 计量：汇总 pi 会话 jsonl 的 usage，坏行/缺字段跳过。"""
+    from astra_runner.runner import collect_worker_usage
 
-    usage_dir = tmp_path / "dsh" / "usage"
-    usage_dir.mkdir(parents=True)
-    usage_file = usage_dir / "astra-usage.jsonl"
-    usage_file.write_text(
-        "\n".join(
-            [
-                '{"ts":"t1","session":"s1","inputTokens":100,"outputTokens":20,"cacheReadTokens":10,"cacheWriteTokens":5,"reasoningTokens":3}',
-                '{"ts":"t2","session":"s2","inputTokens":50,"outputTokens":30}',
-                "not-json-line",
-                "",
-            ]
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("ASTRA_DSH_HOME", str(tmp_path / "dsh"))
+    session_dir = tmp_path / "pi-home" / "pi-worker" / "sessions"
+    session_dir.mkdir(parents=True)
+    lines = [
+        '{"message":{"usage":{"input_tokens":100,"output_tokens":20,"cache_read_input_tokens":10,"cache_creation_input_tokens":5}}}',
+        '{"message":{"usage":{"input_tokens":50,"output_tokens":30}}}',
+        "not-json-line",
+        '{"message":{}}',
+        "",
+    ]
+    (session_dir / "a.jsonl").write_text(chr(10).join(lines), encoding="utf-8")
+    monkeypatch.setenv("ASTRA_PI_HOME", str(tmp_path / "pi-home"))
 
-    total = collect_dsh_usage()
+    total = collect_worker_usage()
     assert total["inputTokens"] == 150
     assert total["outputTokens"] == 50
     assert total["cacheReadTokens"] == 10
     assert total["cacheWriteTokens"] == 5
-    assert total["reasoningTokens"] == 3
 
-    # 无文件 → 空 dict
-    monkeypatch.setenv("ASTRA_DSH_HOME", str(tmp_path / "missing"))
-    assert collect_dsh_usage() == {}
+    monkeypatch.setenv("ASTRA_PI_HOME", str(tmp_path / "missing"))
+    assert collect_worker_usage() == {}
 
 
-def test_render_dispatch_config_defaults_to_dsh(monkeypatch) -> None:
-    """默认 ASTRA_WORKER_TYPE=dsh（2026-08-15 翻转：run 9214 因漏带该变量静默
-    回落 claudecode 单模型导致退步，默认值改为 dsh 防再犯）。"""
+def test_render_dispatch_config_defaults_to_pi(monkeypatch, tmp_path) -> None:
+    """默认 ASTRA_WORKER_TYPE=pi（0.2 重建：执行底座只留 pi）。漏带该变量也走正确栈。"""
     from astra_runner.astra_runner_engine import AstraDaemon
 
     monkeypatch.delenv("ASTRA_WORKER_TYPE", raising=False)
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
-    monkeypatch.delenv("ZHIPU_API_KEY", raising=False)
-    monkeypatch.delenv("ASTRA_MIX_PROVIDERS", raising=False)
-    monkeypatch.setenv("DSH_PATCH", "/opt/astra/dsh/astra-headless.patch.yml")
+    monkeypatch.setenv("PI_API_KEY", "sk-test")
+    monkeypatch.setenv("ASTRA_PI_HOME", str(tmp_path / "pi-home"))
 
     path = AstraDaemon()._render_dispatch_config()
     yaml = path.read_text(encoding="utf-8")
 
-    assert 'type: "dsh"' in yaml
-    assert 'DEEPSEEK_API_KEY: "sk-test"' in yaml
+    assert 'type: "pi"' in yaml
+    assert 'PI_API_KEY: "sk-test"' in yaml
     assert "claudecode" not in yaml
+    assert "dsh" not in yaml
+
+
+def test_defer_stops_and_resume_reactivates_project() -> None:
+    """R5 修复清单 P0-1 验收：defer→stop_project；requeue→reactivate_project；上限→delete 不变。"""
+    challenges = [FakeChallenge("d001", total_score=500)]
+    client = FakeClient(challenges)
+
+    class DeferEngine(FakeEngine):
+        def wait_project(self, project_id: str, timeout_seconds: float) -> bool:
+            return False  # 永不归航：走 defer 路径
+
+    # 共享单例：runner 的 defer 分支通过 engine_factory() 再取引擎，生产环境
+    # LocalAstraEngine 是 daemon 单例；测试用同一实例才能观测生命周期调用
+    shared = DeferEngine({})
+
+    def factory():
+        return shared
+
+    results = run_benchmark(
+        client, factory,
+        challenge_timeout_seconds=0.2, flag_poll_seconds=0.05,
+        defer_after_seconds=0.2,
+    )
+    assert results[0].defer_count == 2
+    # defer 时项目被停（防僵尸），resume 时被激活，达上限后被删除
+    assert len(shared.stop_calls) >= 1
+    assert len(shared.reactivate_calls) >= 1
+    assert len(shared.deleted) == 1
+
+
+def test_reconcile_stops_orphan_active_project(monkeypatch) -> None:
+    """R5 修复清单 1b 验收：引擎侧 active 孤儿项目（不在窗口）被对账停掉。"""
+    from datetime import datetime, timedelta, timezone
+
+    challenge = FakeChallenge("r001")
+    client = FakeClient([challenge], flags={"r001": ["flag{reconcile_ok}"]})
+    stale_time = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    fresh_time = (datetime.now(timezone.utc) - timedelta(seconds=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    shared = FakeEngine({"proj-0": ["flag{reconcile_ok}"]})
+
+    class OrphanEngine(FakeEngine):
+        def list_active_projects(self) -> list[dict]:
+            return [
+                {"id": "orphan-1", "created_at": stale_time},   # 老孤儿：应被停
+                {"id": "proj-0", "created_at": fresh_time},     # 窗口内新项目：宽限保护
+            ]
+
+    shared.__class__ = OrphanEngine  # 共享实例叠加孤儿视图（生产引擎是单例）
+
+    monkeypatch.setenv("ASTRA_RECONCILE_INTERVAL", "0.001")  # 每轮都扫（0 是禁用）
+    monkeypatch.setenv("ASTRA_RECONCILE_GRACE", "60")
+
+    def factory():
+        return shared
+
+    results = run_benchmark(client, factory, challenge_timeout_seconds=2, flag_poll_seconds=0.05)
+    assert results[0].flags_correct == 1
+    assert "orphan-1" in shared.stop_calls    # 孤儿被停
+    assert "proj-0" not in shared.stop_calls  # 窗口内项目不动
+
+
+
+# ---------------- V2 修复测试（2026-08-16：run 10089 实证驱动的策略层） ----------------
+
+def test_v2_sanitize_kb_text() -> None:
+    """V2-6 双层脱敏：flag 值正则 + secret 语境的 flag 组件（InterviewAI 教训）。"""
+    from astra_runner.runner import _sanitize_kb_text
+
+    dirty = "Flag 1 = flag{S3cr3t-X}; HR audit value 3e5a7b1c9d2f4e06 leaked"
+    clean = _sanitize_kb_text(dirty)
+    assert "S3cr3t-X" not in clean
+    assert "3e5a7b1c9d2f4e06" not in clean
+    # 无 secret 语境的普通内容不误伤
+    assert _sanitize_kb_text("vulnerability CVE-2024-1234 via upload") == "vulnerability CVE-2024-1234 via upload"
+
+
+def test_v2_expected_budget(tmp_path, monkeypatch) -> None:
+    """V2-7 期望预算：KB 题 2×首解(15min 地板)、近失 20min、无参考按难度。
+
+    V7 TDI：困境信号（错交/defer/参考失灵）按 (1+signal) 放宽预算；无信号时
+    与 V2-7 原值完全一致。stats 指到用例级空目录，隔离共享 tmp 的跨用例污染。
+    """
+    import astra_runner.runner as _R
+
+    monkeypatch.setattr(_R, "MEMORY_STATS_FILE", tmp_path / "stats.json")
+    from astra_runner.runner import (
+        DIFFICULTY_TIMEOUTS,
+        DONE_FLAG_WAIT_SECONDS,
+        _expected_budget_seconds,
+        _task_difficulty_signal,
+    )
+
+    r_kb = ChallengeResult(unique_code="c", description="d")
+    r_kb.kb_seconds = 60
+    assert _task_difficulty_signal(r_kb) == 0.0
+    assert _expected_budget_seconds(r_kb, "hard", 1800) == 900 + DONE_FLAG_WAIT_SECONDS + 30
+    r_fast = ChallengeResult(unique_code="c", description="d")
+    r_fast.kb_seconds = 600
+    assert _expected_budget_seconds(r_fast, "hard", 1800) == 1200 + DONE_FLAG_WAIT_SECONDS + 30
+    r_miss = ChallengeResult(unique_code="c", description="d")
+    r_miss.wrong_count = 2
+    signal = _task_difficulty_signal(r_miss)
+    assert signal == 0.15  # 错交 2 次 → 封顶 0.15
+    assert _expected_budget_seconds(r_miss, "hard", 1800) == 20 * 60 * (1 + signal) + DONE_FLAG_WAIT_SECONDS + 30
+    r_plain = ChallengeResult(unique_code="c", description="d")
+    assert _expected_budget_seconds(r_plain, "easy", 1800) == DIFFICULTY_TIMEOUTS["easy"] + DONE_FLAG_WAIT_SECONDS + 30
+
+
+def test_v2_knowledge_base_parse(tmp_path, monkeypatch) -> None:
+    """V2-6 知识库解析：条目/首解耗时/思路，加载时同步脱敏。"""
+    import astra_runner.runner as runner_mod
+
+    kb_file = tmp_path / "kb.md"
+    kb_file.write_text(
+        "# 已解题思路知识库\n\n"
+        "## Foo（bctf-01）\n"
+        "- 分值/难度：100 / easy ｜ 首解耗时：3min（09:45 解出）\n"
+        "- 思路1：SSRF via nip.io 绕 IP 黑名单\n\n"
+        "## Bar（bctf-02）\n"
+        "- 首解耗时：7min\n"
+        "- 思路1：captured flag{Leak-9f} then revoked\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(runner_mod, "KNOWLEDGE_FILE", kb_file)
+    kb = runner_mod._load_knowledge_base()
+    assert kb["bctf-01"]["seconds"] == 180
+    assert "nip.io" in kb["bctf-01"]["approach"]
+    assert "Leak-9f" not in kb["bctf-02"]["approach"]  # 加载时脱敏
+
+
+def test_v2_order_codes_explicit_priority() -> None:
+    """V2-5：显式顺序置顶（未列题续队）；失配码告警忽略不阻断。"""
+
+    @dataclass
+    class DiffChallenge(FakeChallenge):
+        difficulty: str = "medium"
+
+    c1, c2, c3, c4 = (DiffChallenge(f"bctf-0{i}") for i in range(1, 5))
+    flags = {c.unique_code: ["flag{f}"] for c in (c1, c2, c3, c4)}
+    client = FakeClient([c1, c2, c3, c4], flags=flags)
+    engine = FakeEngine({f"proj-{i}": ["flag{f}"] for i in range(4)})
+    run_benchmark(
+        client,
+        lambda: engine,
+        challenge_timeout_seconds=0.5,
+        flag_poll_seconds=0,
+        defer_after_seconds=5,
+        order_codes=["bctf-03", "bctf-01", "zz-nonexistent"],
+        parallel=2,
+    )
+    # 显式列表前两位置顶启动；失配码 zz-nonexistent 不阻断
+    assert client.started[:2] == ["bctf-03", "bctf-01"]
+    assert set(client.started) == {"bctf-01", "bctf-02", "bctf-03", "bctf-04"}
+
+
+def test_v2_flag_variants_and_wrong_count() -> None:
+    """V2-3：原样错交后自动大小写变体兜底；V2-2：wrong_count 记近失。"""
+    from astra_runner.runner import _submit_flag_safely
+
+    client = FakeClient([FakeChallenge("c1")], flags={"c1": ["FLAG{ABC}" ]})
+    result = ChallengeResult(unique_code="c1", description="d")
+    _submit_flag_safely(client, "c1", "flag{abc} ", result)  # 带空白，原样为小写错
+    assert result.flags_correct == 1
+    assert result.wrong_count >= 1  # 原样错交记为近失信号
+    assert ("c1", "FLAG{ABC}") in client.submitted  # 变体兜底命中
+
+
+def test_v2_hint_cache_store() -> None:
+    """V2-1④：hint 购买即入 result 缓存（defer 续跑复用，禁止重购）。"""
+    from astra_runner.runner import _try_platform_hint
+
+    client = FakeClient([])
+    engine = FakeEngine({})
+    result = ChallengeResult(unique_code="c1", description="d")
+    assert _try_platform_hint(client, engine, "c1", "proj-0", result)
+    assert len(result.hint_texts) == 1
+    assert "platform hint for c1" in result.hint_texts[0]
+
+
+def test_v2_starvation_refill_uses_window() -> None:
+    """V2-7：无窗口模式不回灌（防无限重拉）；带窗口且队列空时回灌已弃题。"""
+    import astra_runner.runner as runner_mod
+
+    @dataclass
+    class HardChallenge(FakeChallenge):
+        difficulty: str = "hard"
+
+    ch = HardChallenge("bctf-x")
+    client = FakeClient([ch])  # 无 flag 可解
+
+    # 无窗口：defer 上限后放弃并自然收尾（不回灌）
+    engine1 = FakeEngine({}, done=False)
+    results1 = run_benchmark(
+        client, lambda: engine1, challenge_timeout_seconds=0.2,
+        flag_poll_seconds=0, defer_after_seconds=0.15, parallel=1,
+    )
+    assert client.started.count("bctf-x") <= runner_mod.MAX_DEFER_PER_CHALLENGE + 1
+    assert results1[0].flags_correct == 0
+
+
+def test_v2_parse_order_codes_cli_and_env() -> None:
+    """V2-5 回归：CLI 值曾因 or 短路被按字符迭代（split 只作用于 env 分支）。"""
+    from astra_runner.runner import _parse_order_codes
+
+    assert _parse_order_codes("bctf-12,bctf-13, bctf-30", None) == ["bctf-12", "bctf-13", "bctf-30"]
+    assert _parse_order_codes(None, "a-01,b-02") == ["a-01", "b-02"]
+    assert _parse_order_codes("c1", "ignored-env") == ["c1"]
+    assert _parse_order_codes(None, None) is None
+    assert _parse_order_codes("", "") is None
+    assert _parse_order_codes(" , ,x ,", None) == ["x"]
+
+
+def test_v2_expected_budget_zero_kb_seconds() -> None:
+    """V2-5/V2-7 回归：0min 首解的 KB 题应走 15min 地板预算（falsy 判空曾错放到难度预算）。"""
+    from astra_runner.runner import DONE_FLAG_WAIT_SECONDS, _expected_budget_seconds
+
+    r = ChallengeResult(unique_code="c", description="d")
+    r.kb_seconds = 0.0
+    assert _expected_budget_seconds(r, "hard", 1800) == 900 + DONE_FLAG_WAIT_SECONDS + 30
+
+
+def test_v2_kb_short_first_attempt(monkeypatch, tmp_path) -> None:
+    """V2-5 运行时缺口回归：KB 题首攻限时（只影响第一次尝试，第二发恢复完整梯子）。"""
+    import time as _time
+
+    import astra_runner.runner as runner_mod
+
+    kb_file = tmp_path / "kb.md"
+    kb_file.write_text(
+        "## Foo（kb-01）\n- 首解耗时：0min\n- 思路1：historical approach\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(runner_mod, "KNOWLEDGE_FILE", kb_file)
+    monkeypatch.setattr(runner_mod, "EXPECTED_BUDGET_FLOOR_SECONDS", 0.5)
+
+    ch = FakeChallenge("kb-01")
+    client = FakeClient([ch])  # 永无可解 flag
+    t0 = _time.monotonic()
+    results = run_benchmark(
+        client,
+        lambda: FakeEngine({}, done=False),
+        challenge_timeout_seconds=0.2,
+        flag_poll_seconds=0,
+        defer_after_seconds=6.0,  # 完整梯子 6s/发；首攻应被压到 0.5s
+        parallel=1,
+    )
+    elapsed = _time.monotonic() - t0
+    # 首攻 0.5s + 第二发 6s + 收尾 < 10s（若首攻也吃满 6s 会 >12s）
+    assert elapsed < 10.0, f"first attack not shortened? elapsed={elapsed:.1f}s"
+    assert client.started.count("kb-01") == 2  # 两发后 defer 上限放弃
+    assert results[0].defer_count == runner_mod.MAX_DEFER_PER_CHALLENGE

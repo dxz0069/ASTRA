@@ -14,11 +14,6 @@ from astra.dispatcher.workers.base import DriverResult, WorkerDriver
 class PiDriver(WorkerDriver):
     type_name = "pi"
 
-    def supports_review(self) -> bool:
-        # 实测 pi 在审查场景偶发提前退出（输出停在 message_start 后 rc=0 退出），
-        # 审查对输出契约稳定性要求高 → 声明不支持，由调度层回退到 claudecode worker。
-        return False
-
     def build_healthcheck(self, worker: WorkerConfig) -> list[str]:
         env = worker.env
         return self._wrap_with_models(
@@ -135,10 +130,23 @@ class PiDriver(WorkerDriver):
                 worker.env.get("PI_CODING_AGENT_DIR")
                 or Path(tempfile.gettempdir()) / "astra-pi" / worker.name
             )
-            base_dir.mkdir(parents=True, exist_ok=True)
-            (base_dir / "sessions").mkdir(exist_ok=True)
-            (base_dir / "models.json").write_text(self._models_json(worker), encoding="utf-8")
-            cli_js = self._pi_cli_js()
+            # 审计修复（CWE-22）：规范化并拒绝显式遍历段（..）——worker.env 虽属受信
+            # 配置面，仍不放过路径逃逸写 models.json 的可能
+            # 审计十一轮：必须查【原始路径】的 parts——resolve() 会把 .. 折叠掉，
+            # 先 resolve 再检查等于永不清真（旧防线是死代码，E:/a/../../escape 直穿）
+            raw_parts = Path(base_dir).parts
+            if ".." in raw_parts:
+                raise RuntimeError(f"PI_CODING_AGENT_DIR must not contain traversal segments: {base_dir}")
+            base_dir = base_dir.resolve()
+            cli_js = self._pi_cli_js()  # 先定位 CLI：缺失 fail-fast 带安装指引
+            try:
+                base_dir.mkdir(parents=True, exist_ok=True)
+                (base_dir / "sessions").mkdir(exist_ok=True)
+                (base_dir / "models.json").write_text(self._models_json(worker), encoding="utf-8")
+            except OSError as exc:
+                raise RuntimeError(
+                    f"pi worker 目录/models.json 写入失败 dir={base_dir}（检查磁盘空间与权限）: {exc}"
+                ) from exc
             return ["node", cli_js, *argv, *pi_argv]
         script = (
             'agent_dir="$1"\n'
@@ -162,7 +170,11 @@ class PiDriver(WorkerDriver):
 
     @staticmethod
     def _pi_cli_js() -> str:
-        """定位 pi 的 node 入口（绕过 npm 的 pi.CMD / 无扩展 shim）。"""
+        """定位 pi 的 node 入口（绕过 npm 的 pi.CMD / 无扩展 shim）。
+
+        审计十一轮：CLI 完全缺失时旧版静默退化为 argv["node","pi",...]，
+        报错是晦涩的 MODULE_NOT_FOUND——现在 fail-fast 给出安装指引。
+        """
         resolved = shutil.which("pi")
         if sys.platform == "win32":
             # Windows：无论 .CMD 还是无扩展 shim，都优先 node_modules 原生 cli.js
@@ -173,16 +185,41 @@ class PiDriver(WorkerDriver):
                 cli = candidate / "node_modules" / "@mariozechner" / "pi-coding-agent" / "dist" / "cli.js"
                 if cli.exists():
                     return str(cli)
+            if not resolved:
+                raise RuntimeError(
+                    "pi CLI 未安装：npm install -g @mariozechner/pi-coding-agent"
+                    "（找不到 pi 命令，也无 node_modules 入口）"
+                )
+        if not resolved:
+            raise RuntimeError(
+                "pi CLI 未安装：npm install -g @mariozechner/pi-coding-agent（PATH 中无 pi）"
+            )
         return resolved or "pi"
 
     @staticmethod
     def _prompt_arg(prompt: str) -> str:
-        """Windows 下 prompt 写入临时文件并以 @file 传入（命令行长度/转义安全）。"""
+        """Windows 下 prompt 写入临时文件并以 @file 传入（命令行长度/转义安全）。
+
+        写前顺手清理 1 小时前的旧 prompt 文件（长跑防泄漏：Windows 每任务一个文件，
+        24h 高频跑可积累上万；pi 不负责回收，只能生产者自理）。清理失败静默。
+        """
         if sys.platform != "win32":
             return prompt
         import tempfile
+        import time
 
-        path = Path(tempfile.gettempdir()) / f"astra-pi-prompt-{uuid.uuid4().hex[:8]}.txt"
+        root = Path(tempfile.gettempdir())
+        try:
+            cutoff = time.time() - 3600
+            for stale in root.glob("astra-pi-prompt-*.txt"):
+                try:
+                    if stale.stat().st_mtime < cutoff:
+                        stale.unlink(missing_ok=True)
+                except OSError:
+                    continue
+        except OSError:
+            pass
+        path = root / f"astra-pi-prompt-{uuid.uuid4().hex[:8]}.txt"
         path.write_text(prompt, encoding="utf-8")
         return "@" + str(path)
 
@@ -249,6 +286,8 @@ class PiDriver(WorkerDriver):
             if isinstance(parsed, dict):
                 model["compat"] = parsed
 
+        # PI_PROVIDER_API 取值以 pi-ai 实现为准（spike 实证 2026-08-30）：
+        # anthropic 协议端点 = "anthropic-messages"；openai 系 = "openai-completions"/"openai-responses"
         provider: dict[str, Any] = {
             "baseUrl": env["PI_BASE_URL"],
             "api": env["PI_PROVIDER_API"],

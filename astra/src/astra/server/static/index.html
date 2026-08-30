@@ -61,7 +61,7 @@
     <circle cx="12" cy="20" r="2" fill="oklch(0.82 0.115 200 / 0.7)"/>
     <circle cx="14" cy="50" r="2.5" fill="oklch(0.93 0.008 220 / 0.6)"/>
   </svg>
-  <span class="brand">astra<small>星图 · 星尘记忆 · 双星决策</small></span>
+  <span class="brand">astra<small>星图 · 玉衡摇光 · 北斗导航</small></span>
   <div class="spacer"></div>
   <span class="sync-pill" :class="refreshing && 'busy'"><span class="pulse"></span><span x-text="refreshing ? '同步中' : '已连接 · 5s 轮询'"></span></span>
   <button class="btn glass-chip refract" @click="refreshAll()" :disabled="refreshing">
@@ -99,7 +99,7 @@
           </div>
           <div class="s">
             <span x-text="p.id + ' · ' + statusText(p.status)"></span>
-            <span x-text="p.fact_count + ' 星记 / ' + p.hint_count + ' 指引'"></span>
+            <span x-text="p.fact_count + ' 天枢 / ' + p.step_count + ' 斗柄 / ' + p.hint_count + ' 指引'"></span>
           </div>
         </button></li>
       </template>
@@ -112,7 +112,7 @@
   <section id="center">
     <div class="stage-title" x-show="current">
       <span class="pt" x-text="current ? current.project.title : ''"></span>
-      <span class="ps" x-text="current ? `${current.facts.length} 星记 · ${current.intents.length} 航向 · ${statusText(current.project.status)}` : ''"></span>
+      <span class="ps" x-text="current ? `${current.facts.length} 天枢 · ${current.steps.length} 斗柄 · ${statusText(current.project.status)}` : ''"></span>
     </div>
     <div class="graph-search glass-chip" x-show="current">
       <svg><use href="#i-search"/></svg>
@@ -130,11 +130,10 @@
     <div class="legend glass-chip refract">
       <span class="lg"><span class="sw" style="background:oklch(0.62 0.018 220)"></span>起点</span>
       <span class="lg"><span class="sw" style="background:var(--goal)"></span>目标</span>
-      <span class="lg"><span class="sw" style="background:var(--accent)"></span>星记</span>
-      <span class="lg"><span class="sw ring" style="border-color:var(--accent)"></span>航向</span>
-      <span class="lg"><span class="sw ring" style="border-color:var(--ok)"></span>高置信</span>
-      <span class="lg"><span class="sw ring" style="border-color:var(--warn)"></span>中置信</span>
-      <span class="lg"><span class="sw ring" style="border-color:var(--bad)"></span>低置信</span>
+      <span class="lg"><span class="sw" style="background:var(--accent)"></span>天枢</span>
+      <span class="lg"><span class="sw ring" style="border-color:var(--accent)"></span>斗柄</span>
+      <span class="lg"><span class="sw ring" style="border-color:var(--ink-faint)"></span>负结果</span>
+      <span class="lg"><span class="sw ring" style="border-color:var(--ok)"></span>已归航</span>
     </div>
     <div class="stage-empty" x-show="!current">
       <svg class="glyph" viewBox="0 0 120 120" fill="none" aria-hidden="true">
@@ -149,7 +148,7 @@
         <circle cx="22" cy="34" r="1.6" fill="oklch(0.82 0.115 200 / 0.5)"/>
       </svg>
       <div class="et">选择一片星域，点亮星图</div>
-      <div class="es">星图呈现从起点到目标的全部星记与航向；探索过程中的发现会实时汇聚于此。</div>
+      <div class="es">星图呈现从起点到北辰的全部天枢与斗柄；沿途的客星会实时汇聚于此。</div>
       <button class="btn btn-accent" @click="openCreate()" x-show="projects.length===0">
         <svg><use href="#i-plus"/></svg><span>新建星域</span>
       </button>
@@ -160,7 +159,7 @@
   <aside id="right" class="glass">
     <div class="tabs">
       <button :class="tab==='detail' && 'on'" @click="tab='detail'"><svg><use href="#i-doc"/></svg>详情</button>
-      <button :class="tab==='trace' && 'on'" @click="tab='trace'"><svg><use href="#i-activity"/></svg>审查轨迹</button>
+      <button :class="tab==='trace' && 'on'" @click="tab='trace'"><svg><use href="#i-activity"/></svg>轨迹</button>
       <button :class="tab==='guide' && 'on'" @click="tab='guide'"><svg><use href="#i-compass"/></svg>指引</button>
     </div>
     <div class="body">
@@ -170,27 +169,23 @@
           <div>
             <div class="kv"><span class="k">类型</span><span class="v">
               <span class="badge" :class="nodeBadgeClass(selectedNode)" x-text="nodeTypeLabel(selectedNode)"></span>
-              <span class="badge summary" x-show="selectedNode.data.kind==='summary'">摘要</span>
-              <span class="badge challenged" x-show="selectedNode.data.challenged">被质询</span>
+              <span class="badge summary" x-show="selectedNode.data.kind==='negative'">负结果</span>
+              <span class="badge summary" x-show="selectedNode.data.status==='closed'">已关闭</span>
             </span></div>
             <div class="kv" x-show="selectedNode.data.nodeId && selectedNode.data.nodeId!=='goal' && selectedNode.data.nodeId!=='origin'"><span class="k">编号</span><span class="v mono" x-text="selectedNode.data.nodeId"></span></div>
-            <div class="kv" x-show="selectedNode.data.confidence"><span class="k">置信度</span><span class="v"><span class="badge" :class="selectedNode.data.confidence" x-text="confidenceText(selectedNode.data.confidence)"></span></span></div>
             <div class="kv" x-show="selectedNode.data.worker"><span class="k">执行者</span><span class="v mono" x-text="selectedNode.data.worker"></span></div>
             <div class="sec-t">内容</div>
             <div class="kv"><span class="v" x-text="selectedNode.data.description" style="white-space:pre-wrap"></span></div>
-            <template x-if="selectedNode.data.evidence">
+            <template x-if="selectedNode.data.expect">
               <div>
-                <div class="sec-t">证据（可重放）</div>
-                <div class="evidence-wrap">
-                  <div class="evidence" x-text="selectedNode.data.evidence"></div>
-                  <button class="copy-btn" title="复制证据" @click="copyEvidence(selectedNode.data.evidence)"><svg><use href="#i-copy"/></svg></button>
-                </div>
+                <div class="sec-t">预期产出</div>
+                <div class="kv"><span class="v" x-text="selectedNode.data.expect" style="white-space:pre-wrap"></span></div>
               </div>
             </template>
             <div class="action-col">
               <button class="btn glass-chip" @click="locateNode()"><svg><use href="#i-locate"/></svg>在星图中定位</button>
-              <template x-if="selectedNode.data.nodeType==='intent' && !selectedNode.data.to">
-                <button class="btn btn-accent" @click="openConclude(selectedNode.data)"><svg><use href="#i-anchor"/></svg>归航此航向</button>
+              <template x-if="selectedNode.data.nodeType==='step' && !selectedNode.data.to && selectedNode.data.status!=='closed'">
+                <button class="btn btn-accent" @click="openConclude(selectedNode.data)"><svg><use href="#i-anchor"/></svg>归航此斗柄</button>
               </template>
             </div>
           </div>
@@ -200,10 +195,10 @@
             <div class="sec-t" style="margin-top:0">星域</div>
             <div class="kv"><span class="k">标题</span><span class="v" x-text="current.project.title"></span></div>
             <div class="kv"><span class="k">状态</span><span class="v"><span class="badge" :class="statusBadgeClass(current.project.status)" x-text="statusText(current.project.status)"></span></span></div>
-            <div class="kv" x-show="current.project.reason"><span class="k">定航</span><span class="v mono" x-text="current.project.reason ? current.project.reason.worker : ''"></span></div>
+            <div class="kv" x-show="current.project.decide"><span class="k">玉衡</span><span class="v mono" x-text="current.project.decide ? current.project.decide.worker : ''"></span></div>
             <div class="action-col">
-              <button class="btn btn-accent" @click="openComplete()"><svg><use href="#i-star"/></svg>归航 · 宣告目标达成</button>
-              <button class="btn glass-chip" @click="openCreateIntent()"><svg><use href="#i-send"/></svg>声明航向</button>
+              <button class="btn btn-accent" @click="openComplete()"><svg><use href="#i-star"/></svg>抵达北辰 · 宣告归航</button>
+              <button class="btn glass-chip" @click="openCreateStep()"><svg><use href="#i-send"/></svg>开辟斗柄</button>
               <button class="btn glass-chip" @click="openAddHint()"><svg><use href="#i-compass"/></svg>添加指引</button>
               <div class="action-sep">运维</div>
               <button class="btn glass-chip" @click="setStatus('active')" x-show="current.project.status!=='active'"><svg><use href="#i-play"/></svg>激活星域</button>
@@ -216,6 +211,14 @@
             <div class="kv"><span class="v mono" x-text="originDesc()"></span></div>
             <div class="sec-t">目标</div>
             <div class="kv"><span class="v" x-text="goalDesc()"></span></div>
+            <div class="sec-t" x-show="current.subgoals && current.subgoals.filter(s=>s.status==='active').length">星宿</div>
+            <template x-for="sg in (current.subgoals||[]).filter(s=>s.status==='active')" :key="sg.id">
+              <div class="kv"><span class="k mono" x-text="sg.id"></span><span class="v" x-text="sg.description"></span></div>
+            </template>
+            <div class="sec-t" x-show="current.findings && current.findings.length">客星（Finding）</div>
+            <template x-for="fd in current.findings||[]" :key="fd.id">
+              <div class="kv"><span class="k mono" x-text="fd.id"></span><span class="v" x-text="fd.description"></span></div>
+            </template>
           </div>
         </template>
         <div class="empty" x-show="!current">选择左侧星域查看详情</div>
@@ -231,8 +234,8 @@
             </div>
           </template>
         </div>
-        <div class="empty" x-show="current && traceItems().length===0">暂无审查/学习记录</div>
-        <div class="empty" x-show="!current">选择星域查看审查轨迹</div>
+        <div class="empty" x-show="current && traceItems().length===0">暂无记录</div>
+        <div class="empty" x-show="!current">选择星域查看轨迹</div>
       </div>
 
       <!-- 指引 -->
@@ -246,7 +249,7 @@
                 <div class="hm" x-text="h.creator + ' · ' + h.created_at"></div>
               </div>
             </template>
-            <div class="empty" x-show="current.hints.length===0">暂无指引<br>指引会注入探索者的上下文，影响航向选择</div>
+            <div class="empty" x-show="current.hints.length===0">暂无指引<br>指引会注入执行者的上下文，影响斗柄选择</div>
           </div>
         </template>
       </div>
@@ -264,47 +267,48 @@
       <div class="form-row"><label>目标（Goal）</label><textarea x-model="createForm.goal" placeholder="目标描述…"></textarea></div>
       <div class="form-row"><label>指引（可选）</label><textarea x-model="createForm.hints" placeholder="每行一条"></textarea></div>
       <div class="form-row"><label class="check-row"><input type="checkbox" x-model="createForm.bootstrap"><span>启用首探</span></label></div>
-      <div class="foot"><button class="btn glass-chip" @click="modal=null">取消</button><button class="btn btn-accent" @click="createProject()">创建</button></div>
+      <div class="foot"><button class="btn glass-chip" @click="modal=null">取消</button><button class="btn btn-accent" :disabled="actionBusy" @click="createProject()">创建</button></div>
     </div>
   </div>
 </template>
 
-<!-- 模态：声明航向 -->
-<template x-if="modal==='intent'">
+<!-- 模态：开辟斗柄 -->
+<template x-if="modal==='step'">
   <div class="modal-mask" @click.self="modal=null">
     <div class="modal">
-      <h2><svg><use href="#i-send"/></svg>声明航向</h2>
-      <div class="form-row"><label>源自星记（可多选）</label>
+      <h2><svg><use href="#i-send"/></svg>开辟斗柄</h2>
+      <div class="form-row"><label>源自天枢（可多选）</label>
         <div class="chips">
           <template x-for="f in selectableFacts()" :key="f.id">
-            <span class="chip" :class="intentFrom.includes(f.id) && 'on'" tabindex="0" @click="toggleIntentFrom(f.id)" @keydown.enter="toggleIntentFrom(f.id)" x-text="f.id"></span>
+            <span class="chip" :class="stepFrom.includes(f.id) && 'on'" tabindex="0" @click="toggleStepFrom(f.id)" @keydown.enter="toggleStepFrom(f.id)" x-text="f.id"></span>
           </template>
         </div>
       </div>
-      <div class="form-row"><label>航向描述</label><textarea x-model="intentForm.description" placeholder="探索方向…"></textarea></div>
-      <div class="foot"><button class="btn glass-chip" @click="modal=null">取消</button><button class="btn btn-accent" @click="createIntent()">声明</button></div>
+      <div class="form-row"><label>斗柄指向</label><textarea x-model="stepForm.description" placeholder="要探索的方向…"></textarea></div>
+      <div class="form-row"><label>预期天枢（可选）</label><textarea x-model="stepForm.expect" placeholder="预期产出哪条新天枢…"></textarea></div>
+      <div class="foot"><button class="btn glass-chip" @click="modal=null">取消</button><button class="btn btn-accent" :disabled="actionBusy" @click="createStep()">创建</button></div>
     </div>
   </div>
 </template>
 
-<!-- 模态：归航此航向 -->
+<!-- 模态：归航此斗柄 -->
 <template x-if="modal==='conclude'">
   <div class="modal-mask" @click.self="modal=null">
     <div class="modal">
-      <h2><svg><use href="#i-anchor"/></svg>归航此航向</h2>
-      <div class="form-row"><label>航向</label><input type="text" disabled :value="concludeForm.intentId"></div>
-      <div class="form-row"><label>结论星记</label><textarea x-model="concludeForm.description" placeholder="确认的发现…（含 flag{...} 时必含完整字符串）"></textarea></div>
-      <div class="foot"><button class="btn glass-chip" @click="modal=null">取消</button><button class="btn btn-accent" @click="concludeIntent()">写回</button></div>
+      <h2><svg><use href="#i-anchor"/></svg>归航此斗柄</h2>
+      <div class="form-row"><label>斗柄</label><input type="text" disabled :value="concludeForm.stepId"></div>
+      <div class="form-row"><label>结论天枢</label><textarea x-model="concludeForm.description" placeholder="确认的发现…"></textarea></div>
+      <div class="foot"><button class="btn glass-chip" @click="modal=null">取消</button><button class="btn btn-accent" :disabled="actionBusy" @click="concludeStep()">写回</button></div>
     </div>
   </div>
 </template>
 
-<!-- 模态：归航 -->
+<!-- 模态：完成 -->
 <template x-if="modal==='complete'">
   <div class="modal-mask" @click.self="modal=null">
     <div class="modal">
-      <h2><svg><use href="#i-star"/></svg>归航（宣告目标达成）</h2>
-      <div class="form-row"><label>证据星记</label>
+      <h2><svg><use href="#i-star"/></svg>归航（宣告抵达北辰）</h2>
+      <div class="form-row"><label>完成依据天枢</label>
         <div class="chips">
           <template x-for="f in selectableFacts()" :key="f.id">
             <span class="chip" :class="completeFrom.includes(f.id) && 'on'" tabindex="0" @click="toggleCompleteFrom(f.id)" @keydown.enter="toggleCompleteFrom(f.id)" x-text="f.id"></span>
@@ -312,7 +316,7 @@
         </div>
       </div>
       <div class="form-row"><label>完成说明</label><textarea x-model="completeForm.description" placeholder="为什么足以证明目标达成…"></textarea></div>
-      <div class="foot"><button class="btn glass-chip" @click="modal=null">取消</button><button class="btn btn-accent" @click="completeProject()">宣告归航</button></div>
+      <div class="foot"><button class="btn glass-chip" @click="modal=null">取消</button><button class="btn btn-accent" :disabled="actionBusy" @click="completeProject()">宣告归航</button></div>
     </div>
   </div>
 </template>
@@ -323,7 +327,7 @@
     <div class="modal">
       <h2><svg><use href="#i-compass"/></svg>添加指引</h2>
       <div class="form-row"><label>指引内容</label><textarea x-model="hintForm.content" placeholder="如：目标为 WAF 后的登录业务，尝试 multipart 绕过…"></textarea></div>
-      <div class="foot"><button class="btn glass-chip" @click="modal=null">取消</button><button class="btn btn-accent" @click="addHint()">添加</button></div>
+      <div class="foot"><button class="btn glass-chip" @click="modal=null">取消</button><button class="btn btn-accent" :disabled="actionBusy" @click="addHint()">添加</button></div>
     </div>
   </div>
 </template>
@@ -333,9 +337,9 @@
   <div class="modal-mask" @click.self="modal=null">
     <div class="modal">
       <h2><svg><use href="#i-sliders"/></svg>设置</h2>
-      <div class="form-row"><label>航向超时（秒）</label><input type="number" x-model.number="settingsForm.intent_timeout"></div>
-      <div class="form-row"><label>定航超时（秒）</label><input type="number" x-model.number="settingsForm.reason_timeout"></div>
-      <div class="foot"><button class="btn glass-chip" @click="modal=null">取消</button><button class="btn btn-accent" @click="saveSettings()">保存</button></div>
+      <div class="form-row"><label>斗柄超时（秒）</label><input type="number" x-model.number="settingsForm.step_timeout"></div>
+      <div class="form-row"><label>玉衡超时（秒）</label><input type="number" x-model.number="settingsForm.decide_timeout"></div>
+      <div class="foot"><button class="btn glass-chip" @click="modal=null">取消</button><button class="btn btn-accent" :disabled="actionBusy" @click="saveSettings()">保存</button></div>
     </div>
   </div>
 </template>
@@ -345,8 +349,8 @@
   <div class="modal-mask" @click.self="modal=null">
     <div class="modal">
       <h2 class="warn"><svg><use href="#i-alert"/></svg>删除星域</h2>
-      <div class="sub">将永久删除 <b class="mono" x-text="current ? current.project.title : ''"></b> 及其全部星记、航向与指引，此操作不可恢复。</div>
-      <div class="foot"><button class="btn glass-chip" @click="modal=null">取消</button><button class="btn btn-accent" style="background:var(--bad);box-shadow:none" @click="deleteProject()">确认删除</button></div>
+      <div class="sub">将永久删除 <b class="mono" x-text="current ? current.project.title : ''"></b> 及其全部天枢、斗柄与指引，此操作不可恢复。</div>
+      <div class="foot"><button class="btn glass-chip" @click="modal=null">取消</button><button class="btn btn-accent" style="background:var(--bad);box-shadow:none" :disabled="actionBusy" @click="deleteProject()">确认删除</button></div>
     </div>
   </div>
 </template>

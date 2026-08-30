@@ -18,10 +18,10 @@ USER kali
 RUN sudo apt update && \
     sudo apt install -y bsdextrautils npm jq iputils-ping sshpass ncat rlwrap \
     bloodyad coercer enum4linux-ng pwncat chisel-common-binaries \
-    dirsearch yq krb5-user gitleaks naabu nikto netexec adb && \
+    dirsearch yq krb5-user gitleaks naabu nikto netexec adb python3-pwntools && \
     sudo apt clean && \
     sudo rm -rf /var/lib/apt/lists/* && \
-    sudo apt install -y python3-pwntools && pip3 install pymongo --break-system-packages && \
+    pip3 install pymongo --break-system-packages && \
     sudo npm install -g @playwright/cli@latest && \
     cd /tmp && playwright-cli install
 
@@ -92,20 +92,13 @@ COPY ./astra /opt/astra
 RUN cd /opt/astra && pip3 install uv_build --break-system-packages && pip3 install . --break-system-packages
 RUN pip3 install tsec-benchmark --break-system-packages
 COPY ./container/astra_runner /opt/astra-runner
-# ASTRA 定制的 dsh headless 扩展（--session 会话续接，见 container/dsh/README.md）
-COPY ./container/dsh /opt/astra/dsh
 
 # 镜像默认入口：astra-runner（本地模式可手动执行 python3 /opt/astra-runner/runner.py）
 ENTRYPOINT ["python3", "/opt/astra-runner/runner.py"]
 
-RUN sudo npm install -g @openai/codex@0.118.0
-RUN sudo npm install -g @anthropic-ai/claude-code@2.1.98
+# 2026-08-29 v0.2 FGS 重建：执行底座只留 pi（最原始、完全可控——Less is More）；
+# codex / claude-code / playwright-mcp 全部移除。托管出包请用 Dockerfile.slim（本文件为本地全量开发镜像）。
 RUN sudo npm install -g @mariozechner/pi-coding-agent@0.73.0
-# DeepSeek Harness 无头模式 + ASTRA runner 插件（复制进 dsh 包 lib/，供 --patch 以裸说明符加载）
-RUN sudo npm install -g @deepseek-ai/dsh@0.1.0-rc.6 && \
-    sudo cp /opt/astra/dsh/astra-headless-runner.js "$(sudo npm root -g)/@deepseek-ai/dsh/lib/astra-headless-runner.js"
-# Playwright MCP（headless 通过 mcp-client 接入，Web 类题目用真实浏览器；npx -y 现场下载的替代）
-RUN sudo npm install -g @playwright/mcp@latest
 
 RUN sudo chmod +x /usr/local/bin/kerbrute
 RUN mkdir -p /home/kali/.config/nuclei && \
@@ -117,14 +110,11 @@ RUN sudo rm -rf /usr/lib/llvm-*/build && \
     sudo chmod o+rx /usr/lib/mysql/plugin/auth_pam_tool_dir /etc/ssl/private
 RUN printf '%s\n' 'PS1="${PS1%\\n*} \[\033[0;36m\]\D{%y-%m-%d} - \t\[\033[;32m\]\n${PS1##*\\n}"' >> /home/kali/.bashrc && \
     mkdir -p /home/kali/workspace && cd /home/kali/workspace && git init
+ENV PATH="/home/kali/.local/bin:${PATH}"
 ENV TZ=Asia/Shanghai
-ENV PLAYWRIGHT_MCP_BROWSER=chromium
-ENV CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 ENV PYTHONUNBUFFERED=1
 
 COPY ./container/.agents /home/kali/workspace/.agents
-COPY ./container/.agents /home/kali/workspace/.claude
 COPY ./container/AGENTS.md /home/kali/workspace/AGENTS.md
-COPY ./container/AGENTS.md /home/kali/workspace/CLAUDE.md
 
 WORKDIR /home/kali/workspace

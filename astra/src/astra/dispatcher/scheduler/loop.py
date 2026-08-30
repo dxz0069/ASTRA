@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
@@ -9,24 +10,23 @@ from pathlib import Path
 import requests
 
 from astra.dispatcher.config import DispatchConfig, WorkerConfig
-from astra.dispatcher.models import ReasonCheckpoint, RunningTask
+from astra.dispatcher.models import DecideCheckpoint, RunningTask
 from astra.dispatcher.protocol.client import ASTRAClient
 from astra.dispatcher.runtime.cancellation import TaskCancellation
 from astra.dispatcher.runtime.local_containers import build_container_manager
 from astra.dispatcher.runtime.startup_healthcheck import format_failure_summary, run_startup_healthchecks
 from astra.dispatcher.scheduler.worker_select import choose_worker
 from astra.dispatcher.tasks.bootstrap import run_bootstrap_task
-from astra.dispatcher.tasks.consolidate import SUMMARY_KIND, run_consolidate_task
-from astra.dispatcher.tasks.explore import run_explore_task
-from astra.dispatcher.tasks.reason import run_reason_task
-from astra.server.models import Intent, ProjectDetail, ProjectSummary
+from astra.dispatcher.tasks.execute import run_execute_task
+from astra.dispatcher.tasks.decide import run_decide_task
+from astra.server.models import Step, ProjectDetail, ProjectSummary
 
 LOG = logging.getLogger(__name__)
 UNHEALTHY_RETRY_AFTER_SECONDS = 5
 REJECTED_RETRY_AFTER_SECONDS = 5
 FAILED_RETRY_AFTER_SECONDS = 15
-BOOTSTRAP_INTENT_DESCRIPTION = "bootstrap"
-BOOTSTRAP_INTENT_CREATOR = "dispatcher.bootstrap"
+BOOTSTRAP_STEP_DESCRIPTION = "bootstrap"
+BOOTSTRAP_STEP_CREATOR = "dispatcher.bootstrap"
 
 
 @dataclass(slots=True)
@@ -48,7 +48,7 @@ class DispatcherLoop:
         self.cleanup_executor = ThreadPoolExecutor(max_workers=max(1, min(8, self.config.runtime.max_workers)))
         self.futures: dict[Future[str], RunningTask] = {}
         self.cleanup_futures: dict[Future[bool], tuple[str, str | None, str | None]] = {}
-        self.reason_checkpoints: dict[str, ReasonCheckpoint] = {}
+        self.decide_checkpoints: dict[str, DecideCheckpoint] = {}
         self.runtime_project_ids: set[str] = set()
         self.worker_unhealthy_until: dict[str, float] = {}
         self.worker_rejected_until: dict[tuple[str, str, str], float] = {}
@@ -82,7 +82,7 @@ class DispatcherLoop:
                     self._reap_futures()
                     self._reap_cleanup_futures()
                     summaries = self.client.list_projects()
-                    self._initialize_reason_checkpoints(summaries)
+                    self._initialize_decide_checkpoints(summaries)
                     self._refresh_runtime_projects(summaries)
                     self._cancel_inactive_tasks(summaries)
                     self._queue_container_cleanups(summaries)
@@ -215,67 +215,65 @@ class DispatcherLoop:
             )
             return False
         if self._is_initial_project(project):
-            if project.project.reason is not None:
+            if project.project.decide is not None:
                 return False
             if self._project_requires_bootstrap(project):
                 return self._dispatch_initial_project(project)
             export_yaml = self.client.export_project(summary.id)
-            return self._dispatch_reason(project, export_yaml, "initial")
-        if project.project.reason is None:
-            reason_trigger = self._reason_trigger(project)
-            if reason_trigger is not None:
+            return self._dispatch_decide(project, export_yaml, "initial")
+        if project.project.decide is None:
+            decide_trigger = self._decide_trigger(project)
+            if decide_trigger is not None:
                 export_yaml = self.client.export_project(summary.id)
-                return self._dispatch_reason(project, export_yaml, reason_trigger)
-        if self._consolidation_trigger(project):
-            export_yaml = self.client.export_project(summary.id)
-            return self._dispatch_consolidate(project, export_yaml)
-        running_intent_ids = self._project_running_explore_intents(summary.id)
-        unclaimed_intents = [
-            intent
-            for intent in project.intents
-            if intent.to is None
-            and intent.worker is None
-            and intent.id not in running_intent_ids
-            and not self._is_bootstrap_intent(intent)
+                return self._dispatch_decide(project, export_yaml, decide_trigger)
+        running_step_ids = self._project_running_execute_steps(summary.id)
+        unclaimed_steps = [
+            step
+            for step in project.steps
+            if step.to is None
+            and step.status == "open"
+            and step.worker is None
+            and step.id not in running_step_ids
+            and not self._is_bootstrap_step(step)
         ]
-        if running_intent_ids and not unclaimed_intents:
+        if running_step_ids and not unclaimed_steps:
             self._log_changed(
-                f"{skip_scope}:explore_running",
+                f"{skip_scope}:execute_running",
                 logging.DEBUG,
-                "skip explore project=%s because all unclaimed intents are already running locally intents=%s",
+                "skip execute project=%s because all unclaimed steps are already running locally steps=%s",
                 summary.id,
-                sorted(running_intent_ids),
+                sorted(running_step_ids),
             )
-        if unclaimed_intents:
-            newest = max(unclaimed_intents, key=lambda i: i.created_at)
+        if unclaimed_steps:
+            newest = max(unclaimed_steps, key=lambda i: i.created_at)
             export_yaml = self.client.export_project(summary.id)
-            return self._dispatch_explore(project, export_yaml, newest)
-        if project.project.reason is not None:
+            return self._dispatch_execute(project, export_yaml, newest)
+        if project.project.decide is not None:
             self._log_changed(
-                f"{skip_scope}:reason_claimed",
+                f"{skip_scope}:decide_claimed",
                 logging.DEBUG,
-                "skip reason project=%s because reason is already claimed by %s",
+                "skip decide project=%s because decide is already claimed by %s",
                 summary.id,
-                project.project.reason.worker,
+                project.project.decide.worker,
             )
             return False
         self._log_changed(
             f"{skip_scope}:graph_unchanged",
             logging.DEBUG,
-            "skip reason project=%s because reason state unchanged facts=%s hints=%s open_intents=%s intents=%s",
+            "skip decide project=%s because decide state unchanged facts=%s hints=%s open_steps=%s steps=%s",
             summary.id,
             len(project.facts),
             len(project.hints),
-            self._project_open_intent_count(project),
-            len(project.intents),
+            self._project_open_step_count(project),
+            len(project.steps),
         )
         return False
 
     def _dispatch_initial_project(self, project: ProjectDetail) -> bool:
-        intent = self._get_bootstrap_intent(project)
-        if intent is None:
-            intent = self._create_bootstrap_intent(project.project.id)
-            if intent is None:
+        step = self._get_bootstrap_step(project)
+        if step is None:
+            step = self._create_bootstrap_step(project.project.id)
+            if step is None:
                 return False
         if self._project_has_running_bootstrap(project.project.id):
             self._log_changed(
@@ -285,85 +283,39 @@ class DispatcherLoop:
                 project.project.id,
             )
             return False
-        if intent.worker is not None:
+        if step.worker is not None:
             self._log_changed(
                 f"project:{project.project.id}:skip:bootstrap_claimed",
                 logging.DEBUG,
-                "skip bootstrap project=%s because bootstrap intent=%s is already claimed by %s",
+                "skip bootstrap project=%s because bootstrap step=%s is already claimed by %s",
                 project.project.id,
-                intent.id,
-                intent.worker,
+                step.id,
+                step.worker,
             )
             return False
-        return self._dispatch_bootstrap(project, intent)
+        return self._dispatch_bootstrap(project, step)
 
-    def _consolidation_trigger(self, project: ProjectDetail) -> bool:
-        """星尘记忆触发：regular 星记数超过内联预算的两倍时整理。"""
-        budget = self.config.runtime.context_budget
-        threshold = budget.max_inline_facts * 2
-        regular_count = sum(
-            1
-            for fact in project.facts
-            if fact.id not in ("goal", "origin") and fact.kind != SUMMARY_KIND
-        )
-        return regular_count > threshold
-
-    def _dispatch_consolidate(self, project: ProjectDetail, export_yaml: str) -> bool:
-        selection = self._select_worker(project.project.id, "consolidate")
+    def _dispatch_decide(self, project: ProjectDetail, export_yaml: str, trigger: str) -> bool:
+        selection = self._select_worker(project.project.id, "decide")
         worker = selection.worker
         if worker is None:
             self._log_changed(
-                f"project:{project.project.id}:worker:consolidate",
+                f"project:{project.project.id}:worker:decide",
                 logging.INFO,
-                "no worker available for consolidate project=%s blocked_busy=%s blocked_unhealthy=%s blocked_rejected=%s",
+                "no worker available for decide project=%s blocked_busy=%s blocked_unhealthy=%s blocked_rejected=%s",
                 project.project.id,
                 selection.blocked_busy,
                 selection.blocked_unhealthy,
                 selection.blocked_rejected,
             )
             return False
-        self._clear_log_state(f"project:{project.project.id}:worker:consolidate")
-        try:
-            future = self.executor.submit(
-                run_consolidate_task,
-                self.config,
-                self.client,
-                self.container_manager,
-                project,
-                export_yaml,
-                worker,
-                cancellation := TaskCancellation(),
-            )
-        except Exception:
-            LOG.exception("failed to submit consolidate task project=%s worker=%s", project.project.id, worker.name)
-            return False
-        self.futures[future] = RunningTask(project.project.id, "consolidate", worker.name, cancellation)
-        self.runtime_project_ids.add(project.project.id)
-        self._clear_project_log_state(project.project.id)
-        LOG.info("dispatched consolidate project=%s worker=%s", project.project.id, worker.name)
-        return True
-
-    def _dispatch_reason(self, project: ProjectDetail, export_yaml: str, trigger: str) -> bool:
-        selection = self._select_worker(project.project.id, "reason")
-        worker = selection.worker
-        if worker is None:
-            self._log_changed(
-                f"project:{project.project.id}:worker:reason",
-                logging.INFO,
-                "no worker available for reason project=%s blocked_busy=%s blocked_unhealthy=%s blocked_rejected=%s",
-                project.project.id,
-                selection.blocked_busy,
-                selection.blocked_unhealthy,
-                selection.blocked_rejected,
-            )
-            return False
-        self._clear_log_state(f"project:{project.project.id}:worker:reason")
-        claim = self.client.claim_reason(project.project.id, worker.name, trigger)
+        self._clear_log_state(f"project:{project.project.id}:worker:decide")
+        claim = self.client.claim_decide(project.project.id, worker.name, trigger)
         if claim.status_code in (403, 409):
             level = logging.INFO if claim.status_code == 403 else logging.WARNING
             LOG.log(
                 level,
-                "reason claim failed project=%s worker=%s status=%s",
+                "decide claim failed project=%s worker=%s status=%s",
                 project.project.id,
                 worker.name,
                 claim.status_code,
@@ -371,15 +323,17 @@ class DispatcherLoop:
             return False
         if not claim.ok:
             LOG.warning(
-                "reason claim failed project=%s worker=%s status=%s",
+                "decide claim failed project=%s worker=%s status=%s",
                 project.project.id,
                 worker.name,
                 claim.status_code,
             )
             return False
+        # 审计修复（租约令牌）：claim 响应携带持有凭证，透传任务与清理路径
+        lease_token = (claim.data or {}).get("decide_token") if isinstance(claim.data, dict) else None
         try:
             future = self.executor.submit(
-                run_reason_task,
+                run_decide_task,
                 self.config,
                 self.client,
                 self.container_manager,
@@ -387,59 +341,61 @@ class DispatcherLoop:
                 export_yaml,
                 worker,
                 cancellation := TaskCancellation(),
+                lease_token,
             )
         except Exception:
-            LOG.exception("failed to submit reason task project=%s worker=%s", project.project.id, worker.name)
-            self._best_effort_release_reason(project.project.id, worker.name)
+            LOG.exception("failed to submit decide task project=%s worker=%s", project.project.id, worker.name)
+            self._best_effort_release_decide(project.project.id, worker.name, lease_token)
             return False
         self.futures[future] = RunningTask(
             project.project.id,
-            "reason",
+            "decide",
             worker.name,
             cancellation,
-            intent_id=None,
+            step_id=None,
             fact_count=len(project.facts),
             hint_count=len(project.hints),
-            open_intent_count=self._project_open_intent_count(project),
+            open_step_count=self._project_open_step_count(project),
+            lease_token=lease_token,
         )
         self.runtime_project_ids.add(project.project.id)
         self._clear_project_log_state(project.project.id)
-        LOG.info("dispatched reason project=%s worker=%s trigger=%s", project.project.id, worker.name, trigger)
+        LOG.info("dispatched decide project=%s worker=%s trigger=%s", project.project.id, worker.name, trigger)
         return True
 
-    def _dispatch_bootstrap(self, project: ProjectDetail, intent: Intent) -> bool:
+    def _dispatch_bootstrap(self, project: ProjectDetail, step: Step) -> bool:
         selection = self._select_worker(project.project.id, "bootstrap")
         worker = selection.worker
         if worker is None:
             self._log_changed(
                 f"project:{project.project.id}:worker:bootstrap",
                 logging.INFO,
-                "no worker available for bootstrap project=%s intent=%s blocked_busy=%s blocked_unhealthy=%s blocked_rejected=%s",
+                "no worker available for bootstrap project=%s step=%s blocked_busy=%s blocked_unhealthy=%s blocked_rejected=%s",
                 project.project.id,
-                intent.id,
+                step.id,
                 selection.blocked_busy,
                 selection.blocked_unhealthy,
                 selection.blocked_rejected,
             )
             return False
         self._clear_log_state(f"project:{project.project.id}:worker:bootstrap")
-        claim = self.client.heartbeat(project.project.id, intent.id, worker.name)
+        claim = self.client.heartbeat(project.project.id, step.id, worker.name)
         if claim.status_code in (403, 409):
             level = logging.INFO if claim.status_code == 403 else logging.WARNING
             LOG.log(
                 level,
-                "bootstrap claim failed project=%s intent=%s worker=%s status=%s",
+                "bootstrap claim failed project=%s step=%s worker=%s status=%s",
                 project.project.id,
-                intent.id,
+                step.id,
                 worker.name,
                 claim.status_code,
             )
             return False
         if not claim.ok:
             LOG.warning(
-                "bootstrap claim failed project=%s intent=%s worker=%s status=%s",
+                "bootstrap claim failed project=%s step=%s worker=%s status=%s",
                 project.project.id,
-                intent.id,
+                step.id,
                 worker.name,
                 claim.status_code,
             )
@@ -451,77 +407,77 @@ class DispatcherLoop:
                 self.client,
                 self.container_manager,
                 project,
-                intent,
+                step,
                 worker,
                 cancellation := TaskCancellation(),
             )
         except Exception:
-            LOG.exception("failed to submit bootstrap task project=%s intent=%s worker=%s", project.project.id, intent.id, worker.name)
-            self._best_effort_release(project.project.id, intent.id, worker.name)
+            LOG.exception("failed to submit bootstrap task project=%s step=%s worker=%s", project.project.id, step.id, worker.name)
+            self._best_effort_release(project.project.id, step.id, worker.name)
             return False
-        self.futures[future] = RunningTask(project.project.id, "bootstrap", worker.name, cancellation, intent_id=intent.id)
+        self.futures[future] = RunningTask(project.project.id, "bootstrap", worker.name, cancellation, step_id=step.id)
         self.runtime_project_ids.add(project.project.id)
         self._clear_project_log_state(project.project.id)
-        LOG.info("dispatched bootstrap project=%s intent=%s worker=%s", project.project.id, intent.id, worker.name)
+        LOG.info("dispatched bootstrap project=%s step=%s worker=%s", project.project.id, step.id, worker.name)
         return True
 
-    def _dispatch_explore(self, project: ProjectDetail, export_yaml: str, intent: Intent) -> bool:
-        selection = self._select_worker(project.project.id, "explore")
+    def _dispatch_execute(self, project: ProjectDetail, export_yaml: str, step: Step) -> bool:
+        selection = self._select_worker(project.project.id, "execute")
         worker = selection.worker
         if worker is None:
             self._log_changed(
-                f"project:{project.project.id}:worker:explore",
+                f"project:{project.project.id}:worker:execute",
                 logging.INFO,
-                "no worker available for explore project=%s intent=%s blocked_busy=%s blocked_unhealthy=%s blocked_rejected=%s",
+                "no worker available for execute project=%s step=%s blocked_busy=%s blocked_unhealthy=%s blocked_rejected=%s",
                 project.project.id,
-                intent.id,
+                step.id,
                 selection.blocked_busy,
                 selection.blocked_unhealthy,
                 selection.blocked_rejected,
             )
             return False
-        self._clear_log_state(f"project:{project.project.id}:worker:explore")
-        claim = self.client.heartbeat(project.project.id, intent.id, worker.name)
+        self._clear_log_state(f"project:{project.project.id}:worker:execute")
+        claim = self.client.heartbeat(project.project.id, step.id, worker.name)
         if claim.status_code in (403, 409):
             level = logging.INFO if claim.status_code == 403 else logging.WARNING
             LOG.log(
                 level,
-                "explore claim failed project=%s intent=%s worker=%s status=%s",
+                "execute claim failed project=%s step=%s worker=%s status=%s",
                 project.project.id,
-                intent.id,
+                step.id,
                 worker.name,
                 claim.status_code,
             )
             return False
         if not claim.ok:
             LOG.warning(
-                "explore claim failed project=%s intent=%s worker=%s status=%s",
+                "execute claim failed project=%s step=%s worker=%s status=%s",
                 project.project.id,
-                intent.id,
+                step.id,
                 worker.name,
                 claim.status_code,
             )
             return False
         try:
             future = self.executor.submit(
-                run_explore_task,
+                run_execute_task,
                 self.config,
                 self.client,
                 self.container_manager,
                 project,
                 export_yaml,
-                intent,
+                step,
                 worker,
                 cancellation := TaskCancellation(),
             )
         except Exception:
-            LOG.exception("failed to submit explore task project=%s intent=%s worker=%s", project.project.id, intent.id, worker.name)
-            self._best_effort_release(project.project.id, intent.id, worker.name)
+            LOG.exception("failed to submit execute task project=%s step=%s worker=%s", project.project.id, step.id, worker.name)
+            self._best_effort_release(project.project.id, step.id, worker.name)
             return False
-        self.futures[future] = RunningTask(project.project.id, "explore", worker.name, cancellation, intent_id=intent.id)
+        self.futures[future] = RunningTask(project.project.id, "execute", worker.name, cancellation, step_id=step.id)
         self.runtime_project_ids.add(project.project.id)
         self._clear_project_log_state(project.project.id)
-        LOG.info("dispatched explore project=%s intent=%s worker=%s", project.project.id, intent.id, worker.name)
+        LOG.info("dispatched execute project=%s step=%s worker=%s", project.project.id, step.id, worker.name)
         return True
 
     def _select_worker(self, project_id: str, task_type: str) -> WorkerSelection:
@@ -600,90 +556,91 @@ class DispatcherLoop:
         for task in self.futures.values():
             if task.project_id != project_id:
                 continue
-            if task.intent_id is None:
+            if task.step_id is None:
                 summary.append(f"{task.task_type}:{task.worker_name}")
             else:
-                summary.append(f"{task.task_type}:{task.worker_name}:{task.intent_id}")
+                summary.append(f"{task.task_type}:{task.worker_name}:{task.step_id}")
         summary.sort()
         return summary
 
     def _project_has_running_bootstrap(self, project_id: str) -> bool:
         return any(task.project_id == project_id and task.task_type == "bootstrap" for task in self.futures.values())
 
-    def _project_running_explore_intents(self, project_id: str) -> set[str]:
+    def _project_running_execute_steps(self, project_id: str) -> set[str]:
         return {
-            task.intent_id
+            task.step_id
             for task in self.futures.values()
-            if task.project_id == project_id and task.task_type == "explore" and task.intent_id is not None
+            if task.project_id == project_id and task.task_type == "execute" and task.step_id is not None
         }
 
     def _running_project_count(self, summaries: list[ProjectSummary]) -> int:
         active_ids = {summary.id for summary in summaries if summary.status == "active"}
         return len(self.runtime_project_ids & active_ids)
 
-    def _project_open_intent_count(self, project: ProjectDetail) -> int:
-        return sum(1 for intent in project.intents if intent.to is None)
+    def _project_open_step_count(self, project: ProjectDetail) -> int:
+        # 只数真正可认领的步骤：已收束（to 非空）与已关闭（status=closed 的死路账本）都不算
+        return sum(1 for step in project.steps if step.to is None and step.status == "open")
 
-    def _is_bootstrap_intent(self, intent: Intent) -> bool:
+    def _is_bootstrap_step(self, step: Step) -> bool:
         return (
-            intent.description == BOOTSTRAP_INTENT_DESCRIPTION
-            and intent.creator == BOOTSTRAP_INTENT_CREATOR
-            and intent.from_ == ["origin"]
-            and intent.to is None
+            step.description == BOOTSTRAP_STEP_DESCRIPTION
+            and step.creator == BOOTSTRAP_STEP_CREATOR
+            and step.from_ == ["origin"]
+            and step.to is None
         )
 
-    def _get_bootstrap_intent(self, project: ProjectDetail) -> Intent | None:
-        intents = [intent for intent in project.intents if self._is_bootstrap_intent(intent)]
-        if not intents:
+    def _get_bootstrap_step(self, project: ProjectDetail) -> Step | None:
+        steps = [step for step in project.steps if self._is_bootstrap_step(step)]
+        if not steps:
             return None
-        if len(intents) > 1:
-            LOG.warning("project has multiple bootstrap intents project=%s intents=%s", project.project.id, [intent.id for intent in intents])
-        intents.sort(key=lambda intent: (intent.worker is not None, intent.created_at, intent.id))
-        return intents[0]
+        if len(steps) > 1:
+            LOG.warning("project has multiple bootstrap steps project=%s steps=%s", project.project.id, [step.id for step in steps])
+        steps.sort(key=lambda step: (step.worker is not None, step.created_at, step.id))
+        return steps[0]
 
     def _is_initial_project(self, project: ProjectDetail) -> bool:
         fact_ids = {fact.id for fact in project.facts}
         if fact_ids != {"origin", "goal"} or len(project.facts) != 2:
             return False
-        if not project.intents:
+        if not project.steps:
             return True
-        return all(self._is_bootstrap_intent(intent) for intent in project.intents)
+        return all(self._is_bootstrap_step(step) for step in project.steps)
 
     def _project_requires_bootstrap(self, project: ProjectDetail) -> bool:
         if not project.project.bootstrap_enabled:
             return False
-        if self._get_bootstrap_intent(project) is not None:
+        if self._get_bootstrap_step(project) is not None:
             return True
         return any("bootstrap" in worker.task_types for worker in self.config.workers)
 
-    def _create_bootstrap_intent(self, project_id: str) -> Intent | None:
-        response = self.client.create_intent(
+    def _create_bootstrap_step(self, project_id: str) -> Step | None:
+        response = self.client.create_step(
             project_id,
             ["origin"],
-            BOOTSTRAP_INTENT_DESCRIPTION,
-            BOOTSTRAP_INTENT_CREATOR,
+            BOOTSTRAP_STEP_DESCRIPTION,
+            BOOTSTRAP_STEP_CREATOR,
         )
         if response.status_code == 403:
-            LOG.info("project became inactive before bootstrap intent create project=%s", project_id)
+            LOG.info("project became inactive before bootstrap step create project=%s", project_id)
             return None
         if not response.ok:
             LOG.warning(
-                "bootstrap intent write failed project=%s status=%s body=%s",
+                "bootstrap step write failed project=%s status=%s body=%s",
                 project_id,
                 response.status_code,
                 response.text,
             )
             return None
         if not isinstance(response.data, dict):
-            LOG.warning("bootstrap intent create returned empty body project=%s", project_id)
+            LOG.warning("bootstrap step create returned empty body project=%s", project_id)
             return None
-        intent = Intent.model_validate(response.data)
-        LOG.info("created bootstrap intent project=%s intent=%s", project_id, intent.id)
-        return intent
+        step = Step.model_validate(response.data)
+        LOG.info("created bootstrap step project=%s step=%s", project_id, step.id)
+        return step
 
-    def _reason_trigger(self, project: ProjectDetail) -> str | None:
-        open_intent_count = self._project_open_intent_count(project)
-        checkpoint = self.reason_checkpoints.get(project.project.id)
+    def _decide_trigger(self, project: ProjectDetail) -> str | None:
+        open_step_count = self._project_open_step_count(project)
+        checkpoint = self.decide_checkpoints.get(project.project.id)
         if checkpoint is None:
             return "initial"
         changes: list[str] = []
@@ -691,18 +648,28 @@ class DispatcherLoop:
             changes.append(f"facts:{checkpoint.fact_count}->{len(project.facts)}")
         if len(project.hints) > checkpoint.hint_count:
             changes.append(f"hints:{checkpoint.hint_count}->{len(project.hints)}")
-        if checkpoint.open_intent_count > 0 and open_intent_count == 0:
-            changes.append(f"open_intents:{checkpoint.open_intent_count}->0")
+        if checkpoint.open_step_count > 0 and open_step_count == 0:
+            changes.append(f"open_steps:{checkpoint.open_step_count}->0")
         if not changes:
             return None
         return ",".join(changes)
 
     def _reap_futures(self) -> None:
         done = [future for future in self.futures if future.done()]
+        # 调度器 J2：先收集本批每个 worker 的结局——unhealthy 优先于 success
+        batch_unhealthy_workers: set[str] = set()
+        batch_results: list[tuple[Any, str]] = []
         for future in done:
             task = self.futures.pop(future)
             try:
                 outcome = future.result()
+                batch_results.append((task, outcome))
+                if outcome == "unhealthy":
+                    batch_unhealthy_workers.add(task.worker_name)
+            except Exception as exc:  # noqa: BLE001 —— worker 函数崩溃
+                LOG.exception("task crashed project=%s", getattr(task, "project_id", "?"))
+                batch_results.append((task, "crashed"))
+        for task, outcome in batch_results:
                 if outcome == "cancelled":
                     LOG.info(
                         "task cancelled project=%s task=%s worker=%s",
@@ -719,6 +686,11 @@ class DispatcherLoop:
                         outcome,
                     )
                 self._clear_project_log_state(task.project_id)
+                # 调度器 D1 修复：项目在 futures 中已无任务时从 runtime_project_ids
+                # 移除——否则只增不减，长跑后 max_running_projects 被"碰过的"而非
+                # "在跑的"项目耗尽，新项目永久饿死
+                if not any(t.project_id == task.project_id for t in self.futures.values()):
+                    self.runtime_project_ids.discard(task.project_id)
                 if outcome == "unhealthy":
                     retry_after_seconds = UNHEALTHY_RETRY_AFTER_SECONDS
                     self.worker_unhealthy_until[task.worker_name] = time.time() + retry_after_seconds
@@ -727,7 +699,8 @@ class DispatcherLoop:
                         task.worker_name,
                         retry_after_seconds,
                     )
-                else:
+                elif task.worker_name not in batch_unhealthy_workers:
+                    # 调度器 J2：本批该 worker 有 unhealthy 结局时不清除冷却
                     self.worker_unhealthy_until.pop(task.worker_name, None)
                 rejection_key = (task.project_id, task.task_type, task.worker_name)
                 if outcome == "rejected":
@@ -752,28 +725,27 @@ class DispatcherLoop:
                     )
                 else:
                     self.worker_rejected_until.pop(rejection_key, None)
-                if outcome == "success" and task.task_type == "reason":
+                if outcome == "success" and task.task_type == "decide":
                     assert task.fact_count is not None
                     assert task.hint_count is not None
-                    assert task.open_intent_count is not None
-                    self.reason_checkpoints[task.project_id] = ReasonCheckpoint(
+                    assert task.open_step_count is not None
+                    self.decide_checkpoints[task.project_id] = DecideCheckpoint(
                         fact_count=task.fact_count,
                         hint_count=task.hint_count,
-                        open_intent_count=task.open_intent_count,
+                        open_step_count=task.open_step_count,
                     )
                     LOG.debug(
-                        "reason checkpoint updated project=%s facts=%s hints=%s open_intents=%s",
+                        "decide checkpoint updated project=%s facts=%s hints=%s open_steps=%s",
                         task.project_id,
                         task.fact_count,
                         task.hint_count,
-                        task.open_intent_count,
+                        task.open_step_count,
                     )
-            except Exception:
-                LOG.exception("task crashed project=%s task=%s worker=%s", task.project_id, task.task_type, task.worker_name)
-                # 崩溃（未捕获异常）同样进冷却：触发条件往往仍成立（如 consolidate 的
-                # 星记超预算），不冷却会每个调度周期重派崩溃、无限刷屏
-                crash_key = (task.project_id, task.task_type, task.worker_name)
-                self.worker_rejected_until[crash_key] = time.time() + FAILED_RETRY_AFTER_SECONDS
+                if outcome == "crashed":
+                    # 崩溃（未捕获异常）同样进冷却：触发条件往往仍成立
+                    # （图超预算等），不冷却会每个调度周期重派崩溃、无限刷屏
+                    crash_key = (task.project_id, task.task_type, task.worker_name)
+                    self.worker_rejected_until[crash_key] = time.time() + FAILED_RETRY_AFTER_SECONDS
 
     def _cleanup_completed_containers(self, summaries: list[ProjectSummary]) -> None:
         for summary in summaries:
@@ -835,6 +807,21 @@ class DispatcherLoop:
             current_status = inactive_status_by_id.get(project_id)
             if current_status != status:
                 self._inactive_cleanup_done.pop(project_id, None)
+        # P1-7：清理已从服务端消失（删除）的项目在调度器字典中的残留键，防跨项目
+        # 无界增长。注意判据用"服务端项目列表"而非 runtime_project_ids——后者只含
+        # 本实例派发过的活跃项目，按它清理会把"活跃但暂未派发"项目的 decide
+        # checkpoint 逐周期驱逐，_decide_trigger 误判 initial 导致反复重派 decide
+        # 任务（回归）；项目删除后其键才是真正的死数据，驱逐零风险。
+        known_ids = {summary.id for summary in summaries}
+        for project_id in list(self.decide_checkpoints):
+            if project_id not in known_ids:
+                self.decide_checkpoints.pop(project_id, None)
+        for key in list(self.worker_rejected_until):
+            if key[0] not in known_ids:
+                self.worker_rejected_until.pop(key, None)
+        for scope in list(self._log_state):
+            if scope.startswith("project:") and scope.split(":", 2)[1] not in known_ids:
+                self._log_state.pop(scope, None)
 
     def _cancel_inactive_tasks(self, summaries: list[ProjectSummary]) -> None:
         status_by_project = {summary.id: summary.status for summary in summaries}
@@ -849,37 +836,37 @@ class DispatcherLoop:
                     status,
                 )
 
-    def _initialize_reason_checkpoints(self, summaries: list[ProjectSummary]) -> None:
+    def _initialize_decide_checkpoints(self, summaries: list[ProjectSummary]) -> None:
         for summary in summaries:
             if summary.status != "active":
                 continue
-            if summary.id in self.reason_checkpoints:
+            if summary.id in self.decide_checkpoints:
                 continue
-            open_intent_count = summary.working_intent_count + summary.unclaimed_intent_count
-            if open_intent_count == 0:
+            open_step_count = summary.working_step_count + summary.unclaimed_step_count
+            if open_step_count == 0:
                 continue
-            self.reason_checkpoints[summary.id] = ReasonCheckpoint(
+            self.decide_checkpoints[summary.id] = DecideCheckpoint(
                 fact_count=summary.fact_count,
                 hint_count=summary.hint_count,
-                open_intent_count=open_intent_count,
+                open_step_count=open_step_count,
             )
             LOG.debug(
-                "reason checkpoint initialized project=%s facts=%s hints=%s open_intents=%s",
+                "decide checkpoint initialized project=%s facts=%s hints=%s open_steps=%s",
                 summary.id,
                 summary.fact_count,
                 summary.hint_count,
-                open_intent_count,
+                open_step_count,
             )
 
-    def _best_effort_release(self, project_id: str, intent_id: str, worker_name: str) -> None:
-        response = self.client.release(project_id, intent_id, worker_name)
+    def _best_effort_release(self, project_id: str, step_id: str, worker_name: str) -> None:
+        response = self.client.release(project_id, step_id, worker_name)
         if not response.ok and response.status_code not in (403, 409):
-            LOG.warning("release failed project=%s intent=%s worker=%s status=%s", project_id, intent_id, worker_name, response.status_code)
+            LOG.warning("release failed project=%s step=%s worker=%s status=%s", project_id, step_id, worker_name, response.status_code)
 
-    def _best_effort_release_reason(self, project_id: str, worker_name: str) -> None:
-        response = self.client.release_reason(project_id, worker_name)
+    def _best_effort_release_decide(self, project_id: str, worker_name: str, lease_token: str | None = None) -> None:
+        response = self.client.release_decide(project_id, worker_name, lease_token)
         if not response.ok and response.status_code not in (403, 409):
-            LOG.warning("reason release failed project=%s worker=%s status=%s", project_id, worker_name, response.status_code)
+            LOG.warning("decide release failed project=%s worker=%s status=%s", project_id, worker_name, response.status_code)
 
     def _log_changed(self, scope: str, level: int, message: str, *args: object) -> None:
         state = (level, message, args)
@@ -900,12 +887,29 @@ class DispatcherLoop:
     def _validate_server_settings(self) -> None:
         settings = self.client.get_settings()
         interval = self.config.runtime.interval
-        for name, value in (("intent_timeout", settings.intent_timeout), ("reason_timeout", settings.reason_timeout)):
+        needs_patch: dict[str, int] = {}
+        for name, value in (("step_timeout", settings.step_timeout), ("decide_timeout", settings.decide_timeout)):
             if value <= interval:
-                raise RuntimeError(
-                    f"server {name}={value}s must be greater than dispatcher interval={interval}s"
+                # 审计修复（2026-08-28 二修）：此前只 LOG 不动作，"钳制"是空头支票——
+                # 心跳仍按 interval 发，租约 value<=interval 必过期，同任务重派双跑。
+                # 现在真的修：把 server 端超时 PATCH 到 interval*2 安全下限；修不动
+                # （网络故障/只读）才退化为告警（自愈优先于崩溃）。
+                needs_patch[name] = interval * 2
+                LOG.error(
+                    "server %s=%ss <= dispatcher interval=%ss; patching server setting to %ss",
+                    name, value, interval, interval * 2,
                 )
-            if value < interval * 2:
+        if needs_patch:
+            try:
+                self.client.update_settings(
+                    step_timeout=needs_patch.get("step_timeout", settings.step_timeout),
+                    decide_timeout=needs_patch.get("decide_timeout", settings.decide_timeout),
+                )
+                LOG.info("server settings patched to safe floor %s", needs_patch)
+            except Exception as exc:  # noqa: BLE001
+                LOG.error("server settings patch failed (%s); heartbeat/lease mismatch risk until server fixed", exc)
+        for name, value in (("step_timeout", settings.step_timeout), ("decide_timeout", settings.decide_timeout)):
+            if value < interval * 2 and name not in needs_patch:
                 LOG.warning(
                     "server %s is tight %s=%ss interval=%ss; heartbeat slack is only %ss",
                     name,
@@ -914,13 +918,6 @@ class DispatcherLoop:
                     interval,
                     value - interval,
                 )
-                continue
-            LOG.info(
-                "server setting validated %s=%ss interval=%ss",
-                name,
-                value,
-                interval,
-            )
 
     def _run_startup_healthchecks(self, *, show_commands: bool) -> None:
         results = run_startup_healthchecks(self.config, self.container_manager, show_commands=show_commands)

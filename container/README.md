@@ -3,43 +3,44 @@
 ## 镜像构建
 
 ```bash
-docker build -f container/Dockerfile -t astra-runner .   # 构建目录为仓库根
+docker build -f container/Dockerfile.slim -t astra-runner .   # 托管出包用 slim；Dockerfile 为本地全量开发镜像
 ```
 
-镜像内置：Kali 工具链、ASTRA 引擎（server+dispatcher）、模型 CLI（claude/codex/pi/
-**dsh**）、`astra-runner` 靶场编排器（默认 ENTRYPOINT）。
+镜像内置：Kali 工具链 + f2 逆向链（radare2/r2ghidra/qemu-user/upx/z3 等）、
+ASTRA 引擎（server+dispatcher）、**pi**（唯一执行底座）、
+`astra-runner` 靶场编排器（默认 ENTRYPOINT）。
 
 ## Worker 选择（astra-runner 本地/托管模式）
 
 `container/astra_runner/runner.py` 的引擎（`astra_runner_engine.py`）根据环境变量
-生成 dispatch.yaml，`ASTRA_WORKER_TYPE` 选择 worker：
+生成 dispatch.yaml。v0.2 星图架构重建（2026-08-29）起**仅 pi**——完全可控的
+极简 Agent Loop，任务面收敛为 bootstrap / execute / decide 三类（claudecode 与
+dsh 栈均已移除）。
 
-| ASTRA_WORKER_TYPE | 需要的 env | 说明 |
+| ASTRA_WORKER_TYPE | 需要的 env | 舰队形态 |
 |---|---|---|
-| `claudecode`（默认） | `ANTHROPIC_MODEL` / `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` | claude CLI + DeepSeek Anthropic 兼容端点 |
-| `dsh` | `DSH_MODEL`（默认 deepseek-v4-flash）/ `DEEPSEEK_API_KEY` | DeepSeek Harness 无头模式，会话续接由 `container/dsh/` 扩展提供 |
+| `pi`（默认且唯一） | `PI_API_KEY/PI_BASE_URL/PI_MODEL/PI_PROVIDER_API`（DS 执行通道，provider 必须为 `anthropic-messages`）+ 可选 `ZHIPU_API_KEY/ZHIPU_PI_BASE_URL/ZHIPU_PI_MODEL/ZHIPU_PI_PROVIDER_API`（GLM 决策通道） | deepseek-execute×N（p0，bootstrap+execute）+ glm-decide（p1，decide；无 GLM key 时 deepseek-decide 兜底） |
 
-dsh 模式可选 env：`DEEPSEEK_BASE_URL`（默认官方地址）、`DSH_PATCH`（默认镜像内
-`/opt/astra/dsh/astra-headless.patch.yml`）、`DSH_HOME`（默认临时目录按 worker 隔离）。
+可选 env：`ASTRA_EXECUTE_REPLICAS`（默认 4）、`ASTRA_EXECUTE_MAXRUN`（默认 3，
+r5 实测最优拓扑 4×3）、`ASTRA_DECIDE_TIMEOUT`（默认 600s）、`ASTRA_PI_HOME`
+（pi worker 会话根目录，默认临时目录 astra-pi，worker 子目录按名隔离）。
 
-示例：
+示例（本地跑，完整配方见 `dist/local-fgs-run.env` + 启动脚本 `dist/run-local.sh`）：
 
 ```bash
-ASTRA_WORKER_TYPE=dsh \
-DEEPSEEK_API_KEY=sk-xxx \
-DSH_MODEL=deepseek-v4-pro \
-python3 container/astra_runner/runner.py
+set -a; . dist/local-fgs-run.env; set +a
+unset ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL ANTHROPIC_API_KEY ANTHROPIC_MODEL
+astra/.venv/Scripts/python.exe container/astra_runner/runner.py \
+  --progress-file dist/astra-progress-<轮次>.json --watchdog
 ```
 
-## dsh 前置条件
-
-1. 镜像内已装 `@deepseek-ai/dsh` 并把 `container/dsh/astra-headless-runner.js`
-   复制进 dsh 包 `lib/`（Dockerfile 已处理）；
-2. 本地 Windows 联调需手动安装（见 `container/dsh/README.md`）。
+环境注意：shell 预置的 `ANTHROPIC_*` 变量会被 pi 继承，必须显式 unset；
+`worker_healthcheck` 已在引擎渲染的 yaml 中固定 disabled（pi LLM 冷启动首调
+可超 70s，健康检查必杀）。
 
 ## 托管模式
 
 ```bash
-docker build -f container/Dockerfile -t astra-runner .
+docker build -f container/Dockerfile.slim -t astra-runner .
 docker save astra-runner:latest | gzip > agent.tar.gz   # 按平台规范上传
 ```

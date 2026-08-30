@@ -1,0 +1,21 @@
+# 构建会话待办落地（R5 修复清单 P2）：构建上下文瘦身 + 防敏感物进镜像
+.git
+.github
+dist
+tmp
+rec
+demo-video
+docs
+*.ovpn
+*.db
+*.log
+astra/.venv*
+astra/node_modules
+.venv*
+**/__pycache__
+*.tar.gz
+.env
+# 运行时真实配置（含密钥）绝不进构建上下文
+dispatch.yaml
+dispatch.astra.yaml
+dispatch*secret*

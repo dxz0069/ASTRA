@@ -69,9 +69,13 @@ def test_local_container_manager_workspace_and_paths() -> None:
     workspace = manager.workspace_of(name)
     assert workspace == root.resolve() / "proj_abc"
 
-    # /tmp/... 映射到系统临时目录（graph 快照引用可达）
+    # /tmp/... 映射：Windows 走 C:\tmp 惯例（node/pi 按当前盘符解析 /tmp），posix 走系统 tempdir
     manager.write_text_file(name, "/tmp/astra-prompts/phase-1/graph.yaml", "graph: yaml")
-    mapped = Path(tempfile.gettempdir()) / "astra-prompts" / "phase-1" / "graph.yaml"
+    import sys as _sys
+    if _sys.platform == "win32":
+        mapped = Path("C:/tmp") / "astra-prompts" / "phase-1" / "graph.yaml"
+    else:
+        mapped = Path(tempfile.gettempdir()) / "astra-prompts" / "phase-1" / "graph.yaml"
     assert mapped.read_text(encoding="utf-8") == "graph: yaml"
     manager.close()
 
@@ -112,8 +116,8 @@ def test_local_execution_end_to_end(http_client: TestClient) -> None:
     """local execution + mock worker 跑完整调度链路（bootstrap→complete）。"""
     config = _config(
         bootstrap='{"delay":[0,0],"outcomes":{"complete":"1.0","fact":"0.0","rejected":"0.0","invalid_json":"0.0","invalid_payload":"0.0","command_fail":"0.0"}}',
-        reason='{"delay":[0,0],"outcomes":{"complete":"1.0","intent":"0.0","noop":"0.0","rejected":"0.0","invalid_json":"0.0","invalid_payload":"0.0","command_fail":"0.0"}}',
-        explore='{"delay":[0,0],"outcomes":{"fact":"1.0","rejected":"0.0","invalid_json":"0.0","invalid_payload":"0.0","command_fail":"0.0"}}',
+        decide='{"delay":[0,0],"outcomes":{"complete":"1.0","ops":"0.0","noop":"0.0","rejected":"0.0","invalid_json":"0.0","invalid_payload":"0.0","command_fail":"0.0"}}',
+        execute='{"delay":[0,0],"outcomes":{"fact":"1.0","rejected":"0.0","invalid_json":"0.0","invalid_payload":"0.0","command_fail":"0.0"}}',
     )
     # 注入 local execution（mock 端到端 harness 的 config 无 execution 字段，默认 docker；这里显式 local）
     config.runtime.execution = "local"

@@ -1,4 +1,4 @@
 {
   "phase": "challenge",
-  "proposal": {proposal}
+  "claim_id": "mock"
 }

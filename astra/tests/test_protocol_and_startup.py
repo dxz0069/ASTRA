@@ -18,7 +18,7 @@ def test_client_request_failure_returns_status_zero() -> None:
     client = ASTRAClient("http://server/")
     client._local.session = Session()
 
-    result = client.create_intent("proj_001", ["f001"], "investigate", "reasoner")
+    result = client.create_step("proj_001", ["f001"], "investigate", "decider")
 
     assert result.status_code == 0
     assert result.text == "offline"

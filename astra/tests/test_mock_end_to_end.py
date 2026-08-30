@@ -12,7 +12,7 @@ from pydantic import TypeAdapter
 import pytest
 
 from astra.dispatcher.config import DispatchConfig
-from astra.dispatcher.models import ReasonCheckpoint
+from astra.dispatcher.models import DecideCheckpoint
 from astra.dispatcher.protocol.client import ApiResult
 from astra.dispatcher.runtime.process import ProcessResult
 from astra.dispatcher.scheduler.loop import DispatcherLoop
@@ -25,6 +25,8 @@ class InProcessClient:
     def __init__(self, http: TestClient):
         self.http = http
         self._summaries = TypeAdapter(list[ProjectSummary])
+        # 实例级令牌记账（类属性会被跨测试共享旧令牌 → 心跳 403 的隔离坑）
+        self._lease_tokens: dict[str, str | None] = {}
 
     def close(self) -> None:
         return None
@@ -49,60 +51,84 @@ class InProcessClient:
         response.raise_for_status()
         return response.text
 
-    def heartbeat(self, project_id: str, intent_id: str, worker: str) -> ApiResult:
-        return self._post(f"/projects/{project_id}/intents/{intent_id}/heartbeat", {"worker": worker})
+    def heartbeat(self, project_id: str, step_id: str, worker: str) -> ApiResult:
+        return self._post(f"/projects/{project_id}/steps/{step_id}/heartbeat", {"worker": worker})
 
-    def claim_reason(self, project_id: str, worker: str, trigger: str) -> ApiResult:
-        return self._post(f"/projects/{project_id}/reason/claim", {"worker": worker, "trigger": trigger})
+    def claim_decide(self, project_id: str, worker: str, trigger: str) -> ApiResult:
+        result = self._post(f"/projects/{project_id}/decide/claim", {"worker": worker, "trigger": trigger})
+        if result.ok and isinstance(result.data, dict):
+            # 真实 server 会下发租约令牌；桩侧记账，后续心跳/释放/完成携带
+            self._lease_tokens[project_id] = result.data.get("decide_token")
+        return result
 
-    def reason_heartbeat(self, project_id: str, worker: str) -> ApiResult:
-        return self._post(f"/projects/{project_id}/reason/heartbeat", {"worker": worker})
+    def _token_of(self, project_id: str, explicit: str | None) -> str | None:
+        return explicit if explicit is not None else self._lease_tokens.get(project_id)
 
-    def release_reason(self, project_id: str, worker: str) -> ApiResult:
-        return self._post(f"/projects/{project_id}/reason/release", {"worker": worker})
+    def decide_heartbeat(self, project_id: str, worker: str, lease_token: str | None = None) -> ApiResult:
+        return self._post(
+            f"/projects/{project_id}/decide/heartbeat",
+            {"worker": worker, "lease_token": self._token_of(project_id, lease_token)},
+        )
 
-    def release(self, project_id: str, intent_id: str, worker: str) -> ApiResult:
-        return self._post(f"/projects/{project_id}/intents/{intent_id}/release", {"worker": worker})
+    def release_decide(self, project_id: str, worker: str, lease_token: str | None = None) -> ApiResult:
+        token = self._token_of(project_id, lease_token)
+        result = self._post(
+            f"/projects/{project_id}/decide/release",
+            {"worker": worker, "lease_token": token},
+        )
+        if result.ok:
+            self._lease_tokens.pop(project_id, None)
+        return result
+
+    def release(self, project_id: str, step_id: str, worker: str) -> ApiResult:
+        return self._post(f"/projects/{project_id}/steps/{step_id}/release", {"worker": worker})
 
     def conclude(
         self,
         project_id: str,
-        intent_id: str,
+        step_id: str,
         worker: str,
         description: str,
-        confidence: str = "medium",
-        evidence: str | None = None,
-        challenged: bool = False,
+        kind: str = "regular",
+        finding: str | None = None,
     ) -> ApiResult:
-        body: dict[str, Any] = {"worker": worker, "description": description, "confidence": confidence}
-        if evidence:
-            body["evidence"] = evidence
-        body["challenged"] = challenged
+        body: dict[str, Any] = {"worker": worker, "description": description}
+        if kind != "regular":
+            body["kind"] = kind
+        if finding:
+            body["finding"] = finding
         return self._post(
-            f"/projects/{project_id}/intents/{intent_id}/conclude",
+            f"/projects/{project_id}/steps/{step_id}/conclude",
             body,
         )
 
-    def complete(self, project_id: str, from_ids: list[str], description: str, worker: str) -> ApiResult:
-        return self._post(
+    def complete(self, project_id: str, from_ids: list[str], description: str, worker: str, lease_token: str | None = None) -> ApiResult:
+        result = self._post(
             f"/projects/{project_id}/complete",
-            {"from": from_ids, "description": description, "worker": worker},
+            {
+                "from": from_ids,
+                "description": description,
+                "worker": worker,
+                "lease_token": self._token_of(project_id, lease_token),
+            },
         )
+        if result.ok:
+            self._lease_tokens.pop(project_id, None)
+        return result
 
-    def create_intent(self, project_id: str, from_ids: list[str], description: str, creator: str) -> ApiResult:
-        return self._post(
-            f"/projects/{project_id}/intents",
-            {"from": from_ids, "description": description, "creator": creator, "worker": None},
-        )
+    def create_step(
+        self, project_id: str, from_ids: list[str], description: str, creator: str, expect: str | None = None
+    ) -> ApiResult:
+        body: dict[str, Any] = {"from": from_ids, "description": description, "creator": creator, "worker": None}
+        if expect:
+            body["expect"] = expect
+        return self._post(f"/projects/{project_id}/steps", body)
 
     def create_hint(self, project_id: str, content: str, creator: str = "human") -> ApiResult:
-        return self._post(f/projects/{project_id}/hints, {content: content, creator: creator})
+        return self._post(f"/projects/{project_id}/hints", {"content": content, "creator": creator})
 
     def create_fact(self, project_id: str, description: str, kind: str = "regular", creator: str = "system") -> ApiResult:
-        return self._post(f/projects/{project_id}/facts, {description: description, kind: kind, creator: creator})
-
-    def archive_facts(self, project_id: str, fact_ids: list[str]) -> ApiResult:
-        return self._post(f/projects/{project_id}/facts/archive, {fact_ids: fact_ids})
+        return self._post(f"/projects/{project_id}/facts", {"description": description, "kind": kind, "creator": creator})
 
     def _post(self, path: str, payload: dict[str, Any]) -> ApiResult:
         response = self.http.post(path, json=payload)
@@ -223,8 +249,8 @@ def _phase(
 def _config(
     *,
     bootstrap: str,
-    reason: str,
-    explore: str,
+    decide: str,
+    execute: str,
     task_types: list[str] | None = None,
 ) -> DispatchConfig:
     return DispatchConfig.model_validate(
@@ -240,8 +266,8 @@ def _config(
             },
             "tasks": {
                 "bootstrap": {"timeout": 2, "conclude_timeout": 2},
-                "reason": {"timeout": 2, "max_intents": 1},
-                "explore": {"timeout": 2, "conclude_timeout": 2},
+                "decide": {"timeout": 2, "max_steps": 1},
+                "execute": {"timeout": 2, "conclude_timeout": 2},
             },
             "container": {
                 "image": "unused",
@@ -252,14 +278,14 @@ def _config(
                 {
                     "name": "mock-worker",
                     "type": "mock",
-                    "task_types": task_types or ["bootstrap", "reason", "explore"],
+                    "task_types": task_types or ["bootstrap", "decide", "execute"],
                     "max_running": 1,
                     "priority": 0,
                     "env": {
                         "MOCK_HEALTHCHECK": _phase("ok"),
                         "MOCK_BOOTSTRAP": bootstrap,
-                        "MOCK_REASON": reason,
-                        "MOCK_EXPLORE_EXECUTE": explore,
+                        "MOCK_DECIDE": decide,
+                        "MOCK_EXECUTE_EXECUTE": execute,
                     },
                 }
             ],
@@ -276,7 +302,7 @@ def _loop(config: DispatchConfig, client: InProcessClient, containers: LocalCont
     loop.cleanup_executor = ThreadPoolExecutor(max_workers=1)
     loop.futures = {}
     loop.cleanup_futures = {}
-    loop.reason_checkpoints = {}
+    loop.decide_checkpoints = {}
     loop.runtime_project_ids = set()
     loop.worker_unhealthy_until = {}
     loop.worker_rejected_until = {}
@@ -290,7 +316,7 @@ def _loop(config: DispatchConfig, client: InProcessClient, containers: LocalCont
 def _dispatch_and_wait(loop: DispatcherLoop) -> None:
     loop._reap_futures()
     summaries = loop.client.list_projects()
-    loop._initialize_reason_checkpoints(summaries)
+    loop._initialize_decide_checkpoints(summaries)
     loop._refresh_runtime_projects(summaries)
     loop._cancel_inactive_tasks(summaries)
     loop._queue_container_cleanups(summaries)
@@ -316,8 +342,8 @@ def test_mock_scheduler_bootstrap_completes_project_end_to_end(http_client: Test
     loop = _loop(
         _config(
             bootstrap=_phase("complete"),
-            reason=_phase("complete", zero_outcomes=["intent"]),
-            explore=_phase("fact"),
+            decide=_phase("complete", zero_outcomes=["ops"]),
+            execute=_phase("fact"),
         ),
         client,
         containers,
@@ -332,30 +358,30 @@ def test_mock_scheduler_bootstrap_completes_project_end_to_end(http_client: Test
 
     assert project.project.status == "completed"
     assert [fact.id for fact in project.facts] == ["origin", "goal", "f001"]
-    assert [(intent.id, intent.to) for intent in project.intents] == [("i001", "f001"), ("i002", "goal")]
+    assert [(step.id, step.to) for step in project.steps] == [("s001", "f001"), ("s002", "goal")]
 
 
-def test_mock_scheduler_runs_reason_explore_reason_complete_chain(http_client: TestClient) -> None:
+def test_mock_scheduler_runs_decide_execute_decide_complete_chain(http_client: TestClient) -> None:
     client = InProcessClient(http_client)
     containers = LocalContainerManager()
     loop = _loop(
         _config(
             bootstrap=_phase("complete"),
-            reason=_phase("intent", rules=[{"fact_ids_gte": 3, "force": "complete"}]),
-            explore=_phase("fact"),
+            decide=_phase("ops", rules=[{"fact_ids_gte": 3, "force": "complete"}]),
+            execute=_phase("fact"),
         ),
         client,
         containers,
     )
     project_id = _create_project(http_client)
-    seed = client.create_intent(project_id, ["origin"], "seed", "seed-worker")
+    seed = client.create_step(project_id, ["origin"], "seed", "seed-worker")
     assert seed.ok
-    assert client.heartbeat(project_id, "i001", "seed-worker").ok
-    assert client.conclude(project_id, "i001", "seed-worker", "seed fact").ok
+    assert client.heartbeat(project_id, "s001", "seed-worker").ok
+    assert client.conclude(project_id, "s001", "seed-worker", "seed fact").ok
 
     try:
         _dispatch_and_wait(loop)
-        assert loop.reason_checkpoints[project_id] == ReasonCheckpoint(3, 0, 0)
+        assert loop.decide_checkpoints[project_id] == DecideCheckpoint(3, 0, 0)
         _dispatch_and_wait(loop)
         _dispatch_and_wait(loop)
         project = client.get_project(project_id)
@@ -364,13 +390,13 @@ def test_mock_scheduler_runs_reason_explore_reason_complete_chain(http_client: T
 
     assert project.project.status == "completed"
     assert [fact.id for fact in project.facts] == ["origin", "goal", "f001", "f002"]
-    assert [(intent.id, intent.to) for intent in project.intents] == [
-        ("i001", "f001"),
-        ("i002", "f002"),
-        ("i003", "goal"),
+    assert [(step.id, step.to) for step in project.steps] == [
+        ("s001", "f001"),
+        ("s002", "f002"),
+        ("s003", "goal"),
     ]
-    assert any("/reason_execute-" in path and "f002" in content for _, path, content in containers.writes)
-    assert any("/explore_execute-" in path and "f001" in content for _, path, content in containers.writes)
+    assert any("/decide_execute-" in path and "f002" in content for _, path, content in containers.writes)
+    assert any("/execute_execute-" in path and "f001" in content for _, path, content in containers.writes)
 
 
 def test_mock_scheduler_enabled_project_skips_bootstrap_when_worker_does_not_support_it(
@@ -381,14 +407,20 @@ def test_mock_scheduler_enabled_project_skips_bootstrap_when_worker_does_not_sup
     loop = _loop(
         _config(
             bootstrap=_phase("complete"),
-            reason=_phase("complete", zero_outcomes=["intent"]),
-            explore=_phase("fact"),
-            task_types=["reason", "explore"],
+            decide=_phase("complete", zero_outcomes=["ops"]),
+            execute=_phase("fact"),
+            task_types=["decide", "execute"],
         ),
         client,
         containers,
     )
     project_id = _create_project(http_client)
+    # complete 不接受 from_=["origin"]（系统事实=劫持原语）：
+    # 先种一条真实事实作为完成依据
+    seed = client.create_step(project_id, ["origin"], "seed", "seed-worker")
+    assert seed.ok
+    assert client.heartbeat(project_id, "s001", "seed-worker").ok
+    assert client.conclude(project_id, "s001", "seed-worker", "seed fact").ok
 
     try:
         _dispatch_and_wait(loop)
@@ -397,6 +429,7 @@ def test_mock_scheduler_enabled_project_skips_bootstrap_when_worker_does_not_sup
         loop.close()
 
     assert project.project.status == "completed"
-    assert [(intent.description, intent.to) for intent in project.intents] == [
-        ("mock complete from origin", "goal")
+    assert [(step.description, step.to) for step in project.steps] == [
+        ("seed", "f001"),
+        ("mock complete from f001", "goal"),
     ]
