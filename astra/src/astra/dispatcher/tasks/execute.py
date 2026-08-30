@@ -56,7 +56,7 @@ def _should_write_fact(
     project: ProjectDetail,
     description: str,
 ) -> bool:
-    """写回前把关：事实去重（防重复侦察）。确认责任在执行者自证（submit_fact 语义）。"""
+    """写回前把关：事实去重（防重复侦察）。确认责任在执行者自证（自证写回语义）。"""
     duplicate = find_duplicate_fact(project, description)
     if duplicate is not None:
         LOG.info(

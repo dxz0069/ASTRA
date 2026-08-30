@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 
 TaskType = Literal["decide", "execute", "bootstrap"]
-# v0.2 FGS 重建（2026-08-29）：执行底座只留 pi（最原始、完全可控——Less is More）；
+# v0.2 星图架构重建（2026-08-29）：执行底座只留 pi（最原始、完全可控）；
 # claudecode/codex/dsh 适配器全部移除。
 WorkerType = Literal["pi", "mock"]
 CompletedAction = Literal["remove", "stop"]

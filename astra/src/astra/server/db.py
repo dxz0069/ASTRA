@@ -130,7 +130,7 @@ def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
 
 
 def _migrate_legacy(conn: sqlite3.Connection) -> None:
-    """旧库（intents/reason_* 命名、confidence/evidence 审查字段）→ FGS v2。
+    """旧库（intents/reason_* 命名、confidence/evidence 审查字段）→ 星图架构 v2。
 
     生产环境每轮全新建库，本迁移只服务本地开发库的平滑升级；
     步骤/事实数据全量保留，审查链遗产字段（confidence/evidence/challenged）丢弃。

@@ -227,7 +227,7 @@ def run_bootstrap_task(
                 )
                 best_effort_release(client, project.project.id, step.id, worker.name)
                 return "rejected"
-            # 增量星记：除最后一条外全部直接写回
+            # 增量天枢：除最后一条外全部直接写回
             for fd in facts[:-1]:
                 response = client.create_fact(project.project.id, fd, kind="regular", creator=worker.name)
                 if response.status_code >= 400:
@@ -245,7 +245,7 @@ def run_bootstrap_task(
                     phase_ms=execute_ms,
                     total_ms=int((time.perf_counter() - task_started) * 1000),
                 )
-            # 未声明完成：conclude 最后一条星记，交给 reason 接管
+            # 未声明完成：conclude 最后一条天枢，交给 reason 接管
             LOG.info("bootstrap concluded without complete project=%s step=%s worker=%s facts=%s", project.project.id, step.id, worker.name, len(facts))
             return write_conclude_result(
                 client,
@@ -268,7 +268,7 @@ def run_bootstrap_task(
                 preview(first.stdout),
                 preview(first.stderr),
             )
-            # 抢救 stdout 中已输出的增量星记（超时不丢中间产物）
+            # 抢救 stdout 中已输出的增量天枢（超时不丢中间产物）
             try:
                 model_output = driver.extract_response_text(first.stdout, first.stderr)
                 rescued, _ = validate_bootstrap_stream(model_output)

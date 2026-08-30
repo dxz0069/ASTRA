@@ -6,7 +6,7 @@
 FAIL_THRESHOLD 次失败 → 写告警文件 + 打印醒目日志；同时扫描最近 CC 会话
 尾部是否全是配额/权限错误（双保险）。
 
-2026-08-29：v0.2 FGS 重建随 pi 底座改读 PI_* env（anthropic 兼容端点不变）。
+2026-08-29：v0.2 星图架构重建随 pi 底座改读 PI_* env（anthropic 兼容端点不变）。
 
 用法：BENCHMARK_TOKEN 不需要；需注入与 runner 相同的模型 env
 （PI_API_KEY / PI_BASE_URL / PI_MODEL）。
