@@ -174,3 +174,77 @@ def test_local_execution_end_to_end(http_client: TestClient) -> None:
         loop.close()
 
     assert project.project.status == "completed"
+
+
+# ---------------- 审计20轮：local 工作区清理 + 会话孤儿 ----------------
+
+def test_local_cleanup_completed_removes_workspace(tmp_path) -> None:
+    """cleanup 空壳修复：完成项目的工作区目录必须真删（旧版返回 True 但目录永留）。"""
+    from astra.dispatcher.config import ContainerConfig
+
+    root = tmp_path / "wl"
+    manager = LocalContainerManager(
+        ContainerConfig(image="unused", network_mode="host", completed_action="stop"),
+        workspace_root=root,
+    )
+    pid = "proj_777"
+    manager.ensure_running(pid)
+    name = manager.container_name(pid)
+    ws = root / pid
+    assert ws.is_dir()
+    (ws / "probe.py").write_text("print('x')", encoding="utf-8")
+
+    assert manager.needs_completed_cleanup(pid) is True
+    assert manager.cleanup_completed(pid) is True
+    assert not ws.exists()
+    assert manager.needs_completed_cleanup(pid) is False
+
+    # dispatch 重启态（_workspaces 清空但目录在）仍需识别待清理
+    manager2 = LocalContainerManager(
+        ContainerConfig(image="unused", network_mode="host", completed_action="stop"),
+        workspace_root=root,
+    )
+    manager2.ensure_running(pid)
+    (root / pid / "scan.out").write_text("data", encoding="utf-8")
+    manager2._workspaces.clear()
+    assert manager2.needs_completed_cleanup(pid) is True
+    assert manager2.cleanup_completed(pid) is True
+    assert not (root / pid).exists()
+
+
+def test_local_cleanup_rejects_path_traversal(tmp_path) -> None:
+    """防越界：恶意 name（../ 穿越）不得删到 workspace_root 之外。"""
+    from astra.dispatcher.config import ContainerConfig
+
+    root = tmp_path / "wl"
+    root.mkdir()
+    outside = tmp_path / "outside-keep.txt"
+    outside.write_text("keep", encoding="utf-8")
+    manager = LocalContainerManager(
+        ContainerConfig(image="unused", network_mode="host", completed_action="stop"),
+        workspace_root=root,
+    )
+    # 原始恶意名直击防线（container_name 会把 / 转义成 -，此处绕过它构造真实穿越）
+    assert manager.cleanup_orphan("astra-local-../../outside-keep.txt") is False
+    assert outside.exists()
+    assert manager.cleanup_orphan("astra-local-..\\..\\escape.txt") is False
+    assert outside.exists()
+
+
+def test_client_closes_stale_session_on_ident_reuse() -> None:
+    """会话孤儿修复：ident 复用覆盖注册项时，旧 Session 必须被关闭。"""
+    from astra.dispatcher.protocol.client import ASTRAClient
+
+    client = ASTRAClient("http://127.0.0.1:1")
+    closed: list[bool] = []
+
+    class _FakeSession:
+        def close(self) -> None:
+            closed.append(True)
+
+    import threading as _t
+    ident = _t.get_ident()
+    client._sessions[ident] = _FakeSession()  # 模拟已死线程的残留注册
+    fresh = client._session()
+    assert closed == [True]  # 旧 Session 已关
+    assert client._sessions[ident] is fresh

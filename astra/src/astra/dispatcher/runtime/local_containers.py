@@ -95,19 +95,28 @@ class LocalContainerManager:
         return "running"
 
     def cleanup_completed(self, project_id: str) -> bool:
-        return True
+        # 审计20轮：旧版是返回 True 的空壳——工作区目录（agent 写的探针/扫描产物）
+        # 永不删除，托管 24h 轮几十项目 = 磁盘无界泄漏，且调度器被 True 欺骗；
+        # completed 是终态（defer 复用走 cleanup_stopped 不删），此处真删
+        return self._rmtree_workspace(self.container_name(project_id))
 
     def cleanup_stopped(self, project_id: str) -> bool:
+        # defer 语义与 docker stop 对齐：保留工作区供续跑（星图为源，scratch 保值）
         return True
 
     def cleanup_orphan(self, name: str) -> bool:
-        return True
+        return self._rmtree_workspace(name)
 
     def managed_container_names(self) -> list[str]:
         return sorted(self._workspaces)
 
     def needs_completed_cleanup(self, project_id: str) -> bool:
-        return False
+        name = self.container_name(project_id)
+        if name in self._workspaces:
+            return True
+        # dispatch 重启后 _workspaces 清空但磁盘目录仍在——按磁盘实情判定（懒加载态）
+        candidate = self._workspace_root / project_id.replace("/", "-")
+        return candidate.is_dir()
 
     def needs_orphan_cleanup(self, name: str) -> bool:
         return False
@@ -142,6 +151,31 @@ class LocalContainerManager:
     def remove_container(self, name: str, *, force: bool = True) -> None:
         with self._lock(name):
             self._workspaces.pop(name, None)
+        self._rmtree_workspace(name)
+
+    def _rmtree_workspace(self, name: str) -> bool:
+        """删除 name 对应的工作区目录（含防越界：只删 workspace_root 之内）。
+
+        name 可来自调度器外部输入——路径解析逃出 workspace_root 一律拒删。
+        """
+        workspace = self._workspaces.get(name)
+        if workspace is None:
+            workspace = self._workspace_root / name.removeprefix(self._PREFIX)
+        try:
+            resolved = workspace.resolve()
+        except OSError:
+            return False
+        if resolved == self._workspace_root or self._workspace_root not in resolved.parents:
+            return False  # 根目录本身/越界路径（防穿越）——拒绝
+        with self._lock(name):
+            self._workspaces.pop(name, None)
+        try:
+            shutil.rmtree(resolved, ignore_errors=True)
+            LOG.info("local workspace removed workspace=%s", resolved)
+            return True
+        except OSError as exc:
+            LOG.warning("local workspace remove failed workspace=%s error=%s", resolved, exc)
+            return False
 
     def _to_host_path(self, container_name: str, path: str) -> Path:
         """容器内绝对路径 → 宿主路径。

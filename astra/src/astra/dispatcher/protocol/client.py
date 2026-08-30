@@ -246,8 +246,18 @@ class ASTRAClient:
         session.mount("http://", adapter)
         session.mount("https://", adapter)
         self._local.session = session
+        ident = threading.get_ident()
         with self._sessions_lock:
-            self._sessions[threading.get_ident()] = session
+            # 审计20轮：线程 ident 会被复用——已死线程残留的注册项被覆盖时，
+            # 旧 Session（含最多 64 连接池）成孤儿只等 GC；高频线程轮换下连接
+            # 积累。覆盖前显式关闭旧 Session。
+            stale = self._sessions.get(ident)
+            self._sessions[ident] = session
+        if stale is not None and stale is not session:
+            try:
+                stale.close()
+            except Exception:  # noqa: BLE001 —— 关闭失败不阻塞取会话
+                pass
         return session
 
     def _remove_session(self) -> None:
