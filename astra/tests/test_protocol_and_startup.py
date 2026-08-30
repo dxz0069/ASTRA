@@ -49,3 +49,8 @@ def test_startup_healthcheck_failure_summary_includes_worker_details() -> None:
         "startup healthchecks failed for all workers: "
         "worker-a(http=401, code=1, preview=unauthorized)"
     )
+
+
+def test_startup_healthcheck_failure_summary_empty_results_message() -> None:
+    """审计21轮：零 worker 配置的中止消息必须说清真相（旧版反转成 failed for all）。"""
+    assert format_failure_summary([]) == "startup healthcheck aborted: no workers configured"

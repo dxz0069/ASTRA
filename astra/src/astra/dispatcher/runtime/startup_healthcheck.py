@@ -79,9 +79,11 @@ def run_startup_healthchecks(
 
 
 def format_failure_summary(results: list[StartupHealthcheckResult]) -> str:
+    """全败中止消息（调用点保证仅在"无一健康"时调用；空结果=零 worker 配置）。"""
     failed = [result for result in results if not result.ok]
     if not failed:
-        return "startup healthchecks failed for all workers"
+        # 零 worker 配置：调用点 any(ok)=False 也会走到这——消息必须说清真相而非反转
+        return "startup healthcheck aborted: no workers configured"
     details = []
     for result in failed:
         preview = result.response_preview or result.stderr_preview or "-"
