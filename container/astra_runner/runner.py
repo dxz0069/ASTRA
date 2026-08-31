@@ -81,6 +81,7 @@ class ChallengeResult:
     transient_count: int = 0  # 自愈①：连续网络瞬断计数（超上限判死退出，防误匹配死循环）
     busy_count: int = 0  # 自愈④：槽位 busy 连击计数（指数退避用；漏定义曾致 SlotBusy 线程炸死）
     kb_deadend_texts: list[str] = field(default_factory=list)  # V5：同题型避坑提示（失败经验库注入）
+    last_origin: str = ""  # r9：上次开题的靶机地址（回访漂移检测——容器重建后地址可能变）
     flag_count: int = 0  # 平台题旗数（多旗题收割调度依据；0=未知按单旗处理）
     total_score: int = 0  # 平台题分值（V10 难题倾斜：大分题 defer 预算 +1）
     flags_correct_at_defer: int = 0  # V10：上次 defer 时的已收旗数（图重置判据）
@@ -860,6 +861,15 @@ def _run_single_challenge(
             progress.mark(code, "started")
         container_addr = challenge_addr(started)
         origin = ", ".join(str(addr) for addr in container_addr) or code
+        # r9 波次回访配套：平台重建容器后地址可能漂移（R6 实锤 .97→.96）——星图 origin
+        # 存的是旧地址，不处理则回访 agent 全程打空靶。漂移即注入运维提示告知新地址。
+        if result.last_origin and result.last_origin != origin and project_id:
+            try:
+                engine.create_hint(project_id, f"[运维提示·地址漂移] 靶机已重建，新地址：{origin}（旧地址 {result.last_origin} 已失效，全部探测用新地址）")
+                LOG.warning("challenge addr drifted code=%s old=%s new=%s（已注入新地址提示）", code, result.last_origin, origin)
+            except Exception:  # noqa: BLE001
+                pass
+        result.last_origin = origin
         goal = build_goal_text(description, ch)
         # defer 续跑：复用原引擎项目（星图/会话进度保留），否则新建。
         # reactivate 失败（终态/不存在）→ 放弃复用新建项目——丢星图远好于
