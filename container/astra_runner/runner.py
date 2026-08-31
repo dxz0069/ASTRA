@@ -2098,7 +2098,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--hint-after-seconds", type=float, default=900.0, help="第一次 hint 触发时间（默认 900s=15 分钟无解即取）")
     parser.add_argument("--hint2-after-seconds", type=float, default=1500.0, help="第二次 hint 触发时间（默认 1500s=25 分钟无解即取；V2-1 给取后利用留足时间）")
-    parser.add_argument("--defer-after-seconds", type=float, default=2700.0, help="单题最长连续分析（默认 2700s=45 分钟无果保留进度放回队尾）")
+    parser.add_argument("--defer-after-seconds", type=float, default=600.0, help="单题波次时长（默认 600s=10 分钟波次；r9 榜首打法对齐——短窗快扫+多波回访）")
     parser.add_argument("--hint-min-score", type=int, default=0, help="自动 hint 的最低题分值（默认 0=不限制）")
     parser.add_argument("--once", action="store_true", help="跑一轮后退出（默认循环直到任务结束）")
     parser.add_argument("--engine", default="local", choices=["local"], help="ASTRA 引擎模式（当前仅 local）")
