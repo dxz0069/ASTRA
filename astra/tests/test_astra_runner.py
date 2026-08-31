@@ -994,15 +994,16 @@ def test_v2_order_codes_explicit_priority() -> None:
 
 
 def test_v2_flag_variants_and_wrong_count() -> None:
-    """V2-3：原样错交后自动大小写变体兜底；V2-2：wrong_count 记近失。"""
+    """V2-2：wrong_count 记近失；r9 起移除 V2-3 变体自动重试（f2-07 三连错交解剖——
+    1 次错交被 lower/upper 兜底放大成 3 次，现代提取链忠实保真后无收益纯噪音）。"""
     from astra_runner.runner import _submit_flag_safely
 
-    client = FakeClient([FakeChallenge("c1")], flags={"c1": ["FLAG{ABC}" ]})
+    client = FakeClient([FakeChallenge("c1")], flags={"c1": ["FLAG{ABC}"]})
     result = ChallengeResult(unique_code="c1", description="d")
     _submit_flag_safely(client, "c1", "flag{abc} ", result)  # 带空白，原样为小写错
-    assert result.flags_correct == 1
-    assert result.wrong_count >= 1  # 原样错交记为近失信号
-    assert ("c1", "FLAG{ABC}") in client.submitted  # 变体兜底命中
+    assert result.flags_correct == 0
+    assert result.wrong_count == 1  # 恰一次近失——不再放大
+    assert client.submitted == [("c1", "flag{abc}")]  # 无变体重试
 
 
 def test_v2_hint_cache_store() -> None:

@@ -2079,15 +2079,9 @@ def _submit_flag_safely(
         return
     if _record(flag, res):
         return
-    # V2-3：原样提交判错 → 自动尝试大小写变体（平台大小写敏感时的兜底；最多 2 次）
-    for variant in (flag.lower(), flag.upper()):
-        if variant == flag:
-            continue
-        res2 = _submit_once(variant)
-        if res2 is None or res2 == "dup":
-            return
-        if _record(variant, res2):
-            return
+    # r9 终局归因（f2-07 三连错交解剖）：V2-3 大小写变体自动重试是 R6 时代兜底，
+    # 现代提取链忠实保真 + 假旗过滤齐备，变体重试只把 1 次错交放大成 3 次
+    # （污染近失信号/回执噪音）——平台旗大小写精确，猜变体无收益，移除。
 
 
 def main(argv: list[str] | None = None) -> int:
