@@ -1004,6 +1004,12 @@ def _run_single_challenge(
             tdi_div = 1.0 + _task_difficulty_signal(result)
             hint_after_seconds = min(hint_after_seconds / tdi_div, effective_timeout * 0.4)
             hint2_after_seconds = min(hint2_after_seconds / tdi_div, effective_timeout * 0.7)
+        elif defer_after_seconds > 0:
+            # 审计35轮（波次制相互作用②）：hint 门必须落在波次窗内——10min 波次下
+            # 默认 hint1(15min) 晚于 defer(10min)，非 KB 题的 hint 门永远不可达
+            # （--auto-hint 开启时表述不符）。KB 分支已有比例缩放，此分支补齐非 KB 题。
+            hint_after_seconds = min(hint_after_seconds, effective_timeout * 0.4)
+            hint2_after_seconds = min(hint2_after_seconds, effective_timeout * 0.7)
         deadline = time.monotonic() + effective_timeout
         scan_round = 0
         # 卡题分级 hint：hint_after_seconds（默认 15 分钟）取第一次，

@@ -1167,3 +1167,25 @@ def test_graph_reset_requires_stalled_facts_not_just_zero_flags(monkeypatch) -> 
     # 图每波都在长 → 任何 defer 轮都不触发 graph reset（旧行为会在第 2 波清图）
     assert client.started.count("g-01") >= _runner_module.MAX_DEFER_PER_CHALLENGE  # 末尾饥饿回灌可 +1
     assert results[0].graph_reset_count == 0, "星图增长中被误清图（波次制相互作用缺陷复发）"
+
+
+def test_hint_gate_fits_wave_window_non_kb() -> None:
+    """审计35轮：非 KB 题的 hint 门也按波次窗比例缩放——10min 波次下
+    默认 hint1(15min) 晚于 defer(10min) 永不可达（--auto-hint 表述不符）。"""
+    challenges = [FakeChallenge("h-01", total_score=100)]  # 无 KB 条目
+
+    class NeverEngine(FakeEngine):
+        def wait_project(self, project_id, timeout_seconds):
+            return False
+
+    client = FakeClient(challenges, flags={})
+    run_benchmark(
+        client, lambda: NeverEngine({}),
+        challenge_timeout_seconds=0.2, flag_poll_seconds=0.02,
+        defer_after_seconds=0.2,  # 波次窗 0.2s
+        hint_after_seconds=900.0, hint2_after_seconds=1500.0,  # 默认值（远大于窗）
+        auto_hint=True, hint_min_score=0,
+        parallel=1,
+    )
+    # hint1 门应缩到窗 40%（0.08s）内触发——窗口 0.2s 足够到达
+    assert client.hints.count("h-01") >= 1, "非 KB 题 hint 门在波次窗内不可达（错配复发）"
