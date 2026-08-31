@@ -2165,8 +2165,24 @@ def main(argv: list[str] | None = None) -> int:
             LOG.warning("model watchdog start failed error=%s（继续跑分，需人工监控）", exc)
 
     results: list[ChallengeResult] = []
+    # r9 实锤事故（16:46 自愈重启撞进 VPN 断链窗，启动期 VpnCheckError 顶层未捕获
+    # 进程直接死，白烧 1h45m 窗口——R7 已记录此坑未修）。改为等待重试：VPN 未通时
+    # 每 30s 复查，最长等 2h；期间不烧任何 token。
+    adapter = TsecbenchAdapter(base_url=base_url, token=token)
+    client = None
+    for attempt in range(240):
+        try:
+            client = adapter.__enter__()
+            break
+        except Exception as exc:  # noqa: BLE001 —— VpnCheckError/网络未达：等 VPN 恢复
+            if attempt == 0:
+                LOG.warning("启动期平台/VPN 不可达（%.80s）——等待恢复，每 30s 复查（最长 2h）", exc)
+            time.sleep(30)
+    if client is None:
+        LOG.error("等待 2h 仍不可达，放弃启动")
+        return 2
     try:
-        with TsecbenchAdapter(base_url=base_url, token=token) as client:
+        with client:
             skip_codes = {c.strip() for c in args.skip_codes.split(",")} if args.skip_codes else None
             results = run_benchmark(
                 client,
