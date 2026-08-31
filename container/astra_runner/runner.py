@@ -305,12 +305,20 @@ def run_benchmark(
     if defer_after_seconds > 0:
         longest_single = max(longest_single, defer_after_seconds + DONE_FLAG_WAIT_SECONDS + 30)
     challenges = call_with_retry(lambda: client.list_challenges(), "list_challenges")
-    # 启动时清理已完成题的遗留容器（上轮异常退出可能残留并占用活跃名额）
+    # 启动时清理遗留容器（上轮异常退出可能残留并占用活跃名额）：
+    # ① is_completed 的收尾清理；② 未完成但 container_status=available 的在跑僵尸
+    # （r9d 事故实锤：换血启动后 3 个僵尸槽占满名额，开题 slot busy 自旋 8 分钟——
+    # 启动时全量收割，本题会被队列按需重开，start 幂等）。本 runner 独占平台任务
+    # 名额，全量收割语义安全。
     for ch in challenges:
         code0 = getattr(ch, "unique_code", None) or getattr(ch, "code", "")
-        if code0 and getattr(ch, "is_completed", False):
+        stale = getattr(ch, "is_completed", False) or (
+            str(getattr(ch, "container_status", "") or "").lower() == "available"
+        )
+        if code0 and stale:
             try:
                 call_with_retry(lambda: client.close_challenge(code0), f"close_challenge:{code0}", retries=2)
+                LOG.info("startup stale slot reclaimed code=%s", code0)
             except Exception:  # noqa: BLE001 —— 幂等清理，失败忽略
                 pass
     queue: deque = deque()
