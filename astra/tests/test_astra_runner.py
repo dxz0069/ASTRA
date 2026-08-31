@@ -231,9 +231,9 @@ def test_run_benchmark_timeout_and_engine_stop() -> None:
     )
     assert results[0].started is True
     # defer 语义：无结果时每次关平台题释放名额并放回队尾；
-    # 达到上限（MAX_DEFER=2）后放弃——引擎项目删除、进度文件标 done
-    assert client.closed == ["c003", "c003"]
-    assert results[0].defer_count == 2
+    # 达到上限（MAX_DEFER_PER_CHALLENGE）后放弃——引擎项目删除、进度文件标 done
+    assert client.closed == ["c003"] * _runner_module.MAX_DEFER_PER_CHALLENGE
+    assert results[0].defer_count == _runner_module.MAX_DEFER_PER_CHALLENGE
     # 前 2 次 defer 保留引擎项目（星图进度），第 3 次进入前判断达上限放弃删除
     assert engines[-1].deleted == ["proj-0"]
 
@@ -458,6 +458,7 @@ def test_run_benchmark_auto_hint_after_seconds_trigger() -> None:
         hint2_after_seconds=0.1,
         defer_after_seconds=0.5,  # 测试内快速 defer 防挂起
         hint_min_score=0,
+        auto_hint=True,  # r9 零 hint 默认：hint 语义测试显式开启
     )
     assert results[0].used_hint is True
     assert len(client.hints) >= 1  # defer 续跑可能触发多段 hint，至少一次
@@ -506,8 +507,8 @@ def test_run_benchmark_defer_resumes_same_project() -> None:
     )
     # 无 flag 无归航：连续 defer 到上限（MAX_DEFER=2）后放弃
     assert results[0].started is True
-    assert results[0].defer_count == 2  # defer 2 次后达上限
-    assert client.started.count("d001") == 2  # 第 1 次 + defer 后第 2 次（达上限不再放回）
+    assert results[0].defer_count == _runner_module.MAX_DEFER_PER_CHALLENGE  # 多波回访到上限
+    assert client.started.count("d001") == _runner_module.MAX_DEFER_PER_CHALLENGE  # 上限波次
     # defer 续跑复用同一引擎项目 id（结果保留 project_id）
     assert results[0].project_id is not None
 
@@ -848,11 +849,11 @@ def test_defer_stops_and_resume_reactivates_project() -> None:
         challenge_timeout_seconds=0.2, flag_poll_seconds=0.05,
         defer_after_seconds=0.2,
     )
-    assert results[0].defer_count == 2
+    assert results[0].defer_count == _runner_module.MAX_DEFER_PER_CHALLENGE
     # defer 时项目被停（防僵尸），resume 时被激活，达上限后被删除
     assert len(shared.stop_calls) >= 1
     assert len(shared.reactivate_calls) >= 1
-    assert len(shared.deleted) == 1
+    assert len(shared.deleted) >= 1  # 多波回访上限后放弃删除（波次数=MAX_DEFER_PER_CHALLENGE）
 
 
 def test_reconcile_stops_orphan_active_project(monkeypatch) -> None:
@@ -1064,6 +1065,9 @@ def test_v2_kb_short_first_attempt(monkeypatch, tmp_path) -> None:
 
     import astra_runner.runner as runner_mod
 
+    # 本测试靶点是首攻缩短计时，非波次预算——压回 2 波防 10×6s 拖爆时限
+    monkeypatch.setattr(runner_mod, "MAX_DEFER_PER_CHALLENGE", 2)
+
     kb_file = tmp_path / "kb.md"
     kb_file.write_text(
         "## Foo（kb-01）\n- 首解耗时：0min\n- 思路1：historical approach\n",
@@ -1086,8 +1090,8 @@ def test_v2_kb_short_first_attempt(monkeypatch, tmp_path) -> None:
     elapsed = _time.monotonic() - t0
     # 首攻 0.5s + 第二发 6s + 收尾 < 10s（若首攻也吃满 6s 会 >12s）
     assert elapsed < 10.0, f"first attack not shortened? elapsed={elapsed:.1f}s"
-    assert client.started.count("kb-01") == 2  # 两发后 defer 上限放弃
-    assert results[0].defer_count == runner_mod.MAX_DEFER_PER_CHALLENGE
+    assert client.started.count("kb-01") == 2  # 两发后 defer 上限放弃（本测试压回 2 波）
+    assert results[0].defer_count == 2
 
 
 def test_run_benchmark_engine_completed_zero_flags_defers_not_done() -> None:
@@ -1120,5 +1124,5 @@ def test_run_benchmark_engine_completed_zero_flags_defers_not_done() -> None:
     )
     r = results[0]
     # 引擎秒归航但 0 旗 → 转 defer 回队而非 done；预算 2 次后放弃
-    assert r.defer_count == 2, "0 旗引擎归航应按 defer 轮转（旧行为 defer_count=0 直接沉没）"
-    assert client.started.count("z-01") == 2  # 回队续跑了一次
+    assert r.defer_count == _runner_module.MAX_DEFER_PER_CHALLENGE, "0 旗引擎归航应按 defer 轮转（旧行为 defer_count=0 直接沉没）"
+    assert client.started.count("z-01") == _runner_module.MAX_DEFER_PER_CHALLENGE  # 多波回队续跑
