@@ -81,6 +81,18 @@ RUN ok=""; for idx in 1 2 3; do \
     done; [ -n "$ok" ]
 
 # astra 引擎（server + dispatcher）与靶场接入编排器
+# 2026-08-29 v0.2 FGS 重建：执行底座只留 pi（@mariozechner/pi-coding-agent）——
+# 最原始、完全可控的 Agent Loop（Less is More）。claude-code 与 playwright-mcp
+# （CC 经 .claude.json 注入）整体移除；浏览器类需求由 worker 经 bash 直驱。
+# 硬失败纪律：双镜像源装不上直接断构建；装完必须能输出版本号。
+RUN ok=""; \
+    for reg in https://registry.npmmirror.com https://registry.npmjs.org; do \
+      echo "[pi] trying $reg"; \
+      if sudo npm install -g --registry=$reg @mariozechner/pi-coding-agent@0.73.0; then ok=1; break; fi; \
+      sleep $((RANDOM % 5 + 3)); \
+    done; \
+    [ -n "$ok" ] && pi --version
+
 COPY ./astra /opt/astra
 RUN cd /opt/astra && ok=""; for idx in 1 2 3; do \
       if pip3 install -i http://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn uv_build --break-system-packages && pip3 install -i http://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn . --break-system-packages; then ok=1; break; fi; \
@@ -101,17 +113,7 @@ COPY ./container/knowledge /opt/knowledge
 # 镜像默认入口：astra-runner（本地模式可手动执行 python3 /opt/astra-runner/runner.py）
 ENTRYPOINT ["python3", "/opt/astra-runner/runner.py"]
 
-# 2026-08-29 v0.2 FGS 重建：执行底座只留 pi（@mariozechner/pi-coding-agent）——
-# 最原始、完全可控的 Agent Loop（Less is More）。claude-code 与 playwright-mcp
-# （CC 经 .claude.json 注入）整体移除；浏览器类需求由 worker 经 bash 直驱。
-# 硬失败纪律：双镜像源装不上直接断构建；装完必须能输出版本号。
-RUN ok=""; \
-    for reg in https://registry.npmmirror.com https://registry.npmjs.org; do \
-      echo "[pi] trying $reg"; \
-      if sudo npm install -g --registry=$reg @mariozechner/pi-coding-agent@0.73.0; then ok=1; break; fi; \
-      sleep $((RANDOM % 5 + 3)); \
-    done; \
-    [ -n "$ok" ] && pi --version
+# pi 安装层已前移至代码 COPY 之前（r10 层序修正：稳定依赖层前置，代码迭代不再重跑 npm）
 
 RUN sudo chmod +x /usr/local/bin/kerbrute
 RUN mkdir -p /home/kali/.config/nuclei && \
