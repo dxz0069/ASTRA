@@ -37,9 +37,9 @@ LOG = logging.getLogger("astra-runner")
 DEFAULT_CHALLENGE_TIMEOUT_SECONDS = 30 * 60
 DEFAULT_FLAG_POLL_SECONDS = 5
 # 每题最多 defer（45 分钟无果放回队尾）次数——超过则关闭放弃，防无限轮转
-MAX_DEFER_PER_CHALLENGE = 2
+MAX_DEFER_PER_CHALLENGE = 10  # r9 榜首打法对齐：多波回访（标杆轮 86 次实例重启，单题最多 3 波会话回访）
 # V9 战果扩展预算封顶（多旗题每收一旗 +2 窗口，hard +1）
-MAX_DEFER_BUDGET_CAP = 8
+MAX_DEFER_BUDGET_CAP = 16
 # V2-1③：单题 hint 成本上限（每次扣该题 10%，2 次=20%）
 MAX_HINTS_PER_CHALLENGE = 2
 # V2-2：尾段窗口（剩余<2h）优先重攻近失题
@@ -271,10 +271,10 @@ def run_benchmark(
     parallel: int | str = "auto",
     progress_file: str | None = None,
     task_window_seconds: float | None = None,
-    auto_hint: bool = True,
+    auto_hint: bool = False,
     hint_after_seconds: float = 900.0,
     hint2_after_seconds: float = 1500.0,
-    defer_after_seconds: float = 2700.0,
+    defer_after_seconds: float = 600.0,
     hint_min_score: int = 0,
     prefer_easy: bool = True,
     order_codes: list[str] | None = None,
@@ -822,10 +822,10 @@ def _run_single_challenge(
     flag_poll_seconds: float,
     progress: ProgressStore | None = None,
     *,
-    auto_hint: bool = True,
+    auto_hint: bool = False,
     hint_after_seconds: float = 900.0,
     hint2_after_seconds: float = 1800.0,
-    defer_after_seconds: float = 2700.0,
+    defer_after_seconds: float = 600.0,
     hint_min_score: int = 0,
 ) -> str | None:
     """单题五步生命周期（并行窗口内每个线程跑一个）。
@@ -1978,6 +1978,11 @@ def _try_platform_hint(
     if not hint_text:
         LOG.info("platform hint empty code=%s", code)
         return True
+    # r9 榜首打法对齐（r8 a-13 实例）：单 hint 题第二次 get_hint 返回同文本=重复扣费——
+    # 同文本不注入不计额（费用已发生，防上下文污染与门计数错位）
+    if hint_text in result.hint_texts:
+        LOG.info("platform hint duplicate text skipped code=%s（单 hint 题重复返回，不注入）", code)
+        return True
     try:
         engine.create_hint(project_id, f"[平台提示] {hint_text}")
         result.used_hint = True
@@ -2083,7 +2088,7 @@ def main(argv: list[str] | None = None) -> int:
         "ASTRA_TASK_WINDOW_MINUTES 覆盖——如百度 24 小时窗口设 1380）；"
         "剩余时间不足最长单题时停止开新题",
     )
-    parser.add_argument("--no-auto-hint", action="store_true", help="禁用卡题自动获取平台 hint（hint 会按比例扣该题得分）")
+    parser.add_argument("--auto-hint", action="store_true", help="启用卡题自动获取平台 hint（默认关闭——r8 实测 51 次购买仅 28%% 转化，榜首标杆零 hint 拿 97.14；hint 按比例扣该题得分）")
     parser.add_argument("--no-prefer-easy", action="store_true", help="禁用 easy→medium→hard 开题排序（恢复平台原始顺序）")
     parser.add_argument(
         "--order-codes",
@@ -2161,7 +2166,7 @@ def main(argv: list[str] | None = None) -> int:
                 parallel=args.parallel,
                 progress_file=args.progress_file,
                 task_window_seconds=args.task_window_minutes * 60 if args.task_window_minutes else None,
-                auto_hint=not args.no_auto_hint,
+                auto_hint=args.auto_hint,
                 hint_after_seconds=args.hint_after_seconds,
                 hint2_after_seconds=args.hint2_after_seconds,
                 defer_after_seconds=args.defer_after_seconds,
