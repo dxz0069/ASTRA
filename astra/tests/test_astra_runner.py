@@ -1127,3 +1127,43 @@ def test_run_benchmark_engine_completed_zero_flags_defers_not_done() -> None:
     # 引擎秒归航但 0 旗 → 转 defer 回队而非 done；预算 2 次后放弃
     assert r.defer_count == _runner_module.MAX_DEFER_PER_CHALLENGE, "0 旗引擎归航应按 defer 轮转（旧行为 defer_count=0 直接沉没）"
     assert client.started.count("z-01") == _runner_module.MAX_DEFER_PER_CHALLENGE  # 多波回队续跑
+
+
+def test_graph_reset_requires_stalled_facts_not_just_zero_flags(monkeypatch) -> None:
+    """审计34轮：波次制下零新旗≠死图——星图持续增长时禁止清图（b 系侦察积累保护）。"""
+    challenges = [FakeChallenge("g-01", total_score=1200, flag_count=4)]
+
+    class SlowGraphEngine(FakeEngine):
+        """每波吐新 facts（图在长）但永不给旗——图在积累，不许重置。"""
+
+        def __init__(self, flags_by_project):
+            super().__init__(flags_by_project, done=False)
+            self.waves = 0
+            self.deleted_reset = []
+
+        def start(self):
+            super().start()
+            self.waves += 1
+
+        def list_fact_descriptions(self, project_id):
+            return [f"侦察发现 {i}：端口/服务/路径细节" for i in range(3 + self.waves)]
+
+        def stats(self, project_id):
+            return {"facts": 3 + self.waves, "hints": 0}  # 图随波次增长（真实引擎行为）
+
+    # 真实系统 engine_factory 返回 daemon 单例——图/波次计数跨 wave 持续
+    shared = SlowGraphEngine({})
+
+    def factory():
+        return shared
+
+    client = FakeClient(challenges, flags={})
+    results = run_benchmark(
+        client, factory,
+        challenge_timeout_seconds=0.2, flag_poll_seconds=0.02,
+        defer_after_seconds=0.15,
+        parallel=1,
+    )
+    # 图每波都在长 → 任何 defer 轮都不触发 graph reset（旧行为会在第 2 波清图）
+    assert client.started.count("g-01") >= _runner_module.MAX_DEFER_PER_CHALLENGE  # 末尾饥饿回灌可 +1
+    assert results[0].graph_reset_count == 0, "星图增长中被误清图（波次制相互作用缺陷复发）"

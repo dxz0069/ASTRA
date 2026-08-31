@@ -85,6 +85,7 @@ class ChallengeResult:
     flag_count: int = 0  # 平台题旗数（多旗题收割调度依据；0=未知按单旗处理）
     total_score: int = 0  # 平台题分值（V10 难题倾斜：大分题 defer 预算 +1）
     flags_correct_at_defer: int = 0  # V10：上次 defer 时的已收旗数（图重置判据）
+    facts_count_at_defer: int = -1  # 审计34轮：上次 defer 时的天枢数（图重置判据之二——只看旗不看图会在短波次下误清正在积累的侦察图）
     graph_reset_count: int = 0  # V10：整图重置次数（榜首经验：死图清掉重来）
 
 
@@ -528,6 +529,10 @@ def run_benchmark(
                     result.project_id
                     and result.defer_count >= 2
                     and result.flags_correct == result.flags_correct_at_defer
+                    # 审计34轮（波次制相互作用）：零新旗≠死图——10min 波次下 hard 题
+                    # 二波零旗但星图持续增长属正常积累（b 系侦察 30min+ 才见旗），
+                    # 旧条件会在 20min 就清掉正在变富的图。图也零增长才判真死图。
+                    and (result.facts_count_at_defer < 0 or result.facts_count <= result.facts_count_at_defer)
                 ):
                     try:
                         delete_fn = getattr(engine_factory(), "delete_project", None)
@@ -543,6 +548,7 @@ def run_benchmark(
                     except Exception as exc:  # noqa: BLE001
                         LOG.warning("graph reset failed code=%s error=%s（保图续跑）", result.unique_code, exc)
                 result.flags_correct_at_defer = result.flags_correct
+                result.facts_count_at_defer = result.facts_count
                 # 僵尸项目修复（R5 实测）：defer 即停项目——平台容器已关，继续调度
                 # 只会攻击死靶机并占用 max_running_projects 预算饿死新题；
                 # 服务端 stop 清 worker 租约+reason，scheduler 停止派发并取消在途任务，
