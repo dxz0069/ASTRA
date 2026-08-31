@@ -272,6 +272,7 @@ def _log_phase_usage(worker_name: str, phase: str, stdout: str) -> None:
     import json as _json
 
     total = 0
+    cache_read = 0
     hits = 0
     for line in stdout.splitlines():
         line = line.strip()
@@ -287,8 +288,21 @@ def _log_phase_usage(worker_name: str, phase: str, stdout: str) -> None:
             continue
         hits += 1
         total = max(total, int(u.get("totalTokens") or 0))
+        # r10 缓存经济学计量（榜首 96% 命中是吞吐倍增器，我们从未实测）：
+        # pi/anthropic 端点的缓存读字段多形态兼容提取
+        cache_read = max(cache_read, int(
+            u.get("cacheRead")
+            or u.get("cache_read")
+            or u.get("cache_read_input_tokens")
+            or u.get("cacheReadInputTokens")
+            or 0
+        ))
     if hits:
-        LOG.info("phase usage worker=%s phase=%s turns=%s totalTokens~%s", worker_name, phase, hits, total)
+        hit_rate = f"{cache_read * 100 // max(total, 1)}%" if cache_read else "n/a"
+        LOG.info(
+            "phase usage worker=%s phase=%s turns=%s totalTokens~%s cacheRead~%s(hit %s)",
+            worker_name, phase, hits, total, cache_read, hit_rate,
+        )
 
 
 def project_allows_conclude_fallback(client: ASTRAClient, project_id: str, *, worker_name: str, step_id: str) -> bool:

@@ -224,7 +224,7 @@ class AstraDaemon:
         yaml = f"""server: "{ASTRA_SERVER_URL}"
 runtime:
   interval: 3
-  max_workers: 20
+  max_workers: 26  # r10：8 副本×3=24 + decide 2 的并发帽余量
   max_running_projects: 4
   max_project_workers: 12
   healthcheck_timeout: 60
@@ -241,9 +241,9 @@ tasks:
     conclude_timeout: 90
   decide:
     timeout: {_decide_timeout}
-    max_steps: 7
+    max_steps: 9  # r10：瘦图也能多开方向（榜首每题多方向并行）
   execute:
-    timeout: 600
+    timeout: 300  # r10：对标 68s 中位短会话——压缩 step 时长促高频轮转（600 时代 step 拖满帽）
     conclude_timeout: 120
 container:
   image: "unused"
