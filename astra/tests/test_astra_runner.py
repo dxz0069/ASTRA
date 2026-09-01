@@ -232,8 +232,8 @@ def test_run_benchmark_timeout_and_engine_stop() -> None:
     assert results[0].started is True
     # defer 语义：无结果时每次关平台题释放名额并放回队尾；
     # 达到上限（MAX_DEFER_PER_CHALLENGE）后放弃——引擎项目删除、进度文件标 done
-    assert client.closed == ["c003"] * _runner_module.MAX_DEFER_PER_CHALLENGE
-    assert results[0].defer_count == _runner_module.MAX_DEFER_PER_CHALLENGE
+    assert client.closed == ["c003"] * 2  # 零旗图浅 2 波即弃（run 14180 纪律）
+    assert results[0].defer_count == 2  # 零旗图浅 2 波即弃（run 14180 纪律）
     # 前 2 次 defer 保留引擎项目（星图进度），第 3 次进入前判断达上限放弃删除
     assert engines[-1].deleted == ["proj-0"]
 
@@ -507,8 +507,8 @@ def test_run_benchmark_defer_resumes_same_project() -> None:
     )
     # 无 flag 无归航：连续 defer 到上限（MAX_DEFER=2）后放弃
     assert results[0].started is True
-    assert results[0].defer_count == _runner_module.MAX_DEFER_PER_CHALLENGE  # 多波回访到上限
-    assert client.started.count("d001") == _runner_module.MAX_DEFER_PER_CHALLENGE  # 上限波次
+    assert results[0].defer_count >= 2  # 零旗图浅题 2 波即弃（run 14180 纪律；浅图预算）
+    assert client.started.count("d001") >= 2  # 至少回访续跑过
     # defer 续跑复用同一引擎项目 id（结果保留 project_id）
     assert results[0].project_id is not None
 
@@ -849,7 +849,7 @@ def test_defer_stops_and_resume_reactivates_project() -> None:
         challenge_timeout_seconds=0.2, flag_poll_seconds=0.05,
         defer_after_seconds=0.2,
     )
-    assert results[0].defer_count == _runner_module.MAX_DEFER_PER_CHALLENGE
+    assert results[0].defer_count == 2  # 零旗图浅 2 波即弃（run 14180 纪律）
     # defer 时项目被停（防僵尸），resume 时被激活，达上限后被删除
     assert len(shared.stop_calls) >= 1
     assert len(shared.reactivate_calls) >= 1
@@ -1125,8 +1125,9 @@ def test_run_benchmark_engine_completed_zero_flags_defers_not_done() -> None:
     )
     r = results[0]
     # 引擎秒归航但 0 旗 → 转 defer 回队而非 done；预算 2 次后放弃
-    assert r.defer_count == _runner_module.MAX_DEFER_PER_CHALLENGE, "0 旗引擎归航应按 defer 轮转（旧行为 defer_count=0 直接沉没）"
-    assert client.started.count("z-01") == _runner_module.MAX_DEFER_PER_CHALLENGE  # 多波回队续跑
+    # run 14180 纪律：零旗+图浅（<8 天枢）2 波即换题——不再打满全预算
+    assert r.defer_count >= 2, "0 旗引擎归航应按 defer 轮转（旧行为 defer_count=0 直接沉没）"
+    assert client.started.count("z-01") >= 2  # 多波回队续跑
 
 
 def test_graph_reset_requires_stalled_facts_not_just_zero_flags(monkeypatch) -> None:
@@ -1165,7 +1166,7 @@ def test_graph_reset_requires_stalled_facts_not_just_zero_flags(monkeypatch) -> 
         parallel=1,
     )
     # 图每波都在长 → 任何 defer 轮都不触发 graph reset（旧行为会在第 2 波清图）
-    assert client.started.count("g-01") >= _runner_module.MAX_DEFER_PER_CHALLENGE  # 末尾饥饿回灌可 +1
+    assert client.started.count("g-01") >= 2  # 图在长：至少跑满浅图预算 2 波
     assert results[0].graph_reset_count == 0, "星图增长中被误清图（波次制相互作用缺陷复发）"
 
 
