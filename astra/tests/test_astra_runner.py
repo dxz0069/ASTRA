@@ -595,6 +595,41 @@ def test_run_benchmark_zero_flag_big_score_keeps_extended_budget() -> None:
     assert results[0].defer_count > 2
 
 
+def test_run_benchmark_first_touch_guarantee() -> None:
+    """run 14311 首触保底：近失插队（wrong_count>0 → appendleft）的零旗题
+    耗满 2 波后，未启动题插队首发——防任何重排病理把大半个题库饿死到窗口尾
+    （14311 实测 3.9h 仅 12 题码进槽）。"""
+    challenges = [
+        FakeChallenge("big-stuck", total_score=1800, flag_count=4),
+        FakeChallenge("fresh-1", total_score=300),
+        FakeChallenge("fresh-2", total_score=300),
+    ]
+
+    class WrongOnceEngine(FakeEngine):
+        """big-stuck 第一波吐一面错旗（触发 near-miss 插队首），之后静默。"""
+
+        def list_fact_descriptions(self, project_id: str) -> list[str]:
+            return ["found flag flag{wrong_guess}"] if project_id == "proj-0" else []
+
+        def wait_project(self, project_id: str, timeout_seconds: float) -> bool:
+            return False  # 不归航：逼 defer 路径
+
+    client = FakeClient(challenges, flags={})  # 平台侧无任何正确旗
+    run_benchmark(
+        client,
+        lambda: WrongOnceEngine({}),
+        challenge_timeout_seconds=0.2,
+        flag_poll_seconds=0.01,
+        parallel=1,
+        defer_after_seconds=0.2,
+    )
+    # big-stuck 每波 defer 都 appendleft 插队首；无首触保时 fresh 题要等它
+    # 预算耗尽（5+ 波）才首发。有保底：big-stuck 第 3 次启动前 fresh-1 必须已开。
+    assert "fresh-1" in client.started
+    third_big = [i for i, c in enumerate(client.started) if c == "big-stuck"][2]
+    assert client.started.index("fresh-1") < third_big
+
+
 def test_run_benchmark_multiflag_partial_defers_for_remaining() -> None:
     """V9 多旗收割：flag_count>已收旗数时 defer 回队续攻，不提前关题丢剩余旗。"""
     challenges = [FakeChallenge("mflag", total_score=1200, flag_count=4)]

@@ -611,6 +611,12 @@ def run_benchmark(
 
         P1-1：快照→弹出→重建全程持 queue_lock——否则与 worker 线程的 requeue
         并发时，落在快照与 clear 之间 append 的题会被 clear 永久清除（丢题）。
+
+        run 14311 首触保底（经济性：覆盖保底 vs 单题深挖的预算再分配）：零旗题
+        已耗 ≥2 波次而队里还有从未启动的题时，改弹最前的未启动题——run 14311 实测
+        3.9h 仅 12 题码进槽、54 题（含全部 29 道 hard）零启动，无论成因是哪种
+        重排病理，这条不变式都能保证题库不会被少数轮回题锁死。有旗题（b 系多旗
+        收割中）不受影响，继续享有回访优先。
         """
         with queue_lock:
             if not queue:
@@ -623,6 +629,18 @@ def run_benchmark(
                     if item[1].wrong_count > 0:
                         idx = i
                         break
+            else:
+                head = items[0][1]
+                if head.started and head.flags_correct == 0 and head.defer_count >= 2:
+                    for i, item in enumerate(items):
+                        if not item[1].started:
+                            if i != idx:
+                                LOG.info(
+                                    "first-touch guarantee: skip %s（%s 波零旗）改开未触题 %s",
+                                    head.unique_code, head.defer_count, item[1].unique_code,
+                                )
+                            idx = i
+                            break
             picked = items.pop(idx)
             queue.clear()
             queue.extend(items)
