@@ -772,7 +772,7 @@ def run_benchmark(
         # 自愈③：停摆看门狗——有活跃题但 worker 会话 12 分钟无写入 → 进程级自重启
         #（progress 断点续跑，engine 换血自愈；托管无人值守的生命线）
         if active and os.environ.get("ASTRA_SELF_HEAL", "1") != "0":
-            if _watchdog_stalled() or _progress_pulse_stalled(engine_factory, active, results):
+            if _watchdog_stalled() or _progress_pulse_stalled(engine_factory, active, results) or _llm_chain_stalled():
                 _self_heal_restart(engine_factory)
         if active:
             time.sleep(2)
@@ -808,14 +808,27 @@ def run_benchmark(
     return ordered
 
 
-def _pending_new_flags(flags: list[str], flags_found: list[str]) -> list[str]:
-    """待提交旗过滤：精确去重 + 大小写形态去重（历史与批内双重）。
+# run 14085 事故：b-02 六旗题错交风暴 163 次（单分钟 98 连发）——多旗题拿到部分旗后
+# 模型对剩余旗穷举候选提交，没有同题熔断。连续错交超阈值后进入冷却：本窗口内
+# 停止提交（只留图形分析），defer 回队下个波次重置冷却再战。
+WRONG_SUBMIT_FUSE = 5
+
+
+def _submission_fused(result: Any) -> bool:
+    """同题错误熔断：连续错交 ≥ WRONG_SUBMIT_FUSE 且零正确插入即冷却。"""
+    return result.wrong_count >= WRONG_SUBMIT_FUSE and result.flags_correct == 0
+
+
+def _pending_new_flags(flags: list[str], flags_found: list[str], result: Any = None) -> list[str]:
+    """待提交旗过滤：精确去重 + 大小写形态去重（历史与批内双重）+ 错误熔断。
 
     r7 实测（b-02）：同一 flag 的 flag{x}/FLAG{x} 双形态从天枢各提取一次、
     各错交一次——平台旗大小写敏感，已交形态的大小写变体几乎必是同一（错）旗，
     白烧错交预算；这里按小写折叠一并跳过。r8 实测（c-06）：同批双形态绕过
     历史折叠（提交前 flags_found 未含彼此），补批内折叠去重。
     """
+    if result is not None and _submission_fused(result):
+        return []  # 熔断冷却中：本窗口不再提交（防穷举风暴烧错交计数）
     seen_folded = {f.lower() for f in flags_found}
     out: list[str] = []
     batch_folded: set[str] = set()
@@ -986,6 +999,11 @@ def _run_single_challenge(
         # defer 梯子保持 V2-5 原精调逻辑（首攻缩短/第二发恢复完整梯子）——
         # TDI 只驱动期望预算与 hint 时机，不碰 defer（实测会破坏首攻梯子的时序契约）
         effective_timeout = defer_after_seconds if defer_after_seconds > 0 else timeout_seconds
+        # run 14085 事故：多旗大题被 10min 波次切香肠（b-02 六旗重启 27 次仅收 2 旗——
+        # 每波刚重建上下文就被切走；R8 长窗制下同题曾收 600 分）。旗数 ≥4 的题波次
+        # 翻倍，恢复大题深挖空间；单旗/双旗题维持短波快轮转。
+        if defer_after_seconds > 0 and (result.flag_count or 0) >= 4:
+            effective_timeout = defer_after_seconds * 2
         # V2-5 首攻限时（KB 题）：有历史首解耗时的题，首攻 2×（≥15min 地板）仍无果
         # → 大概率实例已变化，提前 defer 回队（最坏损失 45min→15-20min）；
         # 第二发起恢复完整 defer 梯子（KB 已证伪，按未知题对待）。
@@ -1033,7 +1051,7 @@ def _run_single_challenge(
                 fact_descs = engine.list_fact_descriptions(project_id)
                 fact_count = len(fact_descs)
                 flags = collect_flags_from_facts(fact_descs, [result.description])
-                pending = _pending_new_flags(flags, result.flags_found)
+                pending = _pending_new_flags(flags, result.flags_found, result)
                 for flag in pending:
                     _submit_flag_safely(client, code, flag, result, started_at, engine=engine)
             except Exception:  # noqa: BLE001 —— 引擎 API 偶发失败不中断等待
@@ -1084,7 +1102,7 @@ def _run_single_challenge(
                         try:
                             last_descs = engine.list_fact_descriptions(project_id)
                             last_flags = collect_flags_from_facts(last_descs, [result.description])
-                            for flag in _pending_new_flags(last_flags, result.flags_found):
+                            for flag in _pending_new_flags(last_flags, result.flags_found, result):
                                 _submit_flag_safely(client, code, flag, result, started_at, engine=engine)
                             if last_descs:
                                 # V2-6：删项目前留末段天枢（解出后沉淀知识库）；注入记忆剔除
@@ -1133,7 +1151,7 @@ def _run_single_challenge(
         if not done:
             # 引擎未完成：最后收一次 flag
             flags = collect_flags_from_facts(engine.list_fact_descriptions(project_id), [goal])
-            pending = _pending_new_flags(flags, result.flags_found)
+            pending = _pending_new_flags(flags, result.flags_found, result)
             for flag in pending:
                 _submit_flag_safely(client, code, flag, result, started_at, engine=engine)
             expected = result.flag_count or 1
@@ -1177,7 +1195,7 @@ def _run_single_challenge(
         deadline = time.monotonic() + (DONE_FLAG_WAIT_SECONDS if continue_flag_wait and not project_gone else 0)
         while not project_gone and time.monotonic() < deadline:
             flags = collect_flags_from_facts(engine.list_fact_descriptions(project_id), [goal])
-            pending = _pending_new_flags(flags, result.flags_found)
+            pending = _pending_new_flags(flags, result.flags_found, result)
             if not pending:
                 if flags:
                     break  # 全部已提交
@@ -1894,6 +1912,7 @@ def _reset_watchdog_state() -> None:
     _pulse_facts[0] = -1
     _pulse_stall_since[0] = 0.0
     _watchdog_seen_fresh[0] = False
+    _llm_pulse_last_active[0] = 0.0
 
 
 def _progress_pulse_stalled(engine_factory: Any, active: dict, results: dict) -> bool:
@@ -1931,6 +1950,59 @@ def _progress_pulse_stalled(engine_factory: Any, active: dict, results: dict) ->
             return True
         return False
     except Exception:  # noqa: BLE001
+        return False
+
+
+# 自愈③c：执行链心跳看护（run 14085 事故根治——155 分钟空壳自旋）。
+# 半死看门狗盯"星图零增长"，但执行链死亡 + 波次自旋换题的组合会让每题都是
+# 全新空图、facts 恒 0，采样判据永远满足不了"从有到无"。真正的死信号是
+# LLM 零调用：pi worker 会话目录（PI_CODING_AGENT_DIR 根）下任何文件 mtime
+# 超过阈值没有更新 = dispatcher→worker→pi→LLM 整条链停摆。
+_llm_pulse_last_active = [0.0]
+
+
+def _llm_chain_stalled() -> bool:
+    """执行链活性探测：pi worker 目录树最新 mtime 距今超过阈值即判停摆。
+
+    首次调用只建立基线不判定（冷启动期 worker 目录可能尚未创建）。
+    ASTRA_LLM_STALL_SECONDS 可调（默认 900=15 分钟）；0 关闭。
+    """
+    threshold = float(os.environ.get("ASTRA_LLM_STALL_SECONDS", "900"))
+    if threshold <= 0:
+        return False
+    try:
+        root = os.environ.get("ASTRA_PI_HOME") or os.path.join(
+            _tempfile.gettempdir(), "astra-pi"
+        )
+        if not os.path.isdir(root):
+            return False  # 目录未建：引擎还没起过 worker，交给基线逻辑
+        newest = 0.0
+        for dirpath, _dirnames, filenames in os.walk(root):
+            for name in filenames:
+                if name in ("auth.json", "models.json"):
+                    continue  # 引擎启动即写，不代表 worker 活动
+                try:
+                    newest = max(newest, os.path.getmtime(os.path.join(dirpath, name)))
+                except OSError:
+                    continue
+        now = time.time()
+        if newest <= 0:
+            return False  # 没有业务文件：同上，建基线
+        if not _llm_pulse_last_active[0]:
+            _llm_pulse_last_active[0] = now  # 首见基线
+            return False
+        idle = now - newest
+        if idle > threshold:
+            LOG.error(
+                "watchdog: 执行链 %.0f 分钟零 LLM 活动（pi 目录最新写入 %.0f 分钟前）——判定执行链停摆",
+                idle / 60, idle / 60,
+            )
+            _llm_pulse_last_active[0] = now  # 重置配合重启预算防风暴
+            return True
+        if idle < threshold / 2:
+            _llm_pulse_last_active[0] = now  # 活跃期持续刷新基线
+        return False
+    except Exception:  # noqa: BLE001 —— 探测失败不误杀
         return False
 
 
