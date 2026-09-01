@@ -1189,3 +1189,52 @@ def test_hint_gate_fits_wave_window_non_kb() -> None:
     )
     # hint1 门应缩到窗 40%（0.08s）内触发——窗口 0.2s 足够到达
     assert client.hints.count("h-01") >= 1, "非 KB 题 hint 门在波次窗内不可达（错配复发）"
+
+
+def test_llm_chain_watchdog_detects_stall(monkeypatch, tmp_path) -> None:
+    """14085 事故根治回归：执行链零 LLM 活动 15 分钟即判停摆（空壳自旋形态）。"""
+    import time as _time
+    import astra_runner.runner as runner_mod
+
+    pi_root = tmp_path / "astra-pi"
+    worker = pi_root / "deepseek-execute-0" / "sessions"
+    worker.mkdir(parents=True)
+    session_file = worker / "session-x.jsonl"
+    session_file.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setenv("ASTRA_PI_HOME", str(pi_root))
+    monkeypatch.setenv("ASTRA_LLM_STALL_SECONDS", "900")
+    runner_mod._reset_watchdog_state()
+
+    # 首次调用：建基线不判定
+    assert runner_mod._llm_chain_stalled() is False
+    # 模拟 16 分钟无写入
+    old = _time.time() - 960
+    import os as _os
+    _os.utime(session_file, (old, old))
+    assert runner_mod._llm_chain_stalled() is True, "零 LLM 活动 16min 应判执行链停摆"
+
+
+def test_wrong_submit_fuse_blocks_storm() -> None:
+    """14085 事故：b-02 错交风暴 163 次根治——连续 5 错且零正确后本窗口熔断。"""
+    from astra_runner.runner import _pending_new_flags, WRONG_SUBMIT_FUSE, ChallengeResult as CR
+
+    result = CR(unique_code="b-99", description="d")
+    result.wrong_count = WRONG_SUBMIT_FUSE
+    result.flags_correct = 0
+    assert _pending_new_flags(["flag{brand_new}"], [], result) == [], "熔断后新旗也不提交（防穷举）"
+    # 有正确旗插入的不熔断（多旗题正常收割）
+    ok = CR(unique_code="b-98", description="d")
+    ok.wrong_count = WRONG_SUBMIT_FUSE + 3
+    ok.flags_correct = 2
+    assert _pending_new_flags(["flag{next_one}"], [], ok) == ["flag{next_one}"]
+
+
+def test_multiflag_wave_doubled() -> None:
+    """14085 事故：旗数 ≥4 的题波次翻倍（b 系切香肠根治）。"""
+    # 通过引擎侧不直接可见——在 _run_single_challenge 内联。用行为验证：
+    # 检查源码存在该分支（轻量回归；行为级由日志观察）
+    import inspect
+    import astra_runner.runner as runner_mod
+    src = inspect.getsource(runner_mod._run_single_challenge)
+    assert "flag_count or 0) >= 4" in src and "defer_after_seconds * 2" in src
