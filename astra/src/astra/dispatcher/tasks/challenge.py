@@ -31,6 +31,7 @@ from astra.dispatcher.tasks.common import (
     did_timeout,
     preview,
     run_worker_process,
+    run_worker_process_with_retry,
     write_graph_snapshot_reference,
 )
 from astra.dispatcher.workers.registry import get_driver
@@ -108,7 +109,7 @@ def run_challenge_task(
         )
         session = driver.prepare_session()
         command = driver.build_execute(worker, prompt, session)
-        result = run_worker_process(
+        result = run_worker_process_with_retry(
             container_manager,
             container_name,
             worker,
@@ -117,6 +118,7 @@ def run_challenge_task(
             timeout_seconds=config.tasks.challenge.timeout,
             lease=lease,
             cancellation=cancellation,
+            runner=run_worker_process,
         )
         if cancel_reason(result, cancellation) is not None or did_timeout(result) or result.returncode != 0:
             LOG.warning(

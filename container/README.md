@@ -23,7 +23,9 @@ dsh 栈均已移除）。
 
 可选 env：`ASTRA_EXECUTE_REPLICAS`（默认 4）、`ASTRA_EXECUTE_MAXRUN`（默认 3，
 r5 实测最优拓扑 4×3）、`ASTRA_DECIDE_TIMEOUT`（默认 600s）、`ASTRA_PI_HOME`
-（pi worker 会话根目录，默认临时目录 astra-pi，worker 子目录按名隔离）。
+（pi worker 会话根目录，默认临时目录 astra-pi，worker 子目录按名隔离）、
+`ASTRA_MODEL_RETRY_MAX`（瞬时模型错误退避重试次数，默认 2，0=关闭——托管网关
+SSE 断流 "incomplete SSE response" 的兜底，pi 自身零重试）。
 
 示例（本地跑，完整配方见 `dist/local-fgs-run.env` + 启动脚本 `dist/run-local.sh`）：
 

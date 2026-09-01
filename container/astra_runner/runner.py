@@ -51,6 +51,11 @@ STARVATION_MIN_REMAINING_SECONDS = 15 * 60
 EXPECTED_BUDGET_FLOOR_SECONDS = 15 * 60
 # 按难度自适应题目超时（easy/medium/hard）
 DIFFICULTY_TIMEOUTS = {"easy": 20 * 60, "medium": 30 * 60, "hard": 45 * 60}
+# R11 高分穿插保底（经济性类：热身池与大分池的吞吐预算再分配）：≥800 分大题
+# 在 easy 热身 WARMUP_SIZE 题后立即入队——否则 easy 池全排干才轮到 b-02 1800
+# （R9 诊断 §5-1/3：8,200 分未触池 + "≥800 分题确保至少开过一次"）
+HIGH_SCORE_GUARANTEE_MIN = 800
+VALUE_HYBRID_WARMUP_SIZE = 3
 # 引擎已完成后等待 flag 落图的窗口（不再空转一个完整超时）
 DONE_FLAG_WAIT_SECONDS = 90
 DEFAULT_PROJECT_TITLE_PREFIX = "astra-challenge"
@@ -398,6 +403,7 @@ def run_benchmark(
         # 而 a 系 hard 500 分一旦被开 2 分钟即解。新序 = easy 热身（分值降序，快速银行）
         # + 其余全部按分值降序（b-02 1800 提前拿到长跑道，500 分 hard 不再饿死）。
         # 未知难度并入分值池（原排在 medium/hard 之间）。
+        # R11 穿插保底：≥800 分大题紧随热身队（WARMUP_SIZE 题后），不再等 easy 池排干。
         def _score_of(item) -> int:
             return int(getattr(item[0], "total_score", 0) or 0)
 
@@ -405,11 +411,16 @@ def run_benchmark(
         rest_pool = [it for it in queue if str(getattr(it[0], "difficulty", "") or "").lower() != "easy"]
         easy_pool.sort(key=_score_of, reverse=True)
         rest_pool.sort(key=_score_of, reverse=True)
-        ordered = easy_pool + rest_pool
+        warmup = easy_pool[:VALUE_HYBRID_WARMUP_SIZE]
+        big = [it for it in rest_pool if _score_of(it) >= HIGH_SCORE_GUARANTEE_MIN]
+        tail = easy_pool[VALUE_HYBRID_WARMUP_SIZE:] + [
+            it for it in rest_pool if _score_of(it) < HIGH_SCORE_GUARANTEE_MIN
+        ]
+        ordered = warmup + big + tail
         queue = deque(ordered)
         LOG.info(
-            "queue ordered value-hybrid（easy热身=%s 分值池=%s；池首=%s）",
-            len(easy_pool), len(rest_pool),
+            "queue ordered value-hybrid（easy热身=%s 高分保底=%s 续队=%s；池首=%s）",
+            len(warmup), len(big), len(tail),
             ", ".join(f"{_code_of(it)}:{_score_of(it)}" for it in ordered[:5]),
         )
 

@@ -31,6 +31,13 @@ FAIL_THRESHOLD = 3  # 连续失败次数（探针+会话双通道命中时）
 PROBE_ONLY_FAIL_THRESHOLD = 5
 
 _ERROR_MARK = re.compile(r"usage limit|permission_error|quota|403|insufficient", re.IGNORECASE)
+# 会话通道额外标记：SSE 断流（incomplete SSE / stream ended before message_stop）。
+# 单发是瞬时抖动（派发层已退避重试），连续命中说明网关通道在塌，值得告警。
+# 仅用于会话扫描，不进探针通道（探针响应是 ping 回包，不会含流式断流措辞）。
+_SESSION_ERROR_MARK = re.compile(
+    r"usage limit|permission_error|quota|403|insufficient|incomplete\s+sse|stream ended before",
+    re.IGNORECASE,
+)
 
 
 def _probe_anthropic(url: str, headers: dict[str, str], model: str) -> tuple[bool, str]:
@@ -72,7 +79,7 @@ def probe_model() -> tuple[bool, str]:
 
 
 def scan_recent_sessions_403() -> int:
-    """扫描最近 5 个 pi 会话 jsonl 尾部是否全是配额/权限错误；返回命中数。
+    """扫描最近 5 个 pi 会话 jsonl 尾部是否全是配额/权限/断流错误；返回命中数。
 
     pi 会话在 <astra-pi>/<worker>/sessions/**/*.jsonl。
     """
@@ -85,7 +92,7 @@ def scan_recent_sessions_403() -> int:
             with open(path, "r", encoding="utf-8", errors="replace") as fh:
                 lines = fh.readlines()
             tail = " ".join(lines[-3:])
-            if _ERROR_MARK.search(tail):
+            if _SESSION_ERROR_MARK.search(tail):
                 count += 1
         except OSError:
             continue

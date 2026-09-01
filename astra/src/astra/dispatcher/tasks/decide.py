@@ -26,6 +26,7 @@ from astra.dispatcher.tasks.common import (
     record_failure_hint,
     run_healthcheck,
     run_worker_process,
+    run_worker_process_with_retry,
     task_healthcheck_enabled,
     write_graph_snapshot_reference,
 )
@@ -129,7 +130,7 @@ def run_decide_task(
         session = driver.prepare_session()
         command = driver.build_execute(worker, prompt, session)
         execute_started = time.perf_counter()
-        result = run_worker_process(
+        result = run_worker_process_with_retry(
             container_manager,
             container_name,
             worker,
@@ -138,6 +139,7 @@ def run_decide_task(
             timeout_seconds=config.tasks.decide.timeout,
             lease=lease,
             cancellation=cancellation,
+            runner=run_worker_process,
         )
         execute_ms = int((time.perf_counter() - execute_started) * 1000)
         total_ms = int((time.perf_counter() - task_started) * 1000)

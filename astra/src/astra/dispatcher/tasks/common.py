@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import logging
+import os
 import re
 import shutil
 import sys
@@ -28,6 +30,60 @@ GRAPH_SNAPSHOT_MAX_AGE_SECONDS = 2 * 3600
 _GRAPH_SNAPSHOT_CLEANUP_INTERVAL_SECONDS = 600
 _last_snapshot_cleanup_at = [0.0]
 LOG = logging.getLogger(__name__)
+
+# 瞬时模型错误重试（信任缺失-数据网络类控制）：托管模式模型流量必须走平台网关
+# （http + .tsecbench.gw），SSE 流被网关/代理中途截断（"incomplete SSE response"；
+# pi-ai 旧版措辞 "Anthropic stream ended before message_stop"）会让整个步骤作废。
+# pi 自身对断流零重试（pi-ai 0.73 providers/anthropic.js 直接 throw 实证），只能在
+# 派发层兜底重跑。依据：log/session-589821/589846 两轮 glm-5.3 会话均在上下文压缩后
+# 断流报错。ASTRA_MODEL_RETRY_MAX 可调（0=关闭），托管排障时免重建镜像。
+TRANSIENT_MODEL_ERROR_RE = re.compile(
+    r"(incomplete\s+sse|stream ended before message_stop|fetch failed|econnreset|"
+    r"etimedout|econnrefused|socket hang up|overloaded|rate.?limit|"
+    r"\b429\b|\b502\b|\b503\b|\b529\b)",
+    re.IGNORECASE,
+)
+TRANSIENT_RETRY_DELAYS_SECONDS: tuple[float, ...] = (5.0, 15.0)
+TRANSIENT_RETRY_MAX_DEFAULT = 2
+
+
+def _transient_retry_max() -> int:
+    try:
+        return max(0, int(os.environ.get("ASTRA_MODEL_RETRY_MAX", str(TRANSIENT_RETRY_MAX_DEFAULT))))
+    except ValueError:
+        return TRANSIENT_RETRY_MAX_DEFAULT
+
+
+def is_transient_model_failure(result: ProcessResult) -> bool:
+    """非零退出 + stderr / stdout 错误事件命中传输层瞬时错误标记。
+
+    超时/取消/正常退出不算（各有专属处理路径）；stdout 是 pi 的 json 事件流，
+    只解析事件的 error 字段——模型正文里出现 "429"/"overloaded" 等字样不算传输错误。
+    """
+    if result.cancelled or result.timed_out or result.returncode == 0:
+        return False
+    if TRANSIENT_MODEL_ERROR_RE.search(result.stderr or ""):
+        return True
+    for line in (result.stdout or "").splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        error = event.get("error")
+        text = (
+            error
+            if isinstance(error, str)
+            else (error.get("message") if isinstance(error, dict) else None)
+        )
+        if isinstance(text, str) and TRANSIENT_MODEL_ERROR_RE.search(text):
+            return True
+    return False
+
 
 FAILURE_HINT_PREFIX = "[失败学习] "
 
@@ -264,6 +320,71 @@ def run_worker_process(
             lease.attach_process(None)
         if cancellation is not None:
             cancellation.attach_process(None)
+
+
+def run_worker_process_with_retry(
+    container_manager: ContainerManager,
+    container_name: str,
+    worker: WorkerConfig,
+    argv: list[str],
+    *,
+    phase: str,
+    timeout_seconds: int,
+    lease: HeartbeatLease | None = None,
+    cancellation: TaskCancellation | None = None,
+    runner=None,
+) -> ProcessResult:
+    """run_worker_process + 瞬时模型错误退避重试（网关断流/5xx 不杀步骤）。
+
+    重试用同一 argv 重跑（pi 新会话）——已做的工具调用进度会重来，但比整步作废
+    再等调度器冷却重派便宜得多；次数上限 ASTRA_MODEL_RETRY_MAX（默认 2，0=关闭）。
+    退避睡眠可被取消信号打断。runner 可注入替代执行入口（任务模块传自己命名空间
+    的 run_worker_process，保持既有测试打桩点有效）。
+    """
+    run = runner if runner is not None else run_worker_process
+    result = run(
+        container_manager,
+        container_name,
+        worker,
+        argv,
+        phase=phase,
+        timeout_seconds=timeout_seconds,
+        lease=lease,
+        cancellation=cancellation,
+    )
+    max_retries = _transient_retry_max()
+    for attempt in range(max_retries):
+        if not is_transient_model_failure(result):
+            break
+        if cancellation is not None and cancellation.is_cancelled:
+            break
+        delay = TRANSIENT_RETRY_DELAYS_SECONDS[
+            min(attempt, len(TRANSIENT_RETRY_DELAYS_SECONDS) - 1)
+        ]
+        LOG.warning(
+            "transient model failure, retrying worker=%s phase=%s attempt=%s/%s backoff=%.0fs code=%s detail=%s",
+            worker.name,
+            phase,
+            attempt + 1,
+            max_retries,
+            delay,
+            result.returncode,
+            preview(result.stderr or result.stdout, 200),
+        )
+        time.sleep(delay)
+        if cancellation is not None and cancellation.is_cancelled:
+            break
+        result = run(
+            container_manager,
+            container_name,
+            worker,
+            argv,
+            phase=phase,
+            timeout_seconds=timeout_seconds,
+            lease=lease,
+            cancellation=cancellation,
+        )
+    return result
 
 
 def _log_phase_usage(worker_name: str, phase: str, stdout: str) -> None:

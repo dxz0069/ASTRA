@@ -191,6 +191,44 @@ def test_run_benchmark_value_hybrid_order(monkeypatch) -> None:
     assert client2.started == ["x-hard-500", "x-hard-1800", "x-easy-90", "x-med-300", "x-easy-250"]
 
 
+def test_run_benchmark_high_score_interleave(monkeypatch) -> None:
+    """R11 高分穿插保底：≥800 分大题紧随 easy 热身 3 题入队，不等 easy 池排干
+    （R9 诊断 §5-1/3：8,200 分未触池 + ≥800 分题确保至少开过一次）。"""
+    monkeypatch.setattr(_runner_module, "DONE_FLAG_WAIT_SECONDS", 0.2)
+
+    @dataclass
+    class DiffChallenge(FakeChallenge):
+        difficulty: str = ""
+        total_score: int = 100
+
+    easies = [
+        DiffChallenge(f"x-easy-{score}", difficulty="easy", total_score=score)
+        for score in (400, 300, 200, 100, 50)
+    ]
+    big = DiffChallenge("x-hard-1800", difficulty="hard", total_score=1800)
+    med = DiffChallenge("x-med-500", difficulty="medium", total_score=500)
+    all_challenges = [*easies, big, med]
+    flags = {c.unique_code: ["flag{fff}"] for c in all_challenges}
+
+    class AlwaysFlagEngine(FakeEngine):
+        def list_fact_descriptions(self, project_id: str) -> list[str]:
+            return ["found flag flag{fff}"]
+
+    client = FakeClient(all_challenges, flags=flags)
+    run_benchmark(
+        client,
+        lambda: AlwaysFlagEngine({}),
+        challenge_timeout_seconds=0.5,
+        flag_poll_seconds=0.01,
+        parallel=1,
+    )
+    assert client.started == [
+        "x-easy-400", "x-easy-300", "x-easy-200",  # 热身 3 题（快速银行）
+        "x-hard-1800",                             # ≥800 大题穿插保底
+        "x-easy-100", "x-easy-50", "x-med-500",    # 剩余 easy + 分值池续队
+    ]
+
+
 def test_run_benchmark_lifecycle() -> None:
     challenges = [FakeChallenge("c001"), FakeChallenge("c002", is_completed=True)]
     client = FakeClient(challenges, flags={"c001": ["flag{hello}"]})

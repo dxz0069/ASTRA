@@ -21,11 +21,13 @@ from astra.dispatcher.tasks.common import (
     cancel_reason,
     did_timeout,
     find_duplicate_fact,
+    is_transient_model_failure,
     preview,
     project_allows_conclude_fallback,
     record_failure_hint,
     run_healthcheck,
     run_worker_process,
+    run_worker_process_with_retry,
     task_healthcheck_enabled,
     write_conclude_result,
     write_graph_snapshot_reference,
@@ -352,6 +354,15 @@ def run_execute_task(
             preview(first.stdout),
             preview(first.stderr),
         )
+        if is_transient_model_failure(first):
+            # 断流重试全部耗尽：流死前已输出的确认发现仍可抢救入图（与超时抢救同径）
+            try:
+                fresh = client.get_project(project.project.id)
+                rescued = _rescue_streamed_facts(client, fresh, step, first.stdout or "")
+                if rescued:
+                    LOG.info("execute transient-failure rescue project=%s step=%s rescued_facts=%s", project.project.id, step.id, rescued)
+            except Exception as exc:  # noqa: BLE001 —— 抢救失败不阻塞释放
+                LOG.warning("execute rescue failed project=%s error=%s", project.project.id, exc)
         if preview(first.stderr):
             record_failure_hint(
                 client, project.project.id, "execute",
@@ -542,7 +553,9 @@ def _run_process(
     lease: HeartbeatLease,
     cancellation: TaskCancellation,
 ):
-    return run_worker_process(
+    # runner 传模块命名空间的 run_worker_process——保持测试对 execute 模块
+    # run_worker_process/_run_process 两个既有打桩点都有效
+    return run_worker_process_with_retry(
         container_manager,
         container_name,
         worker,
@@ -551,4 +564,5 @@ def _run_process(
         timeout_seconds=timeout,
         lease=lease,
         cancellation=cancellation,
+        runner=run_worker_process,
     )

@@ -25,6 +25,7 @@ from astra.dispatcher.tasks.common import (
     preview,
     run_healthcheck,
     run_worker_process,
+    run_worker_process_with_retry,
     task_healthcheck_enabled,
     write_conclude_result,
     write_conclude_result_with_fact_id,
@@ -128,7 +129,7 @@ def run_bootstrap_task(
         execute = driver.build_execute(worker, prompt, session)
         session = execute.session
         execute_started = time.perf_counter()
-        first = run_worker_process(
+        first = run_worker_process_with_retry(
             container_manager,
             container_name,
             worker,
@@ -137,6 +138,7 @@ def run_bootstrap_task(
             timeout_seconds=config.tasks.bootstrap.timeout,
             lease=lease,
             cancellation=cancellation,
+            runner=run_worker_process,
         )
         execute_ms = int((time.perf_counter() - execute_started) * 1000)
         session = driver.extract_session(session, first.stdout, first.stderr)
