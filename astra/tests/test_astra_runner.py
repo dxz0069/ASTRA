@@ -1526,3 +1526,15 @@ def test_probe_after_heal(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("ASTRA_PROBE_WAIT_SECONDS", "0")
     runner_mod._probe_after_heal()
     assert _json.loads(budget.read_text(encoding="utf-8"))["pending_probe"] is False
+
+    # ⑤ 非 anthropic-messages 协议：fail-open 放行且不打 anthropic 端点
+    # （openai-completions 部署硬打 /v1/messages 会永远失败制造假等待）
+    _write_budget(True)
+    monkeypatch.setenv("PI_PROVIDER_API", "openai-completions")
+
+    def _must_not_call(req, timeout):
+        raise AssertionError("非 anthropic 协议不应发起 anthropic 端点探测")
+
+    monkeypatch.setattr(_urlreq, "urlopen", _must_not_call)
+    runner_mod._probe_after_heal()
+    assert _json.loads(budget.read_text(encoding="utf-8"))["pending_probe"] is False

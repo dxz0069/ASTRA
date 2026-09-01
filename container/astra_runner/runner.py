@@ -2132,8 +2132,9 @@ def _self_heal_restart(engine_factory=None) -> None:
                 budget.write_text(json.dumps(data), encoding="utf-8")
             except OSError:
                 pass
-            LOG.warning("watchdog: 自重启预算耗尽——强制冷却 120s 后复活最后一轮预算")
-            LOG.warning("watchdog: 冷却 120s 中（测试中会真实等待——生产可接受）")
+            # 冷却实为 2s（测试套件真实等待，120s 会拖慢全量回归）——作用是
+            # 抑制预算耗尽期的重启刷屏，不是防风暴主手段（预算计数才是）。
+            LOG.warning("watchdog: 自重启预算耗尽——复活最后一轮预算（冷却 2s 抑制刷屏）")
             _watchdog_emit("self_heal_revived")
             time.sleep(2)
             return
@@ -2207,22 +2208,34 @@ def _probe_after_heal() -> None:
     api_key = os.environ.get("PI_API_KEY", "")
     base = (os.environ.get("PI_BASE_URL", "") or "").rstrip("/")
     model = os.environ.get("PI_MODEL", "")
+    provider_api = os.environ.get("PI_PROVIDER_API", "anthropic-messages")
     if not (api_key and base and model):
         LOG.warning("watchdog: pending_probe 但 PI_* 配置不全——跳过探针直接放行")
         _clear()
         return
-    body = json.dumps({
-        "model": model, "max_tokens": 1,
-        "messages": [{"role": "user", "content": "ping"}],
-    }).encode("utf-8")
-    req = urllib.request.Request(
-        f"{base}/v1/messages", data=body, method="POST",
-        headers={
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        },
-    )
+    # 探针只实现 anthropic-messages 协议（当前唯一部署形态）；其他协议
+    # （openai-completions/responses）端点与认证形态不同，硬打会永远失败
+    # 反而制造 2h 假等待——fail-open 放行，交引擎看门狗兜底。
+    if provider_api != "anthropic-messages":
+        LOG.warning("watchdog: PI_PROVIDER_API=%s 非探针支持协议——跳过探针直接放行（看门狗兜底）", provider_api)
+        _watchdog_emit("probe_skip", provider_api=provider_api)
+        _clear()
+        return
+
+    def _build_req() -> urllib.request.Request:
+        body = json.dumps({
+            "model": model, "max_tokens": 1,
+            "messages": [{"role": "user", "content": "ping"}],
+        }).encode("utf-8")
+        return urllib.request.Request(
+            f"{base}/v1/messages", data=body, method="POST",
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+        )
+
     try:
         wait_seconds = float(os.environ.get("ASTRA_PROBE_WAIT_SECONDS", "7200"))
     except ValueError:
@@ -2232,7 +2245,7 @@ def _probe_after_heal() -> None:
     while True:
         attempt += 1
         try:
-            with urllib.request.urlopen(req, timeout=20) as resp:  # noqa: S310
+            with urllib.request.urlopen(_build_req(), timeout=20) as resp:  # noqa: S310
                 resp.read()
             LOG.info("watchdog: 复活探针通过（网关存活，第 %s 次尝试）——继续跑题", attempt)
             _watchdog_emit("probe_ok", attempts=attempt)
