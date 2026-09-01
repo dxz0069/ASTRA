@@ -1405,3 +1405,124 @@ def test_self_heal_budget_revives_once_then_gives_up(monkeypatch, tmp_path) -> N
     runner_mod._self_heal_restart()
     data = _json.loads((tmp_path / "budget.json").read_text(encoding="utf-8"))
     assert len(data["ts"]) == 3  # 未清空=彻底放弃
+
+
+def test_llm_stall_default_threshold_tightened(monkeypatch, tmp_path) -> None:
+    """run 14311 问题 3：停摆阈值默认收紧 15min→5min——45 分钟末段停摆形态下
+    15min 阈值整个窗口只攒 3 次重启机会，且告警太钝。"""
+    import os as _os
+    import time as _time
+    import astra_runner.runner as runner_mod
+
+    pi_root = tmp_path / "astra-pi"
+    worker = pi_root / "deepseek-execute-0" / "sessions"
+    worker.mkdir(parents=True)
+    session_file = worker / "session-x.jsonl"
+    session_file.write_text("{}", encoding="utf-8")
+
+    monkeypatch.delenv("ASTRA_LLM_STALL_SECONDS", raising=False)  # 走默认值
+    monkeypatch.setenv("ASTRA_PI_HOME", str(pi_root))
+    runner_mod._reset_watchdog_state()
+    assert runner_mod._llm_chain_stalled() is False  # 基线
+    old = _time.time() - 360  # 6 分钟：新默认 5min 阈值应触发（旧 15min 不触发）
+    _os.utime(session_file, (old, old))
+    assert runner_mod._llm_chain_stalled() is True, "默认阈值应已收紧到 5min"
+
+
+def test_watchdog_emit_jsonl_and_fail_open(tmp_path) -> None:
+    """run 14311 问题 3：停摆/自愈事件落独立 JSONL 外显（容器 stdout 平台不可见）；
+    写失败不阻断主流程。"""
+    import json as _json
+    import astra_runner.runner as runner_mod
+
+    log = tmp_path / "wd" / "watchdog.jsonl"
+    monkey_log = str(log)
+    import os as _os
+    _os.environ["ASTRA_WATCHDOG_LOG"] = monkey_log
+    try:
+        runner_mod._watchdog_emit("llm_chain_stall", idle_minutes=7.5)
+        lines = log.read_text(encoding="utf-8").strip().splitlines()
+        assert len(lines) == 1
+        rec = _json.loads(lines[0])
+        assert rec["event"] == "llm_chain_stall" and rec["idle_minutes"] == 7.5
+        # 坏路径（父路径是文件）不崩
+        blocker = tmp_path / "blocker"
+        blocker.write_text("x", encoding="utf-8")
+        _os.environ["ASTRA_WATCHDOG_LOG"] = str(blocker / "sub" / "wd.jsonl")
+        runner_mod._watchdog_emit("no_crash")  # 不抛异常即通过
+    finally:
+        _os.environ.pop("ASTRA_WATCHDOG_LOG", None)
+
+
+def test_self_heal_restart_marks_pending_probe(monkeypatch, tmp_path) -> None:
+    """run 14311 问题 3：自愈 execv 前在预算文件落 pending_probe 标志，
+    复活后先探网关再跑题。"""
+    import json as _json
+    import os as _os
+    import astra_runner.runner as runner_mod
+
+    monkeypatch.setenv("ASTRA_SELF_HEAL_BUDGET_FILE", str(tmp_path / "budget.json"))
+    monkeypatch.setattr(_os, "execv", lambda *a, **k: (_ for _ in ()).throw(SystemExit(0)))
+    try:
+        runner_mod._self_heal_restart()
+    except SystemExit:
+        pass
+    data = _json.loads((tmp_path / "budget.json").read_text(encoding="utf-8"))
+    assert data.get("pending_probe") is True, "execv 前应写 pending_probe"
+
+
+def test_probe_after_heal(monkeypatch, tmp_path) -> None:
+    """复活探针三分支：通→清标志放行；PI_* 缺→fail-open 放行；不通→等满预算
+    超时放行（看门狗兜底），全程不跑题前不烧波次。"""
+    import json as _json
+    import os as _os
+    import urllib.request as _urlreq
+    import astra_runner.runner as runner_mod
+
+    budget = tmp_path / "budget.json"
+
+    def _write_budget(pending: bool) -> None:
+        budget.write_text(_json.dumps({"ts": [1], "pending_probe": pending}), encoding="utf-8")
+
+    # ① 无 pending 标志：直接返回，文件不动
+    _write_budget(False)
+    runner_mod._probe_after_heal()
+    assert _json.loads(budget.read_text(encoding="utf-8"))["pending_probe"] is False
+
+    # ② 标志在但 PI_* 缺：fail-open 清标志放行
+    _write_budget(True)
+    monkeypatch.delenv("PI_API_KEY", raising=False)
+    monkeypatch.setenv("ASTRA_SELF_HEAL_BUDGET_FILE", str(budget))
+    runner_mod._probe_after_heal()
+    assert _json.loads(budget.read_text(encoding="utf-8"))["pending_probe"] is False
+
+    # ③ 探针通过：urlopen 打桩 200 → 清标志
+    _write_budget(True)
+    monkeypatch.setenv("PI_API_KEY", "sk-test")
+    monkeypatch.setenv("PI_BASE_URL", "http://gw.test/anthropic")
+    monkeypatch.setenv("PI_MODEL", "test-model")
+
+    class _FakeOK:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b"{}"
+
+    monkeypatch.setattr(_urlreq, "urlopen", lambda req, timeout: _FakeOK())
+    runner_mod._probe_after_heal()
+    assert _json.loads(budget.read_text(encoding="utf-8"))["pending_probe"] is False
+
+    # ④ 探针失败且预算 0：立即超时放行（不真等 30s）
+    _write_budget(True)
+
+    def _boom(req, timeout):
+        raise OSError("gateway dead")
+
+    monkeypatch.setattr(_urlreq, "urlopen", _boom)
+    monkeypatch.setenv("ASTRA_PROBE_WAIT_SECONDS", "0")
+    runner_mod._probe_after_heal()
+    assert _json.loads(budget.read_text(encoding="utf-8"))["pending_probe"] is False

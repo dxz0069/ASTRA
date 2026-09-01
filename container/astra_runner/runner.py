@@ -26,6 +26,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.request
 from collections import deque
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
@@ -2004,6 +2005,7 @@ def _progress_pulse_stalled(engine_factory: Any, active: dict, results: dict) ->
         stalled = now - _pulse_stall_since[0]
         if stalled > float(os.environ.get("ASTRA_STALL_SECONDS", "900")):
             LOG.error("watchdog: 活跃题存在但星图 %.0f 分钟零增长（facts=%s）——判定半死", stalled / 60, sample)
+            _watchdog_emit("graph_pulse_stall", stall_minutes=round(stalled / 60, 1), facts=sample)
             _pulse_stall_since[0] = now  # 重置，配合重启预算防风暴
             return True
         return False
@@ -2020,15 +2022,47 @@ _llm_pulse_last_active = [0.0]
 _self_heal_exhausted_logged = [False]
 
 
+def _watchdog_emit(event: str, **fields: Any) -> None:
+    """看门狗事件外显（run 14311 问题 3）：容器 stdout 平台侧不可见，停摆/自愈
+    等关键事件落独立 JSONL（ASTRA_WATCHDOG_LOG，默认 tempdir/astra-watchdog.jsonl）
+    供巡检与事后复盘；写失败不阻断主流程。同时以 warning 级走 stdout 留容器日志。"""
+    record = {"ts": datetime.now().astimezone().isoformat(timespec="seconds"), "event": event, **fields}
+    line = json.dumps(record, ensure_ascii=False)
+    try:
+        path = Path(
+            os.environ.get("ASTRA_WATCHDOG_LOG")
+            or Path(tempfile.gettempdir()) / "astra-watchdog.jsonl"
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+    except OSError:
+        pass
+    LOG.warning("watchdog-event: %s", line)
+
+
+def _self_heal_budget_path() -> Path:
+    """自重启预算文件路径：env 显式指定优先；Windows 默认落 tempdir（/tmp 不存在）。
+    原 win32 分支无条件覆盖 env 值导致测试/多实例隔离失效（run 14180 测试解剖）。"""
+    env_path = os.environ.get("ASTRA_SELF_HEAL_BUDGET_FILE", "")
+    if env_path:
+        return Path(env_path)
+    if sys.platform == "win32":
+        return Path(tempfile.gettempdir()) / "astra-selfheal-count.json"
+    return Path("/tmp/astra-selfheal-count.json")
+
+
 def _llm_chain_stalled(active_challenges: int = -1) -> bool:
     """执行链活性探测：pi worker 目录树最新 mtime 距今超过阈值即判停摆。
 
     首次调用只建立基线不判定（冷启动期 worker 目录可能尚未创建）。
-    ASTRA_LLM_STALL_SECONDS 可调（默认 900=15 分钟）；0 关闭。
+    ASTRA_LLM_STALL_SECONDS 可调（默认 300=5 分钟）；0 关闭。run 14311 收紧：
+    原 15 分钟阈值在末段停摆形态下 45 分钟才积累一次重启机会——误杀成本
+    （重启<1min+预算兜底）远小于漏杀成本（每分钟都在白烧窗口）。
     审计（run 14180 预算耗尽事故）：无活跃题/全冷却时 pi mtime 停更是"合法安静"
     （波次间隙不开 LLM），不能判停摆——active_challenges>0 才参与判定。
     """
-    threshold = float(os.environ.get("ASTRA_LLM_STALL_SECONDS", "900"))
+    threshold = float(os.environ.get("ASTRA_LLM_STALL_SECONDS", "300"))
     if threshold <= 0:
         return False
     if active_challenges == 0:
@@ -2061,6 +2095,8 @@ def _llm_chain_stalled(active_challenges: int = -1) -> bool:
                 "watchdog: 执行链 %.0f 分钟零 LLM 活动（pi 目录最新写入 %.0f 分钟前）——判定执行链停摆",
                 idle / 60, idle / 60,
             )
+            _watchdog_emit("llm_chain_stall", idle_minutes=round(idle / 60, 1),
+                           active_challenges=active_challenges)
             _llm_pulse_last_active[0] = now  # 重置配合重启预算防风暴
             return True
         if idle < threshold / 2:
@@ -2074,15 +2110,10 @@ def _self_heal_restart(engine_factory=None) -> None:
     """自愈③：进程级自重启（os.execv 原位替换）——progress 断点续跑，引擎换血。
 
     重启预算：4 小时窗口内最多 3 次（状态文件计数），防故障风暴；耗尽则只告警不重启。
-    ASTRA_SELF_HEAL=0 可整体关闭。
+    ASTRA_SELF_HEAL=0 可整体关闭。重启前在预算文件落 pending_probe 标志：
+    新进程启动后先探模型网关存活（_probe_after_heal）再继续跑题（run 14311 问题 3）。
     """
-    budget = Path(os.environ.get("ASTRA_SELF_HEAL_BUDGET_FILE", ""))
-    if sys.platform == "win32" and not str(budget):
-        # Windows 默认落 tempdir（/tmp 不存在）；env 显式指定优先——
-        # 原分支无条件覆盖 env 值导致测试/多实例隔离失效（run 14180 测试解剖）
-        import tempfile as _tempfile
-
-        budget = Path(_tempfile.gettempdir()) / "astra-selfheal-count.json"
+    budget = _self_heal_budget_path()
     now = time.time()
     try:
         data = json.loads(budget.read_text(encoding="utf-8"))
@@ -2103,17 +2134,20 @@ def _self_heal_restart(engine_factory=None) -> None:
                 pass
             LOG.warning("watchdog: 自重启预算耗尽——强制冷却 120s 后复活最后一轮预算")
             LOG.warning("watchdog: 冷却 120s 中（测试中会真实等待——生产可接受）")
+            _watchdog_emit("self_heal_revived")
             time.sleep(2)
             return
         if not _self_heal_exhausted_logged[0]:
             _self_heal_exhausted_logged[0] = True
             LOG.error("watchdog: 预算二次耗尽——彻底放弃自重启，人工介入！")
+            _watchdog_emit("self_heal_exhausted")
         return
     data["ts"].append(now)
     try:
         budget.write_text(json.dumps(data), encoding="utf-8")
     except OSError:
         pass
+    _watchdog_emit("self_heal_restart", restarts_4h=len(data["ts"]))
     LOG.critical("watchdog: worker 会话 %.0f 分钟无写入，判定引擎停摆——自重启（第 %s 次）",
                  _WATCHDOG_STALL_SECONDS / 60, len(data["ts"]))
     # P0 修复：execv 前必须优雅关闭引擎子进程——否则旧 server 占 8000 端口，
@@ -2139,7 +2173,82 @@ def _self_heal_restart(engine_factory=None) -> None:
             )
         except Exception:  # noqa: BLE001
             pass
+    # 重启后先探模型网关存活再继续跑题（run 14311 问题 3：末段停摆复活后
+    # 若网关仍死，不做探针会立即再次停摆烧预算）；写坏不阻断 execv。
+    try:
+        data["pending_probe"] = True
+        budget.write_text(json.dumps(data), encoding="utf-8")
+    except OSError:
+        pass
     os.execv(sys.executable, [sys.executable, *sys.argv])
+
+
+def _probe_after_heal() -> None:
+    """自愈复活后的引擎存活探针（run 14311 问题 3）：预算文件带 pending_probe
+    标志时，先对模型网关做最小真实调用（max_tokens=1），通了才放行跑题；
+    不通每 30s 重试（最长 ASTRA_PROBE_WAIT_SECONDS 默认 7200s，同 VPN 等待配方）。
+    fail-open：预算读不到/env 缺 PI_* 配置/探针自身异常 → 清标志直接放行，
+    探针不能成为新故障点。"""
+    budget = _self_heal_budget_path()
+    try:
+        data = json.loads(budget.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return  # 无预算文件/损坏：非自愈路径，直接放行
+    if not data.get("pending_probe"):
+        return
+
+    def _clear() -> None:
+        data["pending_probe"] = False
+        try:
+            budget.write_text(json.dumps(data), encoding="utf-8")
+        except OSError:
+            pass
+
+    api_key = os.environ.get("PI_API_KEY", "")
+    base = (os.environ.get("PI_BASE_URL", "") or "").rstrip("/")
+    model = os.environ.get("PI_MODEL", "")
+    if not (api_key and base and model):
+        LOG.warning("watchdog: pending_probe 但 PI_* 配置不全——跳过探针直接放行")
+        _clear()
+        return
+    body = json.dumps({
+        "model": model, "max_tokens": 1,
+        "messages": [{"role": "user", "content": "ping"}],
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        f"{base}/v1/messages", data=body, method="POST",
+        headers={
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        },
+    )
+    try:
+        wait_seconds = float(os.environ.get("ASTRA_PROBE_WAIT_SECONDS", "7200"))
+    except ValueError:
+        wait_seconds = 7200.0
+    deadline = time.monotonic() + max(wait_seconds, 0.0)
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:  # noqa: S310
+                resp.read()
+            LOG.info("watchdog: 复活探针通过（网关存活，第 %s 次尝试）——继续跑题", attempt)
+            _watchdog_emit("probe_ok", attempts=attempt)
+            _clear()
+            return
+        except Exception as exc:  # noqa: BLE001 —— 网关/配额/网络未恢复：等待重试
+            if time.monotonic() >= deadline:
+                LOG.error("watchdog: 复活探针等待 %.0f 分钟仍不通（%.80s）——放行继续（引擎看门狗兜底）",
+                          wait_seconds / 60, exc)
+                _watchdog_emit("probe_timeout", attempts=attempt, last_error=str(exc)[:200])
+                _clear()
+                return
+            if attempt == 1:
+                LOG.warning("watchdog: 复活探针未通（%.80s）——每 30s 重试，最长 %.0f 分钟", exc, wait_seconds / 60)
+                _watchdog_emit("probe_fail", attempts=attempt, last_error=str(exc)[:200])
+            time.sleep(30)
 
 
 def _try_platform_hint(
@@ -2354,6 +2463,7 @@ def main(argv: list[str] | None = None) -> int:
     if client is None:
         LOG.error("等待 2h 仍不可达，放弃启动")
         return 2
+    _probe_after_heal()  # 自愈复活进程：先确认模型网关存活再跑题（run 14311 问题 3）
     try:
         with client:
             skip_codes = {c.strip() for c in args.skip_codes.split(",")} if args.skip_codes else None
