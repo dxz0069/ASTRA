@@ -55,3 +55,7 @@ container/knowledge/constellation.json
 
 # ZCode 会话工作区
 .zcode/
+
+# 跑分复盘数据快照含平台 token，不入库（README 复盘文档单独入仓）
+erroranan/run14311/
+erroranan/历史SSE证据/
