@@ -56,6 +56,6 @@
 
 ## 交付物（v13）
 
-- `dist/app_dist_v13.tar`（2.77GiB，sha256 `0cd61a0b…`，OCI 四查+部署模拟全过）
+- `dist/app_dist_v13.tar`（2.77GiB，sha256 `ebd12a59…`，含审计 36 轮探针协议/文案三修，OCI 四查+部署模拟全过）
 - `dist/hosted_v13_final.env`（同 v11 参数；阈值已改默认值无需 env 覆盖）
 - **发车前置**：DeepSeek key 充值/换新（当前 key 已透支，402 实测）
