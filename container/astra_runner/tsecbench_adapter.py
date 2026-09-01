@@ -118,6 +118,10 @@ _MASK_JUNK_INNER_RE = re.compile(
 
 def _is_junk_flag(flag: str) -> bool:
     inner = flag[flag.index("{") + 1 : flag.rindex("}")]
+    # run 14180 实锤（c-08）：提取器捞出 "flag{...ex":0}" 型 JSON 片段当真旗——
+    # 真旗是 uuid/hex/单词形态，含引号/冒号/反斜杠的内容必是结构碎片
+    if re.search(r'["\'\\:]', inner):
+        return True
     # 审计（r8 c-06 实例）：内容以省略号结尾 = 模型把旗省略截断写进天枢
     # （"flag{bbfa15fa-..."），真旗内容不会以点串收尾
     if re.search(r"(?:\.{2,}|…)\s*$", inner):

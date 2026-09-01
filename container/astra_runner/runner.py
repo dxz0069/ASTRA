@@ -37,9 +37,10 @@ LOG = logging.getLogger("astra-runner")
 DEFAULT_CHALLENGE_TIMEOUT_SECONDS = 30 * 60
 DEFAULT_FLAG_POLL_SECONDS = 5
 # 每题最多 defer（45 分钟无果放回队尾）次数——超过则关闭放弃，防无限轮转
-MAX_DEFER_PER_CHALLENGE = 10  # r9 榜首打法对齐：多波回访（标杆轮 86 次实例重启，单题最多 3 波会话回访）
+MAX_DEFER_PER_CHALLENGE = 4  # run 14180 用户定调：反复开关无意义——真做不出来就换题。
+# （标杆的 86 次实例重启是"有进展的多波收割"，不是同题空转；4 波×10min=40min 上限合理）
 # V9 战果扩展预算封顶（多旗题每收一旗 +2 窗口，hard +1）
-MAX_DEFER_BUDGET_CAP = 16
+MAX_DEFER_BUDGET_CAP = 8
 # V2-1③：单题 hint 成本上限（每次扣该题 10%，2 次=20%）
 MAX_HINTS_PER_CHALLENGE = 2
 # V2-2：尾段窗口（剩余<2h）优先重攻近失题
@@ -73,6 +74,8 @@ class ChallengeResult:
     project_id: str | None = None  # defer 续跑：复用引擎项目保留星图进度
     defer_count: int = 0  # 已 defer 次数（达到上限则放弃该题关闭）
     wrong_count: int = 0  # V2-2：错交次数（近失题——回队插队首+尾段优先重攻）
+    submit_outcomes: list = field(default_factory=list)  # 最近提交对错序列（滑窗熔断数据源）
+    rejected_flag_tails: set = field(default_factory=set)  # 已判错旗尾号（诱饵变体禁交名单）
     hint_texts: list[str] = field(default_factory=list)  # V2-1④：已购 hint 文本（defer 续跑复用，禁止重购）
     kb_seconds: float | None = None  # V2-5/V2-7：知识库历史首解耗时（期望预算依据）
     kb_entry_text: str | None = None  # V2-6：知识库思路条目（开局注入参考 fact）
@@ -484,6 +487,10 @@ def run_benchmark(
                     budget += 1
                 if result.total_score >= 800:
                     budget += 1
+                # run 14180 用户定调：零旗且图浅（<8 天枢）=没摸到门的空转——
+                # 预算减半，两波就换题，别在门外反复开关
+                if result.flags_correct == 0 and (result.facts_count or 0) < 8:
+                    budget = min(budget, 2)
                 budget = min(budget, MAX_DEFER_BUDGET_CAP)
                 if result.defer_count >= budget:
                     # 达到 defer 上限：彻底放弃——删引擎项目并标 done（防重启重跑）
@@ -626,6 +633,9 @@ def run_benchmark(
             r
             for code, r in results.items()
             if r.started and r.flags_correct == 0 and code not in active and _fits(r)
+            # run 14180 用户定调：零产出弃题不回灌——只拉近失（错交过=差一步）
+            # 或有实质图积累（≥8 天枢=有可续攻的侦察）的题
+            and (r.wrong_count > 0 or (r.facts_count or 0) >= 8)
         ]
         candidates.sort(
             key=lambda r: (
@@ -812,11 +822,23 @@ def run_benchmark(
 # 模型对剩余旗穷举候选提交，没有同题熔断。连续错交超阈值后进入冷却：本窗口内
 # 停止提交（只留图形分析），defer 回队下个波次重置冷却再战。
 WRONG_SUBMIT_FUSE = 5
+# 滑窗口径：最近 10 次提交里错 ≥8 且正确 ≤1 即熔断（覆盖 14180 "先对后错"形态——
+# v10 的"零正确"条件在开局得分后被永久解除，c-08 诱饵循环烧了 241 次）
+FUSE_WINDOW = 10
+FUSE_WRONG_THRESHOLD = 8
 
 
 def _submission_fused(result: Any) -> bool:
-    """同题错误熔断：连续错交 ≥ WRONG_SUBMIT_FUSE 且零正确插入即冷却。"""
-    return result.wrong_count >= WRONG_SUBMIT_FUSE and result.flags_correct == 0
+    """同题错误熔断：连续错交 ≥ WRONG_SUBMIT_FUSE 且零正确，或滑窗错误率熔断。"""
+    if result.wrong_count >= WRONG_SUBMIT_FUSE and result.flags_correct == 0:
+        return True
+    recent = result.submit_outcomes[-FUSE_WINDOW:]
+    if len(recent) >= FUSE_WINDOW:
+        wrongs = sum(1 for x in recent if not x)
+        rights = len(recent) - wrongs
+        if wrongs >= FUSE_WRONG_THRESHOLD and rights <= 1:
+            return True
+    return False
 
 
 def _pending_new_flags(flags: list[str], flags_found: list[str], result: Any = None) -> list[str]:
@@ -829,6 +851,9 @@ def _pending_new_flags(flags: list[str], flags_found: list[str], result: Any = N
     """
     if result is not None and _submission_fused(result):
         return []  # 熔断冷却中：本窗口不再提交（防穷举风暴烧错交计数）
+    # 已判错尾号黑名单：同尾号的旗变体（诱饵循环形态）永不再交
+    if result is not None and getattr(result, "rejected_flag_tails", None):
+        flags = [f for f in flags if f[-6:] not in result.rejected_flag_tails]
     seen_folded = {f.lower() for f in flags_found}
     out: list[str] = []
     batch_folded: set[str] = set()
@@ -2122,6 +2147,9 @@ def _submit_flag_safely(
         """登记一次提交结果；返回是否正确。"""
         result.flags_found.append(value)
         correct = bool(getattr(res, "correct", False))
+        result.submit_outcomes.append(correct)
+        if len(result.submit_outcomes) > 20:
+            result.submit_outcomes = result.submit_outcomes[-20:]
         awarded = int(getattr(res, "awarded", 0) or 0)
         cumulative = int(getattr(res, "cumulative_score", 0) or 0)
         if correct:
@@ -2130,6 +2158,7 @@ def _submit_flag_safely(
                 result.first_flag_seconds = round(time.monotonic() - started_at, 1)
         else:
             result.wrong_count += 1  # V2-2：近失信号（回队插队首 + 尾段优先重攻）
+            result.rejected_flag_tails.add(value[-6:])  # 已判错尾号入禁交名单（诱饵变体拦截）
         if awarded:
             result.awarded += awarded
         if cumulative:

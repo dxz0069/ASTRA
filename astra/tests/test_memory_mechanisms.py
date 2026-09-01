@@ -357,3 +357,38 @@ def test_junk_flag_rejects_ellipsis_truncated() -> None:
     assert ef("截断形态 flag{bbfa15fa-...} 与 FLAG{BBFA15FA-...} 双双拒收") == []
     # 真旗不受影响（内容含点但非结尾点串）
     assert ef("实测 flag{a.b.c-99}") == ["flag{a.b.c-99}"]
+
+
+def test_junk_flag_rejects_json_fragments() -> None:
+    """run 14180（c-08）：JSON 片段 flag{...ex":0} 不得当真旗提取。"""
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "container" / "astra_runner"))
+    from tsecbench_adapter import extract_flags as ef
+
+    assert ef("回执 flag{...ex" + chr(34) + ":0} 已收") == []
+    assert ef("片段 flag{q" + chr(92) + "k:1}") == []
+    assert ef("正常 flag{a1b2c3-d4e5}") == ["flag{a1b2c3-d4e5}"]
+
+
+def test_sliding_window_fuse_catches_post_success_storm() -> None:
+    """run 14180 形态：先对 7 次后被诱饵循环烧 241 错——滑窗熔断须覆盖"先对后错"。
+    v10 的零正确条件在开局得分后永久解除（实锤失效）。"""
+    from astra_runner.runner import _submission_fused, ChallengeResult as CR
+
+    r = CR(unique_code="c-88", description="d")
+    r.flags_correct = 7  # 开局得分（解除旧熔断）
+    r.wrong_count = 100
+    r.submit_outcomes = [True] * 7 + [False] * 10  # 近 10 次全错
+    assert _submission_fused(r) is True, "滑窗错误率熔断应触发"
+
+
+def test_rejected_tail_blacklist_blocks_decoy_variants() -> None:
+    """已判错尾号的旗变体（诱饵循环）永不再交。"""
+    from astra_runner.runner import _pending_new_flags, ChallengeResult as CR
+
+    r = CR(unique_code="c-77", description="d")
+    r.rejected_flag_tails = {"801c5}"}
+    # 同尾号变体被拦，不同尾号新旗放行
+    assert _pending_new_flags(["flag{decoy-801c5}"], [], r) == []
+    assert _pending_new_flags(["flag{fresh-999xyz}"], [], r) == ["flag{fresh-999xyz}"]
