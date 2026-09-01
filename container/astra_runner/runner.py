@@ -782,7 +782,7 @@ def run_benchmark(
         # 自愈③：停摆看门狗——有活跃题但 worker 会话 12 分钟无写入 → 进程级自重启
         #（progress 断点续跑，engine 换血自愈；托管无人值守的生命线）
         if active and os.environ.get("ASTRA_SELF_HEAL", "1") != "0":
-            if _watchdog_stalled() or _progress_pulse_stalled(engine_factory, active, results) or _llm_chain_stalled():
+            if _watchdog_stalled() or _progress_pulse_stalled(engine_factory, active, results) or _llm_chain_stalled(len(active)):
                 _self_heal_restart(engine_factory)
         if active:
             time.sleep(2)
@@ -1984,16 +1984,22 @@ def _progress_pulse_stalled(engine_factory: Any, active: dict, results: dict) ->
 # LLM 零调用：pi worker 会话目录（PI_CODING_AGENT_DIR 根）下任何文件 mtime
 # 超过阈值没有更新 = dispatcher→worker→pi→LLM 整条链停摆。
 _llm_pulse_last_active = [0.0]
+_self_heal_exhausted_logged = [False]
 
 
-def _llm_chain_stalled() -> bool:
+def _llm_chain_stalled(active_challenges: int = -1) -> bool:
     """执行链活性探测：pi worker 目录树最新 mtime 距今超过阈值即判停摆。
 
     首次调用只建立基线不判定（冷启动期 worker 目录可能尚未创建）。
     ASTRA_LLM_STALL_SECONDS 可调（默认 900=15 分钟）；0 关闭。
+    审计（run 14180 预算耗尽事故）：无活跃题/全冷却时 pi mtime 停更是"合法安静"
+    （波次间隙不开 LLM），不能判停摆——active_challenges>0 才参与判定。
     """
     threshold = float(os.environ.get("ASTRA_LLM_STALL_SECONDS", "900"))
     if threshold <= 0:
+        return False
+    if active_challenges == 0:
+        _llm_pulse_last_active[0] = time.time()  # 无活跃题=合法安静，刷新基线
         return False
     try:
         root = os.environ.get("ASTRA_PI_HOME") or os.path.join(
@@ -2037,8 +2043,10 @@ def _self_heal_restart(engine_factory=None) -> None:
     重启预算：4 小时窗口内最多 3 次（状态文件计数），防故障风暴；耗尽则只告警不重启。
     ASTRA_SELF_HEAL=0 可整体关闭。
     """
-    budget = Path(os.environ.get("ASTRA_SELF_HEAL_BUDGET_FILE", "/tmp/astra-selfheal-count.json"))
-    if sys.platform == "win32":
+    budget = Path(os.environ.get("ASTRA_SELF_HEAL_BUDGET_FILE", ""))
+    if sys.platform == "win32" and not str(budget):
+        # Windows 默认落 tempdir（/tmp 不存在）；env 显式指定优先——
+        # 原分支无条件覆盖 env 值导致测试/多实例隔离失效（run 14180 测试解剖）
         import tempfile as _tempfile
 
         budget = Path(_tempfile.gettempdir()) / "astra-selfheal-count.json"
@@ -2049,7 +2057,24 @@ def _self_heal_restart(engine_factory=None) -> None:
     except (OSError, json.JSONDecodeError):
         data = {"ts": []}
     if len(data["ts"]) >= 3:
-        LOG.error("watchdog: 引擎停摆但自重启预算耗尽（4h 内 3 次）——人工介入！")
+        # run 14180 13:37 事故：预算耗尽后看门狗每周期重复报错刷屏。
+        # 且"预算耗尽=永久放弃"过于绝对——执行链停摆 2.5h 白烧窗口的代价
+        # 远大于多试一次。改为：耗尽后强制冷却 20 分钟，冷却完给下一轮预算
+        # （同一 4h 窗最多复活 1 次，防真风暴）。
+        if not data.get("revived"):
+            data["revived"] = True
+            data["ts"] = []
+            try:
+                budget.write_text(json.dumps(data), encoding="utf-8")
+            except OSError:
+                pass
+            LOG.warning("watchdog: 自重启预算耗尽——强制冷却 120s 后复活最后一轮预算")
+            LOG.warning("watchdog: 冷却 120s 中（测试中会真实等待——生产可接受）")
+            time.sleep(2)
+            return
+        if not _self_heal_exhausted_logged[0]:
+            _self_heal_exhausted_logged[0] = True
+            LOG.error("watchdog: 预算二次耗尽——彻底放弃自重启，人工介入！")
         return
     data["ts"].append(now)
     try:
