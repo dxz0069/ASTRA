@@ -551,6 +551,50 @@ def test_run_benchmark_defer_resumes_same_project() -> None:
     assert results[0].project_id is not None
 
 
+def test_run_benchmark_zero_flag_low_score_gives_up_despite_deep_graph() -> None:
+    """run 14311 实测修正：零旗低分题的"图深豁免"失效——侦察一波就攒够 8 天枢，
+    图深≠有进展（只有旗能证明）。9 道零旗题曾靠豁免各占槽 4-8 波、轮转 3 小时
+    才轮到 500 分 hard 池；现 <800 分零旗题硬帽 2 波即弃。"""
+    challenges = [FakeChallenge("low100", total_score=100)]
+    client = FakeClient(challenges)
+
+    class DeepGraphEngine(FakeEngine):
+        def wait_project(self, project_id: str, timeout_seconds: float) -> bool:
+            return False  # 不归航：逼 defer 路径
+
+        def stats(self, project_id: str) -> dict[str, int]:
+            return {"facts": 30, "hints": 0, "review_hints": 0, "failure_hints": 0}
+
+    results = run_benchmark(
+        client, lambda: DeepGraphEngine({}),
+        challenge_timeout_seconds=0.2, flag_poll_seconds=0.05,
+        defer_after_seconds=0.2,
+    )
+    # 旧规则：facts=30 图深 → 预算 5 波；新规则：零旗低分硬帽 2 波
+    assert results[0].defer_count == 2
+
+
+def test_run_benchmark_zero_flag_big_score_keeps_extended_budget() -> None:
+    """≥800 分零旗大题保留扩展 defer 预算（b-02 类长链题需要多波续攻）。"""
+    challenges = [FakeChallenge("big1800", total_score=1800, flag_count=6)]
+    client = FakeClient(challenges)
+
+    class DeepGraphEngine(FakeEngine):
+        def wait_project(self, project_id: str, timeout_seconds: float) -> bool:
+            return False
+
+        def stats(self, project_id: str) -> dict[str, int]:
+            return {"facts": 30, "hints": 0, "review_hints": 0, "failure_hints": 0}
+
+    results = run_benchmark(
+        client, lambda: DeepGraphEngine({}),
+        challenge_timeout_seconds=0.2, flag_poll_seconds=0.05,
+        defer_after_seconds=0.2,
+    )
+    # 预算 = 4 + 1(≥800) + 1(图深≥25) = 6 波才放弃——远超低分题的 2 波硬帽
+    assert results[0].defer_count > 2
+
+
 def test_run_benchmark_multiflag_partial_defers_for_remaining() -> None:
     """V9 多旗收割：flag_count>已收旗数时 defer 回队续攻，不提前关题丢剩余旗。"""
     challenges = [FakeChallenge("mflag", total_score=1200, flag_count=4)]

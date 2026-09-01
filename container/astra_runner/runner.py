@@ -498,9 +498,13 @@ def run_benchmark(
                     budget += 1
                 if result.total_score >= 800:
                     budget += 1
-                # run 14180 用户定调：零旗且图浅（<8 天枢）=没摸到门的空转——
-                # 预算减半，两波就换题，别在门外反复开关
-                if result.flags_correct == 0 and (result.facts_count or 0) < 8:
+                # run 14180 用户定调：零旗没摸到门就早换题，别在门外反复开关。
+                # run 14311 实测修正：旧的"图浅(<8 天枢)"豁免实际永不触发——侦察一波
+                # 就攒够 8 天枢，图深 ≠ 有进展（只有旗能证明）。结果 9 道零旗题各自
+                # 占槽 4-8 波、轮转 3 小时才轮到 500 分 hard 池。改为按分值硬帽：
+                # 零旗且 <800 分 → 2 波即弃；≥800 分零旗大题保留扩展预算
+                # （b-02 类长链题需要多波）；弃题若图深可靠饥饿回灌续攻，不丢。
+                if result.flags_correct == 0 and result.total_score < 800:
                     budget = min(budget, 2)
                 budget = min(budget, MAX_DEFER_BUDGET_CAP)
                 if result.defer_count >= budget:
