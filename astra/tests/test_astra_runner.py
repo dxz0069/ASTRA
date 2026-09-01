@@ -1239,3 +1239,52 @@ def test_multiflag_wave_doubled() -> None:
     import astra_runner.runner as runner_mod
     src = inspect.getsource(runner_mod._run_single_challenge)
     assert "flag_count or 0) >= 4" in src and "defer_after_seconds * 2" in src
+
+
+def test_llm_watchdog_quiet_when_no_active_challenges(monkeypatch, tmp_path) -> None:
+    """run 14180 13:37 事故：无活跃题/全冷却时 pi mtime 停更是合法安静，
+    执行链看护不得判停摆（旧逻辑在波次间隙误判 → 烧光重启预算）。"""
+    import astra_runner.runner as runner_mod
+
+    pi_root = tmp_path / "astra-pi"
+    worker = pi_root / "deepseek-execute-0" / "sessions"
+    worker.mkdir(parents=True)
+    (worker / "session.jsonl").write_text("{}", encoding="utf-8")
+    import os as _os
+    import time as _time
+    old = _time.time() - 1800  # 30 分钟无写入（远超 15min 阈值）
+    _os.utime(worker / "session.jsonl", (old, old))
+    monkeypatch.setenv("ASTRA_PI_HOME", str(pi_root))
+    monkeypatch.setenv("ASTRA_LLM_STALL_SECONDS", "900")
+    runner_mod._reset_watchdog_state()
+
+    # 无活跃题（0）→ 合法安静，刷新基线不判停摆
+    assert runner_mod._llm_chain_stalled(active_challenges=0) is False
+    # 有活跃题 → 判停摆
+    assert runner_mod._llm_chain_stalled(active_challenges=3) is True
+
+
+def test_self_heal_budget_revives_once_then_gives_up(monkeypatch, tmp_path) -> None:
+    """预算耗尽不再永久放弃：冷却后复活一轮；二次耗尽才彻底放弃（日志去重）。"""
+    import json as _json
+    import astra_runner.runner as runner_mod
+
+    runner_mod._self_heal_exhausted_logged[0] = False  # 复位模块级去重标志（测试隔离）
+
+    monkeypatch.setenv("ASTRA_SELF_HEAL_BUDGET_FILE", str(tmp_path / "budget.json"))
+    import time as _t
+    now = _t.time()
+    (tmp_path / "budget.json").write_text(
+        _json.dumps({"ts": [now - 60, now - 120, now - 180]}), encoding="utf-8"  # 4h 内 3 次=耗尽
+    )
+    # 第一次耗尽：复活（清空 ts）
+    runner_mod._self_heal_restart()
+    data = _json.loads((tmp_path / "budget.json").read_text(encoding="utf-8"))
+    assert data.get("revived") is True and len(data["ts"]) == 0
+    # 第二次耗尽（复活后再 3 次）：彻底放弃
+    (tmp_path / "budget.json").write_text(
+        _json.dumps({"ts": [now - 60, now - 120, now - 180], "revived": True}), encoding="utf-8"
+    )
+    runner_mod._self_heal_restart()
+    data = _json.loads((tmp_path / "budget.json").read_text(encoding="utf-8"))
+    assert len(data["ts"]) == 3  # 未清空=彻底放弃
