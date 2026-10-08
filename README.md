@@ -131,6 +131,8 @@ uv run --project astra --group dev pytest
 
 ASTRA 是通用问题求解引擎。尽管它支持渗透测试、CTF 求解、安全评估与漏洞研究等工作流，仅限在获得明确授权的环境中使用。未经许可的安全测试可能违法并造成损害，使用者须自行承担全部责任。
 
+完整法律免责声明与使用合规须知见 [DISCLAIMER.md](DISCLAIMER.md)。
+
 ## License
 
 GNU AGPLv3
