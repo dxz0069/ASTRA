@@ -220,12 +220,32 @@ class DispatcherLoop:
             if self._project_requires_bootstrap(project):
                 return self._dispatch_initial_project(project)
             export_yaml = self.client.export_project(summary.id)
-            return self._dispatch_decide(project, export_yaml, "initial")
-        if project.project.decide is None:
+            if self._dispatch_decide(project, export_yaml, "initial"):
+                return True
+            # decide worker 缺席：降级走 execute 自组织（单通道形态初始化）
+            self._log_changed(
+                f"project:{summary.id}:decide-absent-degrade",
+                logging.INFO,
+                "decide absent project=%s initial degrade to execute self-organization",
+                summary.id,
+            )
+        elif project.project.decide is None:
             decide_trigger = self._decide_trigger(project)
             if decide_trigger is not None:
                 export_yaml = self.client.export_project(summary.id)
-                return self._dispatch_decide(project, export_yaml, decide_trigger)
+                if self._dispatch_decide(project, export_yaml, decide_trigger):
+                    return True
+                # 决策闸门降级（单项目长跑形态 2026-09-10 实战）：decide worker
+                # 缺席时图变化触发器会把整个项目的派发永久堵死（return False 且每周期
+                # 重入同分支）——execute conclude 自组织模式已在 150+ facts 实测中验证
+                # 可独立推进，故 decide 派不出去时放行 execute，不阻塞轮转。
+                self._log_changed(
+                    f"project:{summary.id}:decide-absent-degrade",
+                    logging.INFO,
+                    "decide absent project=%s trigger=%s degrade to execute self-organization",
+                    summary.id,
+                    decide_trigger,
+                )
         running_step_ids = self._project_running_execute_steps(summary.id)
         unclaimed_steps = [
             step
