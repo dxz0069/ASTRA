@@ -59,3 +59,16 @@ container/knowledge/constellation.json
 # 跑分复盘数据快照含平台 token，不入库（README 复盘文档单独入仓）
 erroranan/run14311/
 erroranan/历史SSE证据/
+# 研究资料与运行数据不入库（仓库只留项目本体）
+log/
+erroranan/
+dist/
+tmp/
+docs/SmarterMail*
+docs/*漏洞*
+note/*漏洞*
+tools/vuln_*.py
+# 外部参考仓库、演示工程与目标研究资料不入库
+external-repos/
+projects/
+icewarp_rn.html
