@@ -147,6 +147,39 @@ def test_pi_driver_extracts_session_and_last_assistant_text() -> None:
     assert driver.extract_response_text(stdout, "") == '{"accepted":true,"data":{}}'
 
 
+def test_pi_driver_prefers_completed_message_and_preserves_unicode_separators() -> None:
+    driver = PiDriver()
+    completed = '{"accepted":true,"data":{"description":"line\u2028break"}}'
+    stdout = "\n".join(
+        [
+            json.dumps(
+                {
+                    "type": "message_end",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": completed}],
+                    },
+                },
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {
+                    "type": "agent_end",
+                    "messages": [
+                        {
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": "stale retry output"}],
+                        }
+                    ],
+                    "willRetry": True,
+                }
+            ),
+            json.dumps({"type": "agent_settled", "aborted": False}),
+        ]
+    )
+    assert driver.extract_response_text(stdout, "") == completed
+
+
 def test_close_stream_closes_response_even_when_stream_close_fails() -> None:
     class Response:
         def __init__(self) -> None:

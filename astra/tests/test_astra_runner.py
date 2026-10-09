@@ -947,6 +947,7 @@ def test_collect_worker_usage_aggregates_and_tolerates_bad_lines(monkeypatch, tm
     lines = [
         '{"message":{"usage":{"input_tokens":100,"output_tokens":20,"cache_read_input_tokens":10,"cache_creation_input_tokens":5}}}',
         '{"message":{"usage":{"input_tokens":50,"output_tokens":30}}}',
+        '{"message":{"usage":{"input":7,"output":3,"cacheRead":2,"cacheWrite":1}}}',
         "not-json-line",
         '{"message":{}}',
         "",
@@ -955,10 +956,10 @@ def test_collect_worker_usage_aggregates_and_tolerates_bad_lines(monkeypatch, tm
     monkeypatch.setenv("ASTRA_PI_HOME", str(tmp_path / "pi-home"))
 
     total = collect_worker_usage()
-    assert total["inputTokens"] == 150
-    assert total["outputTokens"] == 50
-    assert total["cacheReadTokens"] == 10
-    assert total["cacheWriteTokens"] == 5
+    assert total["inputTokens"] == 157
+    assert total["outputTokens"] == 53
+    assert total["cacheReadTokens"] == 12
+    assert total["cacheWriteTokens"] == 6
 
     monkeypatch.setenv("ASTRA_PI_HOME", str(tmp_path / "missing"))
     assert collect_worker_usage() == {}

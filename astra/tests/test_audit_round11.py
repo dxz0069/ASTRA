@@ -121,9 +121,25 @@ def test_pi_cli_missing_fails_fast_with_hint(monkeypatch, pi_env, tmp_path) -> N
         raised = str(exc)
     if sys.platform == "win32":
         # win 路径走 candidates + which 双查缺失
-        assert raised and "npm install -g @mariozechner/pi-coding-agent" in raised
+        assert raised and "npm install -g --engine-strict @earendil-works/pi-coding-agent@1.1.0" in raised
     else:
         assert raised and "npm install" in raised
+
+
+def test_pi_cli_resolves_new_windows_bundle_path(monkeypatch, tmp_path) -> None:
+    import astra.dispatcher.workers.adapters.pi as pi_mod
+    from astra.dispatcher.workers.adapters.pi import PiDriver
+
+    shim_dir = tmp_path / "npm"
+    cli = shim_dir / "node_modules" / "@earendil-works" / "pi-coding-agent" / "dist" / "bundle" / "cli.js"
+    cli.parent.mkdir(parents=True)
+    cli.write_text("// synthetic Pi CLI entry", encoding="utf-8")
+    shim = shim_dir / "pi.cmd"
+    shim.write_text("@echo off", encoding="utf-8")
+    monkeypatch.setattr(pi_mod.sys, "platform", "win32")
+    monkeypatch.setattr(pi_mod.shutil, "which", lambda _name: str(shim))
+
+    assert PiDriver._pi_cli_js() == str(cli)
 
 
 def pi_driver_mod():

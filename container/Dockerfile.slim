@@ -81,17 +81,17 @@ RUN ok=""; for idx in 1 2 3; do \
     done; [ -n "$ok" ]
 
 # astra 引擎（server + dispatcher）与靶场接入编排器
-# 2026-08-29 v0.2 FGS 重建：执行底座只留 pi（@mariozechner/pi-coding-agent）——
+# 2026-08-29 v0.2 FGS 重建：执行底座只留 pi——
 # 最原始、完全可控的 Agent Loop（Less is More）。claude-code 与 playwright-mcp
 # （CC 经 .claude.json 注入）整体移除；浏览器类需求由 worker 经 bash 直驱。
-# 硬失败纪律：双镜像源装不上直接断构建；装完必须能输出版本号。
+# 数据/网络边界：双镜像源装不上直接断构建；严格检查 Node 引擎并校验运行版本。
 RUN ok=""; \
     for reg in https://registry.npmmirror.com https://registry.npmjs.org; do \
       echo "[pi] trying $reg"; \
-      if sudo npm install -g --registry=$reg @mariozechner/pi-coding-agent@0.73.0; then ok=1; break; fi; \
+      if sudo npm install -g --engine-strict --registry=$reg @earendil-works/pi-coding-agent@1.1.0; then ok=1; break; fi; \
       sleep $((RANDOM % 5 + 3)); \
     done; \
-    [ -n "$ok" ] && pi --version
+    [ -n "$ok" ] && test "$(pi --version)" = "1.1.0"
 
 COPY ./astra /opt/astra
 RUN cd /opt/astra && ok=""; for idx in 1 2 3; do \

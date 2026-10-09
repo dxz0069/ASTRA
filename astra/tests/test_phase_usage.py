@@ -83,6 +83,18 @@ def test_pi_usage_turn_end_can_supply_missing_message_end_usage() -> None:
     assert usage["cache_read_complete"] is True
 
 
+def test_pi_usage_keeps_unicode_line_separators_inside_json_strings() -> None:
+    message = {
+        "role": "assistant",
+        "content": [{"type": "text", "text": "first\u2028second\u2029third"}],
+        "usage": {"input": 12, "output": 4, "cacheRead": 2},
+    }
+    usage = _parse_pi_usage(_event("message_end", message))
+    assert usage["assistant_turns"] == 1
+    assert usage["usage_complete"] is True
+    assert usage["input_tokens"] == 12
+
+
 def test_pi_process_emits_metadata_only_record(tmp_path, monkeypatch, caplog) -> None:
     path = tmp_path / "usage.jsonl"
     monkeypatch.setenv("ASTRA_PHASE_USAGE_JSONL", str(path))

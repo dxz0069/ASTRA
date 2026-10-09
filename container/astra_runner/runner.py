@@ -2653,7 +2653,7 @@ def _run_environment_check(token: str, base_url: str) -> int:
     if pi:
         LOG.info("[PASS] pi CLI 位于 %s", pi)
     else:
-        LOG.error("[FAIL] 未找到 pi CLI（npm install -g @mariozechner/pi-coding-agent）")
+        LOG.error("[FAIL] 未找到 pi CLI（Node >=22.19.0；npm install -g --engine-strict @earendil-works/pi-coding-agent@1.1.0）")
         ok = False
     pi_key = os.environ.get("PI_API_KEY", "")
     if pi_key:
@@ -2716,6 +2716,18 @@ def collect_worker_usage() -> dict[str, int]:
         "cacheWriteTokens": 0,
     }
     found = False
+    def _token_value(usage: dict[str, object], *keys: str) -> int:
+        """Read a token counter across Pi's legacy and 1.1 event schemas."""
+        for key in keys:
+            value = usage.get(key)
+            if isinstance(value, bool) or value is None:
+                continue
+            try:
+                return max(0, int(value))
+            except (TypeError, ValueError):
+                continue
+        return 0
+
     for f in _glob.glob(str(Path(root) / "*" / "sessions" / "**" / "*.jsonl"), recursive=True):
         found = True
         try:
@@ -2727,14 +2739,27 @@ def collect_worker_usage() -> dict[str, int]:
                     record = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                usage = (record.get("message") or {}).get("usage") or record.get("usage") or {}
-                total["inputTokens"] += int(usage.get("input_tokens") or usage.get("inputTokens") or 0)
-                total["outputTokens"] += int(usage.get("output_tokens") or usage.get("outputTokens") or 0)
-                total["cacheReadTokens"] += int(
-                    usage.get("cache_read_input_tokens") or usage.get("cacheReadInputTokens") or 0
+                message = record.get("message")
+                usage = message.get("usage") if isinstance(message, dict) else None
+                if not isinstance(usage, dict):
+                    usage = record.get("usage")
+                if not isinstance(usage, dict):
+                    continue
+                total["inputTokens"] += _token_value(usage, "input", "inputTokens", "input_tokens")
+                total["outputTokens"] += _token_value(usage, "output", "outputTokens", "output_tokens")
+                total["cacheReadTokens"] += _token_value(
+                    usage,
+                    "cacheRead",
+                    "cacheReadInputTokens",
+                    "cache_read_input_tokens",
+                    "cache_read",
                 )
-                total["cacheWriteTokens"] += int(
-                    usage.get("cache_creation_input_tokens") or usage.get("cacheCreationInputTokens") or 0
+                total["cacheWriteTokens"] += _token_value(
+                    usage,
+                    "cacheWrite",
+                    "cacheCreationInputTokens",
+                    "cache_creation_input_tokens",
+                    "cache_write",
                 )
         except OSError:
             continue

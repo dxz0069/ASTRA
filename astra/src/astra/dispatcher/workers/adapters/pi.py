@@ -14,6 +14,19 @@ from astra.dispatcher.workers.base import DriverResult, WorkerDriver
 class PiDriver(WorkerDriver):
     type_name = "pi"
 
+    _INSTALL_HINT = (
+        "npm install -g --engine-strict @earendil-works/pi-coding-agent@1.1.0"
+    )
+    # Pi moved from @mariozechner to @earendil-works and the bundled CLI
+    # moved from dist/cli.js to dist/bundle/cli.js. Keep the old candidates
+    # as a local-development fallback while making the current package first.
+    _WINDOWS_CLI_CANDIDATES = (
+        ("@earendil-works", "pi-coding-agent", "dist", "bundle", "cli.js"),
+        ("@earendil-works", "pi-coding-agent", "dist", "cli.js"),
+        ("@mariozechner", "pi-coding-agent", "dist", "cli.js"),
+        ("@mariozechner", "pi-coding-agent", "dist", "bundle", "cli.js"),
+    )
+
     _FULL_TOOLS = "read,write,edit,bash,grep,find,ls"
     _EXECUTE_TOOLS = "read,write,bash,ls"
     _READONLY_TOOLS = "read"
@@ -103,19 +116,30 @@ class PiDriver(WorkerDriver):
 
     def extract_response_text(self, stdout: str, stderr: str) -> str:
         assistant_message: dict[str, Any] | None = None
+        # message_end is the authoritative completed assistant message in
+        # Pi 1.1 JSON mode. turn_end and agent_end remain fallbacks for older
+        # streams; agent_end may be followed by retry/compaction recovery.
+        message_end: dict[str, Any] | None = None
+        turn_end: dict[str, Any] | None = None
+        agent_end: dict[str, Any] | None = None
         for event in self._iter_events(stdout):
             event_type = event.get("type")
-            if event_type == "turn_end":
+            if event_type == "message_end":
                 message = event.get("message")
                 if isinstance(message, dict) and message.get("role") == "assistant":
-                    assistant_message = message
+                    message_end = message
+            elif event_type == "turn_end":
+                message = event.get("message")
+                if isinstance(message, dict) and message.get("role") == "assistant":
+                    turn_end = message
             elif event_type == "agent_end":
                 messages = event.get("messages")
                 if isinstance(messages, list):
                     for message in reversed(messages):
                         if isinstance(message, dict) and message.get("role") == "assistant":
-                            assistant_message = message
+                            agent_end = message
                             break
+        assistant_message = message_end or turn_end or agent_end
         if assistant_message is None:
             return stdout
         content = assistant_message.get("content")
@@ -213,17 +237,18 @@ class PiDriver(WorkerDriver):
             if resolved:
                 bases.append(Path(resolved).resolve().parent)
             for candidate in bases:
-                cli = candidate / "node_modules" / "@mariozechner" / "pi-coding-agent" / "dist" / "cli.js"
-                if cli.exists():
-                    return str(cli)
+                for package_parts in PiDriver._WINDOWS_CLI_CANDIDATES:
+                    cli = candidate / "node_modules" / Path(*package_parts)
+                    if cli.exists():
+                        return str(cli)
             if not resolved:
                 raise RuntimeError(
-                    "pi CLI 未安装：npm install -g @mariozechner/pi-coding-agent"
+                    f"pi CLI 未安装：{PiDriver._INSTALL_HINT}"
                     "（找不到 pi 命令，也无 node_modules 入口）"
                 )
         if not resolved:
             raise RuntimeError(
-                "pi CLI 未安装：npm install -g @mariozechner/pi-coding-agent（PATH 中无 pi）"
+                f"pi CLI 未安装：{PiDriver._INSTALL_HINT}（PATH 中无 pi）"
             )
         return resolved or "pi"
 
@@ -275,7 +300,8 @@ class PiDriver(WorkerDriver):
     @staticmethod
     def _iter_events(stdout: str) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
-        for line in stdout.splitlines():
+        # JSON mode uses LF framing; U+2028/U+2029 are valid inside strings.
+        for line in stdout.split("\n"):
             line = line.strip()
             if not line:
                 continue

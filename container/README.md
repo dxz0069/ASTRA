@@ -14,6 +14,15 @@ docker build -f container/Dockerfile -t astra-runner .
 ASTRA 引擎（server+dispatcher）、**pi**（唯一执行底座）、
 `astra-runner` 靶场编排器（默认 ENTRYPOINT）。
 
+Pi 固定为 `@earendil-works/pi-coding-agent@1.1.0`，要求 Node ≥ 22.19.0。
+两个 Dockerfile 均启用 npm `--engine-strict` 并在安装后校验 `pi --version`；
+基础镜像的 Node 版本不满足要求时构建会失败。本地安装使用：
+
+```bash
+npm install -g --engine-strict @earendil-works/pi-coding-agent@1.1.0
+pi --version  # 应输出 1.1.0
+```
+
 ## Worker 选择（astra-runner 本地/托管模式）
 
 `container/astra_runner/runner.py` 的引擎（`astra_runner_engine.py`）根据环境变量
@@ -28,8 +37,12 @@ dsh 栈均已移除）。
 可选 env：`ASTRA_EXECUTE_REPLICAS`（默认 4）、`ASTRA_EXECUTE_MAXRUN`（默认 3，
 r5 实测最优拓扑 4×3）、`ASTRA_DECIDE_TIMEOUT`（默认 600s）、`ASTRA_PI_HOME`
 （pi worker 会话根目录，默认临时目录 astra-pi，worker 子目录按名隔离）、
-`ASTRA_MODEL_RETRY_MAX`（瞬时模型错误退避重试次数，默认 2，0=关闭——托管网关
-SSE 断流 "incomplete SSE response" 的兜底，pi 自身零重试）。
+`ASTRA_MODEL_RETRY_MAX`（外层瞬时模型错误退避重试次数，默认 2，0=关闭）。
+Pi 1.1.0 自带有限的内层重试和上下文压缩恢复；ASTRA 外层重试针对 Pi 最终仍未恢复的
+传输或瞬时服务错误，包括托管网关 SSE 断流 "incomplete SSE response"。
+
+ASTRA 继续通过 Pi 的 JSON 模式运行阶段，等进程与输出流完整收尾后读取最终消息、
+工具证据和用量，确保 Pi 内层重试或压缩恢复完成后再判定阶段结果。
 
 ### Pi 工具 profile
 

@@ -98,7 +98,9 @@ ENTRYPOINT ["python3", "/opt/astra-runner/runner.py"]
 
 # 2026-08-29 v0.2 FGS 重建：执行底座只留 pi（最原始、完全可控——Less is More）；
 # codex / claude-code / playwright-mcp 全部移除。本文件不依赖本地预置镜像；slim 依赖 astra-slim:v5s 缓存。
-RUN sudo npm install -g @mariozechner/pi-coding-agent@0.73.0
+# 数据/网络边界：严格检查 Node 引擎并校验运行版本，避免安装漂移影响复现。
+RUN sudo npm install -g --engine-strict @earendil-works/pi-coding-agent@1.1.0 && \
+    test "$(pi --version)" = "1.1.0"
 
 RUN sudo chmod +x /usr/local/bin/kerbrute
 RUN mkdir -p /home/kali/.config/nuclei && \

@@ -2,7 +2,7 @@
 """pi 双网关 spike 汇总跑（DS anthropic-messages + Zhipu GLM）。
 
 经验教训（已实证）：
-1. pi 0.73.0 的 anthropic 协议 api id = "anthropic-messages"（不是 "anthropic"）
+1. pi 1.1.0 的 anthropic 协议 api id = "anthropic-messages"（不是 "anthropic"）
 2. 环境变量 ANTHROPIC_AUTH_TOKEN 会覆盖 models.json 的 apiKey —— 子进程 env 必须清洗
 """
 import json
@@ -24,7 +24,7 @@ def find_pi_cli() -> str:
     import shutil
     npm = shutil.which("npm") or r"D:\software\nodejs\npm.cmd"
     root = subprocess.run([npm, "root", "-g"], capture_output=True, text=True, timeout=30).stdout.strip()
-    cli = Path(root) / "@mariozechner" / "pi-coding-agent" / "dist" / "cli.js"
+    cli = Path(root) / "@earendil-works" / "pi-coding-agent" / "dist" / "bundle" / "cli.js"
     assert cli.exists(), f"pi cli.js not found at {cli}"
     NPM_CLI = str(cli)
     return NPM_CLI

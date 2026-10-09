@@ -546,7 +546,8 @@ def _parse_pi_usage(stdout: str) -> dict[str, int | bool]:
             add(usage)
         pending_usage.clear()
 
-    for line in stdout.splitlines():
+    # Pi JSON mode frames events with LF; U+2028/U+2029 may occur in text.
+    for line in stdout.split("\n"):
         if not line.lstrip().startswith("{"):
             continue
         try:

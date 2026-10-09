@@ -61,7 +61,7 @@ AI 漏洞挖掘与渗透测试只是这类问题的第一片已证明的星域�
 
 ### 执行底座：PI
 
-执行底座只有 [pi-coding-agent](https://github.com/badlogic/pi-mono)（Node）——选它不是因为强，
+执行底座只有 [pi-coding-agent](https://github.com/earendil-works/pi)（当前固定 1.1.0）——选它不是因为强，
 而是因为它**最原始、完全可控**。内置提示词极短且与安全任务零耦合：引擎是通用任务求解引擎，
 任务知识只存在于任务描述层。
 
@@ -91,10 +91,11 @@ AI 漏洞挖掘与渗透测试只是这类问题的第一片已证明的星域�
 
 ## 快速开始
 
-前置：macOS / Linux / Windows，Python ≥ 3.12，Node ≥ 18（pi CLI），Docker（可选，local 模式不需要）。
+前置：macOS / Linux / Windows，Python ≥ 3.12，Node ≥ 22.19.0（pi CLI），Docker（可选，local 模式不需要）。
 
 ```bash
-npm install -g @mariozechner/pi-coding-agent
+npm install -g --engine-strict @earendil-works/pi-coding-agent@1.1.0
+pi --version                           # 应输出 1.1.0
 cp dispatch.example.yaml dispatch.yaml   # 填写 PI_* 模型端点与密钥
 uv run --project astra astra serve
 uv run --project astra astra dispatch --config dispatch.yaml
