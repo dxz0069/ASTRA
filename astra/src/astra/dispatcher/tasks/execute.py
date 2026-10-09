@@ -210,6 +210,8 @@ def run_execute_task(
             timeout=config.tasks.execute.timeout,
             lease=lease,
             cancellation=cancellation,
+            project_id=project.project.id,
+            step_id=step.id,
         )
         execute_ms = int((time.perf_counter() - execute_started) * 1000)
         session = driver.extract_session(session, first.stdout, first.stderr)
@@ -243,6 +245,7 @@ def run_execute_task(
                 kind, data = validate_execute_payload(payload)
                 description = data["description"] if data else None
                 finding = data["finding"] if data else None
+                finding_high_value = bool(data["finding_high_value"]) if data else False
             except Exception as exc:
                 LOG.warning(
                     "execute parse failed project=%s step=%s worker=%s error=%s execute_ms=%s total_ms=%s stdout_preview=%s stderr_preview=%s",
@@ -281,7 +284,9 @@ def run_execute_task(
                 )
                 best_effort_release(client, project.project.id, step.id, worker.name)
                 return "rejected"
-            if not _should_write_fact(client, client.get_project(project.project.id), description):
+            fresh_project = client.get_project(project.project.id)
+            duplicate = find_duplicate_fact(fresh_project, description) if finding else None
+            if duplicate is None and not _should_write_fact(client, fresh_project, description):
                 best_effort_release(client, project.project.id, step.id, worker.name)
                 return "success"
             conclude_status = write_conclude_result(
@@ -295,6 +300,8 @@ def run_execute_task(
                 total_ms=int((time.perf_counter() - task_started) * 1000),
                 kind=_infer_fact_kind(description),
                 finding=finding,
+                finding_high_value=finding_high_value,
+                reuse_fact_id=duplicate.id if duplicate is not None else None,
             )
             # 质询星探·关键事实审计：凭据/flag 级发现入图后异步对抗审查
             # （不阻塞旗提交；质疑成立写 hint 留痕，决策链可回放）
@@ -454,6 +461,8 @@ def _try_conclude_fallback(
         timeout=config.tasks.execute.conclude_timeout,
         lease=lease,
         cancellation=cancellation,
+        project_id=project_id,
+        step_id=step.id,
     )
     conclude_ms = int((time.perf_counter() - conclude_started) * 1000)
     cancelled = cancel_reason(result, cancellation)
@@ -491,6 +500,7 @@ def _try_conclude_fallback(
         kind, data = validate_execute_payload(payload)
         description = data["description"] if data else None
         finding = data["finding"] if data else None
+        finding_high_value = bool(data["finding_high_value"]) if data else False
     except Exception as exc:
         LOG.warning(
             "conclude parse failed project=%s step=%s worker=%s error=%s conclude_ms=%s stdout_preview=%s stderr_preview=%s",
@@ -515,7 +525,9 @@ def _try_conclude_fallback(
         )
         best_effort_release(client, project_id, step.id, worker.name)
         return "rejected"
-    if not _should_write_fact(client, client.get_project(project_id), description):
+    fresh_project = client.get_project(project_id)
+    duplicate = find_duplicate_fact(fresh_project, description) if finding else None
+    if duplicate is None and not _should_write_fact(client, fresh_project, description):
         best_effort_release(client, project_id, step.id, worker.name)
         return "success"
     conclude_status = write_conclude_result(
@@ -527,6 +539,8 @@ def _try_conclude_fallback(
         source="execute_conclude",
         phase_ms=conclude_ms,
         finding=finding,
+        finding_high_value=finding_high_value,
+        reuse_fact_id=duplicate.id if duplicate is not None else None,
     )
     # 质询星探·关键事实审计（conclude 兜底路径同样把关）
     if conclude_status == "success" and _CRITICAL_RE.search(description or ""):
@@ -552,6 +566,8 @@ def _run_process(
     timeout: int,
     lease: HeartbeatLease,
     cancellation: TaskCancellation,
+    project_id: str | None = None,
+    step_id: str | None = None,
 ):
     # runner 传模块命名空间的 run_worker_process——保持测试对 execute 模块
     # run_worker_process/_run_process 两个既有打桩点都有效
@@ -565,4 +581,6 @@ def _run_process(
         lease=lease,
         cancellation=cancellation,
         runner=run_worker_process,
+        project_id=project_id,
+        step_id=step_id,
     )

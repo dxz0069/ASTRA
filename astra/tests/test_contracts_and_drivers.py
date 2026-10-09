@@ -10,6 +10,7 @@ from astra.dispatcher.contracts import (
     validate_bootstrap_stream,
     validate_decide_payload,
     validate_execute_payload,
+    validate_strike_payload,
 )
 from astra.dispatcher.runtime.process import ManagedProcess
 from astra.dispatcher.workers.adapters.pi import PiDriver
@@ -97,6 +98,27 @@ def test_execute_payload_extracts_optional_finding() -> None:
     assert kind == "fact"
     assert data["description"] == "found"
     assert data["finding"] == "SQLi at /login"
+    assert data["finding_high_value"] is False
+
+
+def test_execute_payload_requires_explicit_boolean_high_value() -> None:
+    kind, data = validate_execute_payload(
+        {"accepted": True, "data": {"description": "observed response", "finding": {"description": "specific lead", "high_value": True}}}
+    )
+    assert kind == "fact"
+    assert data["finding_high_value"] is True
+    _, legacy = validate_execute_payload({"description": "observed response", "finding": "specific lead"})
+    assert legacy["finding_high_value"] is False
+    with pytest.raises(ValueError, match="boolean"):
+        validate_execute_payload({"description": "observed response", "finding": {"description": "lead", "high_value": "true"}})
+
+
+def test_strike_payload_needs_explicit_verdict_and_summary() -> None:
+    assert validate_strike_payload({"accepted": True, "data": {"verdict": "blocked", "summary": "No access to target"}}) == ("blocked", "No access to target")
+    with pytest.raises(ValueError, match="summary"):
+        validate_strike_payload({"verdict": "confirmed", "summary": " "})
+    with pytest.raises(ValueError, match="verdict"):
+        validate_strike_payload({"verdict": "likely", "summary": "Possibly reproducible"})
 
 
 def test_execute_payload_rejects_planning_text() -> None:

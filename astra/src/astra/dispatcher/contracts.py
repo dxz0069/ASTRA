@@ -281,13 +281,44 @@ def validate_execute_payload(payload: dict[str, Any]) -> tuple[str, dict[str, An
         raise ValueError("description is required")
     finding = data.get("finding")
     finding_description: str | None = None
+    finding_high_value = False
     if isinstance(finding, dict):
         fd = finding.get("description")
         if isinstance(fd, str) and fd.strip():
             finding_description = fd.strip()
+        high_value = finding.get("high_value", False)
+        if not isinstance(high_value, bool):
+            raise ValueError("finding.high_value must be a boolean")
+        finding_high_value = high_value
     elif isinstance(finding, str) and finding.strip():
         finding_description = finding.strip()
-    return "fact", {"description": description.strip(), "finding": finding_description}
+    if finding_high_value and finding_description is None:
+        raise ValueError("finding.description is required for high_value")
+    return "fact", {
+        "description": description.strip(),
+        "finding": finding_description,
+        "finding_high_value": finding_high_value,
+    }
+
+
+def validate_strike_payload(payload: dict[str, Any]) -> tuple[str, str]:
+    """A Strike result must give one explicit verdict and an evidence summary."""
+    accepted, data = _unwrap_wrapped_payload(payload)
+    if accepted is False:
+        raise ValueError("strike rejected")
+    if accepted is None:
+        if not isinstance(payload, dict) or "verdict" not in payload:
+            raise ValueError("accepted must be true or false")
+        data = payload
+    if not isinstance(data, dict) or set(data) != {"verdict", "summary"}:
+        raise ValueError("strike requires only verdict and summary")
+    verdict = data.get("verdict")
+    summary = data.get("summary")
+    if verdict not in ("confirmed", "refuted", "blocked"):
+        raise ValueError("strike verdict must be confirmed, refuted or blocked")
+    if not isinstance(summary, str) or not summary.strip():
+        raise ValueError("strike summary is required")
+    return verdict, summary.strip()
 
 
 # 质询理由封顶（防长篇倾倒；正常反驳一句话说清缺什么验证）

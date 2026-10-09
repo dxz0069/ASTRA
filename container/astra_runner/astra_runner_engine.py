@@ -335,6 +335,9 @@ workers:
         types_line = ", ".join(task_types)
         context_window = os.environ.get("PI_MODEL_CONTEXT_WINDOW", "131072")
         max_tokens = os.environ.get("PI_MODEL_MAX_TOKENS", "16384")
+        tool_profile = os.environ.get("PI_TOOL_PROFILE", "minimal")
+        if tool_profile not in {"minimal", "full"}:
+            raise ValueError("PI_TOOL_PROFILE must be one of: minimal, full")
         return f"""  - name: "{worker_name}"
     type: "pi"
     task_types: [{types_line}]
@@ -347,6 +350,7 @@ workers:
       PI_PROVIDER_API: "{provider_api}"
       PI_MODEL_CONTEXT_WINDOW: "{context_window}"
       PI_MODEL_MAX_TOKENS: "{max_tokens}"
+      PI_TOOL_PROFILE: "{tool_profile}"
       PI_CODING_AGENT_DIR: "{agent_dir_yaml}"
 """
 

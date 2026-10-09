@@ -51,6 +51,8 @@ CREATE TABLE IF NOT EXISTS steps (
     last_heartbeat_at TEXT,
     created_at TEXT NOT NULL,
     concluded_at TEXT,
+    task_type TEXT NOT NULL DEFAULT 'execute',
+    finding_id TEXT,
     PRIMARY KEY (id, project_id)
 );
 
@@ -67,6 +69,13 @@ CREATE TABLE IF NOT EXISTS findings (
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     description TEXT NOT NULL,
     created_at TEXT NOT NULL,
+    high_value INTEGER NOT NULL DEFAULT 0,
+    verification_status TEXT NOT NULL DEFAULT 'not_requested',
+    source_fact_id TEXT,
+    source_step_id TEXT,
+    verification_step_id TEXT,
+    verification_fact_id TEXT,
+    verification_summary TEXT,
     PRIMARY KEY (id, project_id)
 );
 
@@ -202,6 +211,24 @@ def _migrate_legacy(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE steps ADD COLUMN close_reason TEXT")
     if "closed_at" not in step_cols:
         conn.execute("ALTER TABLE steps ADD COLUMN closed_at TEXT")
+    if "task_type" not in step_cols:
+        conn.execute("ALTER TABLE steps ADD COLUMN task_type TEXT NOT NULL DEFAULT 'execute'")
+    if "finding_id" not in step_cols:
+        conn.execute("ALTER TABLE steps ADD COLUMN finding_id TEXT")
+
+    finding_cols = _columns(conn, "findings")
+    finding_additions = {
+        "high_value": "INTEGER NOT NULL DEFAULT 0",
+        "verification_status": "TEXT NOT NULL DEFAULT 'not_requested'",
+        "source_fact_id": "TEXT",
+        "source_step_id": "TEXT",
+        "verification_step_id": "TEXT",
+        "verification_fact_id": "TEXT",
+        "verification_summary": "TEXT",
+    }
+    for column, declaration in finding_additions.items():
+        if column not in finding_cols:
+            conn.execute(f"ALTER TABLE findings ADD COLUMN {column} {declaration}")
 
 
 @contextmanager

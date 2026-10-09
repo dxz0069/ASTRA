@@ -40,11 +40,13 @@ AI 漏洞挖掘与渗透测试只是这类问题的第一片已证明的星域�
 - **玉衡（Decide）**：北斗第五星，衡者权衡——串行、事件触发（任务开始或图变化）、
   每次从干净上下文起跑。只拥有图操作权限：判定北辰是否抵达（终止搜索）、开辟斗柄
   （必附"预期产出什么天枢"）、关闭失效斗柄（留痕防重开死路）、增删星宿。
-- **摇光（Execute）**：斗柄之梢，光芒出击——并发多实例。拥有世界工具
-  （read/bash/edit/write）与唯一的自证入图闸口：确认责任在星官自证，
+- **摇光（Execute）**：斗柄之梢，光芒出击——并发多实例。默认拥有通用工具
+  （read/write/bash/ls）与唯一的自证入图闸口：确认责任在星官自证，
   跑过命令、亲眼看到输出才写回，可携一颗客星。
 
-没有审查环、没有记忆压缩、没有预设技能——图本身是唯一的事实账本。
+核心搜索链路只依赖星图与 Pi；质询、摘要和跨题记忆是可选实验层。Pi 默认禁用
+自动技能与工作区上下文加载，托管镜像不打包旧技能目录、历史 `AGENTS.md`
+和按旧题码索引的解题笔记。
 
 ## 关键机制
 
@@ -120,6 +122,11 @@ docker save astra-runner:latest | gzip > agent.tar.gz   # 按平台规范上传
 
 镜像内已内置 ASTRA 引擎、pi CLI 与 Kali 工具链；通过环境变量配置模型
 （`PI_MODEL / PI_BASE_URL / PI_API_KEY / PI_PROVIDER_API`，智谱决策通道 `ZHIPU_PI_*`）。
+Pi 工具集合由每个 worker 的 `PI_TOOL_PROFILE` 控制，默认 `minimal`：bootstrap/execute
+暴露 `read,write,bash,ls`，decide/challenge 只暴露 `read`；需要兼容旧版工具集合时设为
+`full`（常规执行阶段七个内置工具，decide/challenge 仍固定只读）。详见
+[container/README.md](container/README.md) 与
+`dispatch.example.yaml`。
 
 ### 测试
 

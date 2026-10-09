@@ -38,6 +38,26 @@ class WorkerDriver(abc.ABC):
     def build_execute(self, worker: WorkerConfig, prompt: str, session: str | None) -> DriverResult:
         raise NotImplementedError
 
+    def build_decide(self, worker: WorkerConfig, prompt: str, session: str | None) -> DriverResult:
+        """Build a decision invocation.
+
+        Drivers that do not need phase-specific tool isolation can keep the
+        regular execute command.  Pi overrides this to expose only read-only
+        tools while inspecting the graph.
+        """
+        return self.build_execute(worker, prompt, session)
+
+    def build_challenge(self, worker: WorkerConfig, prompt: str, session: str | None) -> DriverResult:
+        return self.build_execute(worker, prompt, session)
+
+    def build_strike(self, worker: WorkerConfig, prompt: str, session: str | None) -> DriverResult:
+        """Build an independent Finding verification invocation.
+
+        Verification needs execution tools to reproduce a reported claim. The
+        dedicated hook leaves phase-specific overrides available to drivers.
+        """
+        return self.build_execute(worker, prompt, session)
+
     @abc.abstractmethod
     def build_conclude(self, worker: WorkerConfig, prompt: str, session: str) -> list[str]:
         raise NotImplementedError

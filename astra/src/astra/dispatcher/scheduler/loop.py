@@ -18,6 +18,7 @@ from astra.dispatcher.runtime.startup_healthcheck import format_failure_summary,
 from astra.dispatcher.scheduler.worker_select import choose_worker
 from astra.dispatcher.tasks.bootstrap import run_bootstrap_task
 from astra.dispatcher.tasks.execute import run_execute_task
+from astra.dispatcher.tasks.strike import run_strike_task
 from astra.dispatcher.tasks.decide import run_decide_task
 from astra.server.models import Step, ProjectDetail, ProjectSummary
 
@@ -214,6 +215,20 @@ class DispatcherLoop:
                 project.project.status,
             )
             return False
+        running_step_ids = self._project_running_execute_steps(summary.id)
+        strike_steps = [
+            step for step in project.steps
+            if step.to is None
+            and step.status == "open"
+            and step.worker is None
+            and step.id not in running_step_ids
+            and getattr(step, "task_type", "execute") == "strike"
+        ]
+        if strike_steps:
+            next_strike = min(strike_steps, key=lambda item: (item.dispatch_count, item.created_at, item.id))
+            export_yaml = self.client.export_project(summary.id)
+            if self._dispatch_strike(project, export_yaml, next_strike):
+                return True
         if self._is_initial_project(project):
             if project.project.decide is not None:
                 return False
@@ -246,7 +261,6 @@ class DispatcherLoop:
                     summary.id,
                     decide_trigger,
                 )
-        running_step_ids = self._project_running_execute_steps(summary.id)
         unclaimed_steps = [
             step
             for step in project.steps
@@ -255,6 +269,7 @@ class DispatcherLoop:
             and step.worker is None
             and step.id not in running_step_ids
             and not self._is_bootstrap_step(step)
+            and getattr(step, "task_type", "execute") != "strike"
         ]
         if running_step_ids and not unclaimed_steps:
             self._log_changed(
@@ -500,7 +515,48 @@ class DispatcherLoop:
         LOG.info("dispatched execute project=%s step=%s worker=%s", project.project.id, step.id, worker.name)
         return True
 
-    def _select_worker(self, project_id: str, task_type: str) -> WorkerSelection:
+    def _dispatch_strike(self, project: ProjectDetail, export_yaml: str, step: Step) -> bool:
+        # Explicit Strike workers own this queue. Older configurations can use an
+        # Execute worker, but still run the dedicated verification task and prompt.
+        worker_type = "strike" if any("strike" in worker.task_types for worker in self.config.workers) else "execute"
+        selection = self._select_worker(project.project.id, worker_type, rejection_task_type="strike")
+        worker = selection.worker
+        if worker is None:
+            self._log_changed(
+                f"project:{project.project.id}:worker:strike",
+                logging.INFO,
+                "no worker available for strike project=%s step=%s requested_type=%s blocked_busy=%s blocked_unhealthy=%s blocked_rejected=%s",
+                project.project.id, step.id, worker_type,
+                selection.blocked_busy, selection.blocked_unhealthy, selection.blocked_rejected,
+            )
+            return False
+        self._clear_log_state(f"project:{project.project.id}:worker:strike")
+        claim = self.client.heartbeat(project.project.id, step.id, worker.name)
+        if not claim.ok:
+            LOG.log(
+                logging.INFO if claim.status_code == 403 else logging.WARNING,
+                "strike claim failed project=%s step=%s worker=%s status=%s",
+                project.project.id, step.id, worker.name, claim.status_code,
+            )
+            return False
+        try:
+            future = self.executor.submit(
+                run_strike_task,
+                self.config, self.client, self.container_manager,
+                project, export_yaml, step, worker,
+                cancellation := TaskCancellation(),
+            )
+        except Exception:
+            LOG.exception("failed to submit strike task project=%s step=%s worker=%s", project.project.id, step.id, worker.name)
+            self._best_effort_release(project.project.id, step.id, worker.name)
+            return False
+        self.futures[future] = RunningTask(project.project.id, "strike", worker.name, cancellation, step_id=step.id)
+        self.runtime_project_ids.add(project.project.id)
+        self._clear_project_log_state(project.project.id)
+        LOG.info("dispatched strike project=%s step=%s finding=%s worker=%s", project.project.id, step.id, step.finding_id, worker.name)
+        return True
+
+    def _select_worker(self, project_id: str, task_type: str, *, rejection_task_type: str | None = None) -> WorkerSelection:
         now = time.time()
         candidates: list[WorkerConfig] = []
         blocked_busy: list[str] = []
@@ -520,7 +576,7 @@ class DispatcherLoop:
             if unhealthy_until > now:
                 blocked_unhealthy.append(f"{worker.name}({unhealthy_until - now:.1f}s)")
                 continue
-            rejected_until = self.worker_rejected_until.get((project_id, task_type, worker.name), 0)
+            rejected_until = self.worker_rejected_until.get((project_id, rejection_task_type or task_type, worker.name), 0)
             if rejected_until > now:
                 blocked_rejected.append(f"{worker.name}({rejected_until - now:.1f}s)")
                 continue
@@ -590,7 +646,7 @@ class DispatcherLoop:
         return {
             task.step_id
             for task in self.futures.values()
-            if task.project_id == project_id and task.task_type == "execute" and task.step_id is not None
+            if task.project_id == project_id and task.task_type in ("execute", "strike") and task.step_id is not None
         }
 
     def _running_project_count(self, summaries: list[ProjectSummary]) -> int:

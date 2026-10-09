@@ -97,7 +97,7 @@ COPY ./container/astra_runner /opt/astra-runner
 ENTRYPOINT ["python3", "/opt/astra-runner/runner.py"]
 
 # 2026-08-29 v0.2 FGS 重建：执行底座只留 pi（最原始、完全可控——Less is More）；
-# codex / claude-code / playwright-mcp 全部移除。托管出包请用 Dockerfile.slim（本文件为本地全量开发镜像）。
+# codex / claude-code / playwright-mcp 全部移除。本文件不依赖本地预置镜像；slim 依赖 astra-slim:v5s 缓存。
 RUN sudo npm install -g @mariozechner/pi-coding-agent@0.73.0
 
 RUN sudo chmod +x /usr/local/bin/kerbrute
@@ -113,8 +113,5 @@ RUN printf '%s\n' 'PS1="${PS1%\\n*} \[\033[0;36m\]\D{%y-%m-%d} - \t\[\033[;32m\]
 ENV PATH="/home/kali/.local/bin:${PATH}"
 ENV TZ=Asia/Shanghai
 ENV PYTHONUNBUFFERED=1
-
-COPY ./container/.agents /home/kali/workspace/.agents
-COPY ./container/AGENTS.md /home/kali/workspace/AGENTS.md
 
 WORKDIR /home/kali/workspace

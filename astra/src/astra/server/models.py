@@ -38,6 +38,8 @@ class Step(BaseModel):
     dispatch_count: int = 0  # 投入卡：被派发执行的次数（跨心跳累计），Decide 评估低产步骤用
     created_at: str
     concluded_at: str | None = None
+    task_type: Literal["execute", "strike"] = "execute"
+    finding_id: str | None = None
 
     model_config = {"populate_by_name": True}
 
@@ -48,6 +50,13 @@ class Finding(BaseModel):
     id: str
     description: str
     created_at: str
+    high_value: bool = False
+    verification_status: Literal["not_requested", "pending", "confirmed", "refuted", "blocked"] = "not_requested"
+    source_fact_id: str | None = None
+    source_step_id: str | None = None
+    verification_step_id: str | None = None
+    verification_fact_id: str | None = None
+    verification_summary: str | None = None
 
 
 class SubGoal(BaseModel):
@@ -266,8 +275,12 @@ class ConcludeRequest(BaseModel):
     kind: Literal["regular", "negative"] = "regular"
     # Execute 沿途发现（可选）：与事实一并写回
     finding: str | None = Field(default=None, max_length=65536)
+    finding_high_value: bool = False
+    reuse_fact_id: str | None = Field(default=None, max_length=128)
+    verification_status: Literal["confirmed", "refuted", "blocked"] | None = None
+    verification_summary: str | None = Field(default=None, max_length=65536)
 
-    @field_validator("worker", "description", "finding")
+    @field_validator("worker", "description", "finding", "reuse_fact_id", "verification_summary")
     @classmethod
     def validate_non_empty_text(cls, value: str | None) -> str | None:
         if value is None:

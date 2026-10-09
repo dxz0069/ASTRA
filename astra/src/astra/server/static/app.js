@@ -175,6 +175,22 @@ function astraApp(){
     },
     statusText(s){ return {active:'进行中', completed:'已归航', stopped:'已停航'}[s]||s; },
     statusBadgeClass(s){ return {active:'high', completed:'summary', stopped:'medium'}[s]||'medium'; },
+    findingStatusText(fd){
+      const status=fd.verification_status||'not_requested';
+      return {not_requested:'未核验', pending:'待核验', confirmed:'已确认', refuted:'已排除', blocked:'核验受阻'}[status]||'状态未知';
+    },
+    findingStatusClass(fd){
+      const status=fd.verification_status||'not_requested';
+      return ['not_requested','pending','confirmed','refuted','blocked'].includes(status) ? status : 'unknown';
+    },
+    findingLinks(fd){
+      const links=[];
+      if(fd.source_fact_id) links.push('来源事实 '+fd.source_fact_id);
+      if(fd.source_step_id) links.push('来源步骤 '+fd.source_step_id);
+      if(fd.verification_step_id) links.push('核验步骤 '+fd.verification_step_id);
+      if(fd.verification_fact_id) links.push('核验结论 '+fd.verification_fact_id);
+      return links.join(' · ');
+    },
 
     filteredProjects(){
       const q = this.filterText.trim().toLowerCase();

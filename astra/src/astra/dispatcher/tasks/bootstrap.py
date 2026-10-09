@@ -139,6 +139,8 @@ def run_bootstrap_task(
             lease=lease,
             cancellation=cancellation,
             runner=run_worker_process,
+            project_id=project.project.id,
+            step_id=step.id,
         )
         execute_ms = int((time.perf_counter() - execute_started) * 1000)
         session = driver.extract_session(session, first.stdout, first.stderr)
@@ -390,6 +392,8 @@ def _try_conclude_fallback(
         timeout_seconds=config.tasks.bootstrap.conclude_timeout,
         lease=lease,
         cancellation=cancellation,
+        project_id=project.project.id,
+        step_id=step.id,
     )
     conclude_ms = int((time.perf_counter() - conclude_started) * 1000)
     cancelled = cancel_reason(result, cancellation)

@@ -128,7 +128,7 @@ def run_decide_task(
         )
 
         session = driver.prepare_session()
-        command = driver.build_execute(worker, prompt, session)
+        command = driver.build_decide(worker, prompt, session)
         execute_started = time.perf_counter()
         result = run_worker_process_with_retry(
             container_manager,
@@ -140,6 +140,7 @@ def run_decide_task(
             lease=lease,
             cancellation=cancellation,
             runner=run_worker_process,
+            project_id=project.project.id,
         )
         execute_ms = int((time.perf_counter() - execute_started) * 1000)
         total_ms = int((time.perf_counter() - task_started) * 1000)
@@ -343,7 +344,10 @@ def run_decide_task(
                     step_data["description"],
                 )
 
-            open_step_ids = {step.id for step in project.steps if step.to is None and step.status == "open"}
+            open_step_ids = {
+                step.id for step in project.steps
+                if step.to is None and step.status == "open" and getattr(step, "task_type", "execute") != "strike"
+            }
             for close_data in data["close_steps"]:
                 if lease.failure is not None:
                     LOG.warning(

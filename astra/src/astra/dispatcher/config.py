@@ -10,7 +10,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
-TaskType = Literal["decide", "execute", "bootstrap"]
+TaskType = Literal["decide", "execute", "bootstrap", "strike"]
 # v0.2 星图架构重建（2026-08-29）：执行底座只留 pi（最原始、完全可控）；
 # claudecode/codex/dsh 适配器全部移除。
 WorkerType = Literal["pi", "mock"]
@@ -27,10 +27,16 @@ WORKER_ENV_KEYS: dict[WorkerType, tuple[str, ...]] = {
     "mock": (),
 }
 
+# Pi tool schemas are intentionally kept small by default.  The profile is
+# optional so existing dispatch files continue to work with the minimal
+# phase-isolated set.
+PI_TOOL_PROFILES = frozenset({"minimal", "full"})
+
 DEFAULT_PROMPT_REQUIRED_TOKENS: dict[str, tuple[str, ...]] = {
     "decide.md": ("{graph_yaml}", "{fact_ids}", "{open_steps}", "{max_steps}"),
     "execute.md": ("{graph_yaml}", "{step_id}", "{step_description}"),
     "execute_conclude.md": ("{graph_yaml}", "{step_id}", "{step_description}"),
+    "strike.md": ("{graph_yaml}", "{step_id}", "{finding_id}", "{finding_description}"),
     "bootstrap.md": ("{origin}", "{goal}", "{hints}"),
     "bootstrap_conclude.md": ("{origin}", "{goal}", "{hints}"),
     "challenge.md": ("{graph_yaml}", "{claim}", "{claim_context}"),
@@ -41,6 +47,7 @@ PROMPT_REQUIRED_TOKENS_BY_GROUP: dict[str, dict[str, tuple[str, ...]]] = {
         "decide.md": ("{fact_ids}", "{open_steps}", "{max_steps}"),
         "execute.md": ("{step_id}",),
         "execute_conclude.md": ("{step_id}",),
+        "strike.md": ("{step_id}", "{finding_id}"),
         "bootstrap.md": ("{origin}", "{goal}", "{hints}"),
         "bootstrap_conclude.md": ("{origin}", "{goal}", "{hints}"),
         "challenge.md": (),
@@ -52,6 +59,7 @@ MOCK_ALLOWED_OUTCOMES: dict[str, frozenset[str]] = {
     "decide": frozenset({"complete", "ops", "noop", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
     "execute_execute": frozenset({"fact", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
     "execute_conclude": frozenset({"fact", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
+    "strike": frozenset({"confirmed", "refuted", "blocked", "invalid_json", "invalid_payload", "command_fail"}),
     "bootstrap": frozenset({"complete", "fact", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
     "bootstrap_conclude": frozenset({"fact", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
     "challenge": frozenset({"uphold", "refute", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
@@ -89,6 +97,17 @@ MOCK_DEFAULT_BEHAVIOR: dict[str, dict[str, Any]] = {
         "outcomes": {
             "fact": "1.0",
             "rejected": "0.0",
+            "invalid_json": "0.0",
+            "invalid_payload": "0.0",
+            "command_fail": "0.0",
+        },
+    },
+    "strike": {
+        "delay": [0.05, 0.3],
+        "outcomes": {
+            "confirmed": "1.0",
+            "refuted": "0.0",
+            "blocked": "0.0",
             "invalid_json": "0.0",
             "invalid_payload": "0.0",
             "command_fail": "0.0",
@@ -143,6 +162,10 @@ class ExecuteTaskConfig(BaseModel):
     conclude_timeout: int = Field(gt=0)
 
 
+class StrikeTaskConfig(BaseModel):
+    timeout: int = Field(gt=0, default=120)
+
+
 class BootstrapTaskConfig(BaseModel):
     timeout: int = Field(gt=0)
     conclude_timeout: int = Field(gt=0)
@@ -162,6 +185,7 @@ class TasksConfig(BaseModel):
     bootstrap: BootstrapTaskConfig
     decide: DecideTaskConfig
     execute: ExecuteTaskConfig
+    strike: StrikeTaskConfig = Field(default_factory=StrikeTaskConfig)
     challenge: ChallengeTaskConfig = Field(default_factory=ChallengeTaskConfig)
 
 
@@ -219,6 +243,11 @@ class WorkerConfig(BaseModel):
             raise ValueError(f"worker {self.name} missing env keys: {', '.join(missing)}")
         if self.type == "pi":
             _validate_optional_positive_int_env(self.name, self.env, "PI_MODEL_CONTEXT_WINDOW")
+            profile = self.env.get("PI_TOOL_PROFILE", "minimal")
+            if profile not in PI_TOOL_PROFILES:
+                raise ValueError(
+                    f"worker {self.name} PI_TOOL_PROFILE must be one of: minimal, full"
+                )
         if self.type == "mock":
             resolve_mock_behavior(self.name, self.env)
         return self

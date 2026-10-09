@@ -125,6 +125,14 @@ if phase=="challenge":
         print(json.dumps({"accepted":True,"data":{"verdict":"maybe"}}, ensure_ascii=False))
     raise SystemExit(0)
 
+if phase=="strike":
+    if outcome in ("confirmed", "refuted", "blocked"):
+        summary = f"mock {outcome} after independent review of {prompt.get('finding_id', 'finding')}"
+        print(json.dumps({"accepted":True,"data":{"verdict":outcome,"summary":summary}}, ensure_ascii=False))
+    else:
+        print(json.dumps({"accepted":True,"data":{"verdict":"maybe","summary":"invalid"}}, ensure_ascii=False))
+    raise SystemExit(0)
+
 if outcome=="fact":
     label = prompt.get("step_id") or phase
     print(json.dumps({"accepted":True,"data":{"description":f"mock fact for {label}"}} , ensure_ascii=False))

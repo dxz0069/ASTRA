@@ -91,12 +91,24 @@ class InProcessClient:
         description: str,
         kind: str = "regular",
         finding: str | None = None,
+        finding_high_value: bool = False,
+        reuse_fact_id: str | None = None,
+        verification_status: str | None = None,
+        verification_summary: str | None = None,
     ) -> ApiResult:
         body: dict[str, Any] = {"worker": worker, "description": description}
         if kind != "regular":
             body["kind"] = kind
         if finding:
             body["finding"] = finding
+        if finding_high_value:
+            body["finding_high_value"] = True
+        if reuse_fact_id is not None:
+            body["reuse_fact_id"] = reuse_fact_id
+        if verification_status is not None:
+            body["verification_status"] = verification_status
+        if verification_summary is not None:
+            body["verification_summary"] = verification_summary
         return self._post(
             f"/projects/{project_id}/steps/{step_id}/conclude",
             body,
@@ -433,3 +445,40 @@ def test_mock_scheduler_enabled_project_skips_bootstrap_when_worker_does_not_sup
         ("seed", "f001"),
         ("mock complete from f001", "goal"),
     ]
+
+
+def test_mock_scheduler_verifies_high_value_finding_end_to_end(http_client: TestClient) -> None:
+    client = InProcessClient(http_client)
+    containers = LocalContainerManager()
+    loop = _loop(
+        _config(
+            bootstrap=_phase("complete"),
+            decide=_phase("ops"),
+            execute=_phase("fact"),
+            task_types=["strike"],
+        ),
+        client,
+        containers,
+    )
+    project_id = _create_project(http_client)
+    seed = client.create_step(project_id, ["origin"], "seed", "seed-worker")
+    assert seed.ok
+    source = client.conclude(
+        project_id, "s001", "seed-worker", "reproducible response observed",
+        finding="Check sensitive response at /api/me", finding_high_value=True,
+    )
+    assert source.ok
+    assert source.data["finding"]["verification_status"] == "pending"
+
+    try:
+        _dispatch_and_wait(loop)
+        project = client.get_project(project_id)
+    finally:
+        loop.close()
+
+    finding = project.findings[0]
+    assert finding.verification_status == "confirmed"
+    assert finding.verification_fact_id is not None
+    strike = next(step for step in project.steps if step.task_type == "strike")
+    assert strike.to == finding.verification_fact_id
+    assert len(project.findings) == 1

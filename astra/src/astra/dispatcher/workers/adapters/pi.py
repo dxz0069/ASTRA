@@ -14,6 +14,10 @@ from astra.dispatcher.workers.base import DriverResult, WorkerDriver
 class PiDriver(WorkerDriver):
     type_name = "pi"
 
+    _FULL_TOOLS = "read,write,edit,bash,grep,find,ls"
+    _EXECUTE_TOOLS = "read,write,bash,ls"
+    _READONLY_TOOLS = "read"
+
     def build_healthcheck(self, worker: WorkerConfig) -> list[str]:
         env = worker.env
         return self._wrap_with_models(
@@ -36,7 +40,22 @@ class PiDriver(WorkerDriver):
         )
 
     def build_execute(self, worker: WorkerConfig, prompt: str, session: str | None) -> DriverResult:
-        env = worker.env
+        return self._build_run(worker, prompt, session)
+
+    def build_decide(self, worker: WorkerConfig, prompt: str, session: str | None) -> DriverResult:
+        return self._build_run(worker, prompt, session, read_only=True)
+
+    def build_challenge(self, worker: WorkerConfig, prompt: str, session: str | None) -> DriverResult:
+        return self._build_run(worker, prompt, session, read_only=True)
+
+    def build_strike(self, worker: WorkerConfig, prompt: str, session: str | None) -> DriverResult:
+        # Strike starts a fresh session and needs the execution tools to
+        # independently reproduce a claim instead of merely reading its report.
+        return self._build_run(worker, prompt, session)
+
+    def _build_run(
+        self, worker: WorkerConfig, prompt: str, session: str | None, *, read_only: bool = False
+    ) -> DriverResult:
         argv = [
             "--provider",
             "astra",
@@ -50,7 +69,8 @@ class PiDriver(WorkerDriver):
         if session:
             argv.extend(["--session", session])
         argv.extend(["-p", self._prompt_arg(prompt)])
-        return DriverResult(argv=self._wrap_with_models(worker, argv), session=session)
+        command = self._wrap_with_models(worker, argv, read_only=read_only)
+        return DriverResult(argv=command, session=session)
 
     def build_conclude(self, worker: WorkerConfig, prompt: str, session: str) -> list[str]:
         env = worker.env
@@ -112,7 +132,9 @@ class PiDriver(WorkerDriver):
                 parts.append(text)
         return "\n".join(parts).strip() or stdout
 
-    def _wrap_with_models(self, worker: WorkerConfig, pi_argv: list[str], *, enable_tools: bool = True) -> list[str]:
+    def _wrap_with_models(
+        self, worker: WorkerConfig, pi_argv: list[str], *, enable_tools: bool = True, read_only: bool = False
+    ) -> list[str]:
         argv = [
             "--no-extensions",
             "--no-skills",
@@ -121,7 +143,7 @@ class PiDriver(WorkerDriver):
             "--no-context-files",
         ]
         if enable_tools:
-            argv.extend(["--tools", "read,write,edit,bash,grep,find,ls"])
+            argv.extend(["--tools", self._tool_list(worker, read_only=read_only)])
         if sys.platform == "win32":
             # Windows：node 直跑 + prompt 走 @file——.cmd shim 与 cmd 批处理都会破坏含换行的长参数
             import tempfile
@@ -167,6 +189,15 @@ class PiDriver(WorkerDriver):
             *argv,
             *pi_argv,
         ]
+
+    @classmethod
+    def _tool_list(cls, worker: WorkerConfig, *, read_only: bool = False) -> str:
+        """Select Pi schemas by invocation phase, independent of worker capabilities."""
+        if read_only:
+            return cls._READONLY_TOOLS
+        if worker.env.get("PI_TOOL_PROFILE", "minimal") == "full":
+            return cls._FULL_TOOLS
+        return cls._EXECUTE_TOOLS
 
     @staticmethod
     def _pi_cli_js() -> str:

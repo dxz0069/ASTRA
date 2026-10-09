@@ -3,8 +3,12 @@
 ## 镜像构建
 
 ```bash
-docker build -f container/Dockerfile.slim -t astra-runner .   # 托管出包用 slim；Dockerfile 为本地全量开发镜像
+docker build -f container/Dockerfile -t astra-runner .
 ```
+
+`Dockerfile.slim` 当前依赖本机已有的 `astra-slim:v5s` 镜像。它是旧缓存构建路径，
+干净环境无法直接构建；现阶段参赛包以不依赖本地预置镜像的完整 Dockerfile 为准，
+并需实际构建验证。
 
 镜像内置：Kali 工具链 + f2 逆向链（radare2/r2ghidra/qemu-user/upx/z3 等）、
 ASTRA 引擎（server+dispatcher）、**pi**（唯一执行底座）、
@@ -27,6 +31,36 @@ r5 实测最优拓扑 4×3）、`ASTRA_DECIDE_TIMEOUT`（默认 600s）、`ASTRA
 `ASTRA_MODEL_RETRY_MAX`（瞬时模型错误退避重试次数，默认 2，0=关闭——托管网关
 SSE 断流 "incomplete SSE response" 的兜底，pi 自身零重试）。
 
+### Pi 工具 profile
+
+`PI_TOOL_PROFILE` 控制 Pi 暴露给模型的内置工具集合，默认值为 `minimal`。这是
+worker 级别的环境变量，可在 `dispatch.yaml` 的每个 `pi` worker `env` 中设置：
+
+| profile | bootstrap / execute | decide / challenge | 适用场景 |
+|---|---|---|---|
+| `minimal`（默认） | `read,write,bash,ls` | `read` | 日常比赛运行；执行阶段保留靶场操作能力，决策阶段只读图快照 |
+| `full` | `read,write,edit,bash,grep,find,ls` | `read` | 兼容 bootstrap 和 execute 的旧配置或调试工具选择问题；决策与质询仍固定只读 |
+
+`minimal` 只收敛 Pi 的工具 schema，不限制容器内已有的命令。执行阶段仍可通过
+`bash` 调用 `rg`、`find`、`sed` 等命令，并用 `write` 保存脚本和证据；决策阶段
+使用 `read` 读取 `/tmp/astra-prompts/<phase>-<id>/graph.yaml`。未知值会被配置校验
+拒绝；未设置时按 `minimal` 处理。需要逐步回退旧行为时，将对应 worker 的
+`PI_TOOL_PROFILE` 改为 `full`，无需切换 Pi 或模型；`decide` 与 `challenge` 仍通过
+专用只读调用路径固定为 `read`，避免兼容开关放宽审查边界。
+
+Pi 默认以 `--no-skills --no-context-files` 启动。构建镜像不再复制旧 `.agents`
+技能目录和 `AGENTS.md`；本地执行同样不自动种入这些文件。自建环境可用
+`ASTRA_WORKSPACE_SEED` 把它们复制进工作区，但 Pi 不会自动加载，只有显式读取时才生效。
+
+托管镜像默认不复制 `container/knowledge` 中按旧题码索引的解题笔记，也不在
+工作区放置第二份副本。原始资料保留在本地仓库供复盘；若自建环境确认需要，
+可通过 `ASTRA_KNOWLEDGE_FILE` 显式指定外部知识库文件。缺省文件不存在时，
+runner 按空知识库运行。
+
+Pi 阶段用量默认写结构化日志，包含项目/步骤、阶段、耗时、进程结果和逐轮累加的
+input/output/cacheRead token；设 `ASTRA_PHASE_USAGE_JSONL` 可另外写入 JSONL。
+缺失的 usage 会标记为不完整，记录中不包含提示词、密钥或工具输出。
+
 示例（本地跑，完整配方见 `dist/local-fgs-run.env` + 启动脚本 `dist/run-local.sh`）：
 
 ```bash
@@ -43,6 +77,6 @@ astra/.venv/Scripts/python.exe container/astra_runner/runner.py \
 ## 托管模式
 
 ```bash
-docker build -f container/Dockerfile.slim -t astra-runner .
+docker build -f container/Dockerfile -t astra-runner .
 docker save astra-runner:latest | gzip > agent.tar.gz   # 按平台规范上传
 ```

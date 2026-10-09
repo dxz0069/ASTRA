@@ -130,6 +130,7 @@ class FakeContainerManager:
 class FakeClient:
     project: ProjectDetail
     concluded: list[tuple[str, str, str, str]] = field(default_factory=list)
+    conclude_options: list[dict[str, object]] = field(default_factory=list)
     completed: list[tuple[str, list[str], str, str]] = field(default_factory=list)
     created_steps: list[tuple[str, list[str], str, str]] = field(default_factory=list)
     created_facts: list[tuple[str, str, str, str]] = field(default_factory=list)
@@ -151,8 +152,18 @@ class FakeClient:
         description: str,
         kind: str = "regular",
         finding: str | None = None,
+        finding_high_value: bool = False,
+        reuse_fact_id: str | None = None,
+        verification_status: str | None = None,
+        verification_summary: str | None = None,
     ) -> ApiResult:
         self.concluded.append((project_id, step_id, worker, description))
+        self.conclude_options.append({
+            "finding_high_value": finding_high_value,
+            "reuse_fact_id": reuse_fact_id,
+            "verification_status": verification_status,
+            "verification_summary": verification_summary,
+        })
         if finding:
             self.created_findings.append((project_id, finding))
         return ApiResult(200, {"fact": {"id": "f002", "kind": kind}})
@@ -220,6 +231,12 @@ class FakeDriver:
     def build_execute(self, _worker, prompt: str, session: str | None) -> DriverResult:
         self.execute_prompts.append(prompt)
         return DriverResult(["execute"], session=session)
+
+    def build_decide(self, worker, prompt: str, session: str | None) -> DriverResult:
+        return self.build_execute(worker, prompt, session)
+
+    def build_challenge(self, worker, prompt: str, session: str | None) -> DriverResult:
+        return self.build_execute(worker, prompt, session)
 
     def build_conclude(self, _worker, prompt: str, _session: str) -> list[str]:
         self.conclude_prompts.append(prompt)

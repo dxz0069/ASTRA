@@ -165,7 +165,7 @@ def build_focus_open_steps(project: ProjectDetail, budget: int) -> list[dict[str
             "heartbeat": step.last_heartbeat_at,
         }
         for step in project.steps
-        if step.to is None and step.status == "open"
+        if step.to is None and step.status == "open" and getattr(step, "task_type", "execute") != "strike"
     ]
     if len(open_steps) <= budget:
         return open_steps

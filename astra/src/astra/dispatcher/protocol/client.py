@@ -130,6 +130,10 @@ class ASTRAClient:
         description: str,
         kind: str = "regular",
         finding: str | None = None,
+        finding_high_value: bool = False,
+        reuse_fact_id: str | None = None,
+        verification_status: str | None = None,
+        verification_summary: str | None = None,
     ) -> ApiResult:
         """Execute 收束（自证写回）：写事实+步骤落点，可携沿途 Finding。"""
         body: dict[str, Any] = {"worker": worker, "description": description}
@@ -137,6 +141,14 @@ class ASTRAClient:
             body["kind"] = kind
         if finding:
             body["finding"] = finding
+        if finding_high_value:
+            body["finding_high_value"] = True
+        if reuse_fact_id:
+            body["reuse_fact_id"] = reuse_fact_id
+        if verification_status:
+            body["verification_status"] = verification_status
+        if verification_summary:
+            body["verification_summary"] = verification_summary
         return self._request_json(
             "POST",
             f"/projects/{project_id}/steps/{step_id}/conclude",

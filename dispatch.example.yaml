@@ -42,6 +42,9 @@ tasks:
     timeout: 300
     # Time budget for conclude fallback used to summarize confirmed findings from the same session.
     conclude_timeout: 90
+  # Optional dedicated verification timeout; defaults to 120 seconds.
+  strike:
+    timeout: 120
 
 container:
   # Base worker container. The dispatcher execs agent commands inside one container per project.
@@ -70,6 +73,21 @@ workers:
       PI_API_KEY: "sk-xxx"
       PI_PROVIDER_API: "anthropic-messages"
       PI_MODEL_CONTEXT_WINDOW: "131072"
+      # 默认 minimal：read/write/bash/ls；full 仅放宽常规执行阶段，decide/challenge 仍只读。
+      PI_TOOL_PROFILE: "minimal"
+
+  # Optional: a dedicated Strike worker independently checks high-value Findings.
+  # Without one, Strike tasks use an Execute-capable worker and the same Strike prompt.
+  # - name: "pi-strike"
+  #   type: "pi"
+  #   task_types: [strike]
+  #   max_running: 1
+  #   priority: 0
+  #   env:
+  #     PI_MODEL: "your-model"
+  #     PI_BASE_URL: "https://your-provider.example/anthropic"
+  #     PI_API_KEY: "replace-me"
+  #     PI_PROVIDER_API: "anthropic-messages"
 
   - name: "pi_glm-decide"
     type: "pi"
@@ -81,6 +99,7 @@ workers:
       PI_BASE_URL: "https://open.bigmodel.cn/api/anthropic"
       PI_API_KEY: "sk-xxx"
       PI_PROVIDER_API: "anthropic-messages"
+      # decide 通过专用调用路径仅暴露 read，无需设置执行工具 profile。
 
   # ---- 旧执行适配器已于 2026-08-29（v0.2）全部移除，底座仅 pi ----
   # 如需 Kimi/GLM 等其他 anthropic 兼容端点：复制上方 pi worker 块，

@@ -24,6 +24,15 @@ dispatch*secret*
 projects
 note
 log
+external-repos
+erroranan
+.reasonix
+.zcode
+container/tools-cache
+container/.agents
+container/AGENTS.md
+container/knowledge
+icewarp_rn.html
 *.pdf
 *.pptx
 *.tar

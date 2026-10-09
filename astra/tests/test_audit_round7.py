@@ -112,7 +112,7 @@ def _project_with_steps():
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from astra.server.models import Fact, ProjectDetail, ProjectMeta, Step
-    from tests.conftest import make_step
+    from conftest import make_step
 
     step_open = make_step("s001")
     step_closed = make_step("s002").model_copy(update={"status": "closed", "close_reason": "dead end"})
@@ -142,7 +142,7 @@ def test_rescue_dedup_uses_fresh_snapshot(monkeypatch) -> None:
     from astra.dispatcher.tasks import execute as execute_mod
     from astra.server.models import Fact
 
-    from tests.conftest import FakeClient, FakeContainerManager, FakeDriver, FakeLease, make_config, make_project, make_step
+    from conftest import FakeClient, FakeContainerManager, FakeDriver, FakeLease, make_config, make_project, make_step
 
     config = make_config()
     step = make_step()

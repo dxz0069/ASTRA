@@ -62,6 +62,7 @@ class FakeClient:
         self.started: list[str] = []
         self.hints: list[str] = []
         self.submitted: list[tuple[str, str]] = []
+        self.accepted: dict[str, set[str]] = {}
         self.closed: list[str] = []
 
     def list_challenges(self):
@@ -78,8 +79,16 @@ class FakeClient:
     def submit_flag(self, unique_code: str, flag: str):
         self.submitted.append((unique_code, flag))
         if flag in self.flags.get(unique_code, []):
-            return FakeSubmitResult(correct=True, awarded=100, cumulative_score=100)
-        return FakeSubmitResult(correct=False, awarded=0)
+            accepted = self.accepted.setdefault(unique_code, set())
+            new = flag not in accepted
+            accepted.add(flag)
+            return FakeSubmitResult(
+                correct=True, awarded=100 if new else 0,
+                cumulative_score=100 * len(accepted),
+                correct_flag_count=len(accepted),
+                total_flag_count=len(self.flags[unique_code]),
+            )
+        return FakeSubmitResult(correct=False, awarded=0, correct_flag_count=len(self.accepted.get(unique_code, set())))
 
     def close_challenge(self, unique_code: str):
         self.closed.append(unique_code)
@@ -384,7 +393,7 @@ def test_run_benchmark_progress_file_skips_started_on_restart(tmp_path) -> None:
     flags = {"p001": ["flag{one}"], "p002": ["flag{two}"]}
 
     def factory():
-        return FakeEngine({"proj-0": ["flag{one}"]})
+        return FakeEngine({"proj-0": ["flag{one}", "flag{two}"]})
 
     # 第一轮：两题都跑，p001 成功标记 done，p002 完成
     client1 = FakeClient(challenges, flags=flags)
@@ -441,7 +450,7 @@ def test_run_benchmark_started_challenge_restarts_after_crash(tmp_path) -> None:
     store.mark("s001", "started")  # 模拟崩溃前已启动的题
     store.mark("s002", "done")
 
-    challenges = [FakeChallenge("s001"), FakeChallenge("s002")]
+    challenges = [FakeChallenge("s001"), FakeChallenge("s002", is_completed=True)]
     client = FakeClient(challenges, flags={"s001": ["flag{resume}"]})
 
     def factory():
@@ -796,6 +805,8 @@ def test_render_dispatch_config_pi_fleet(monkeypatch, tmp_path) -> None:
     env0 = by_name["deepseek-execute-0"].env
     assert env0["PI_PROVIDER_API"] == "anthropic-messages"
     assert env0["PI_API_KEY"] == "sk-test"
+    assert env0["PI_TOOL_PROFILE"] == "minimal"
+    assert by_name["deepseek-decide"].env["PI_TOOL_PROFILE"] == "minimal"
     # agent 目录按 worker 隔离（会话复用/续跑依赖稳定路径）
     assert env0["PI_CODING_AGENT_DIR"].endswith("deepseek-execute-0")
 
@@ -826,6 +837,31 @@ def test_render_dispatch_config_dual_channel_fleet(monkeypatch, tmp_path) -> Non
     assert by["deepseek-execute-0"].env["PI_MODEL"] == "deepseek-v4-flash"
     # decide 超时放宽（GLM 深思考单轮长，ASTRA_DECIDE_TIMEOUT 默认 900）
     assert "timeout: 900" in path.read_text(encoding="utf-8")
+
+
+def test_render_dispatch_config_propagates_pi_tool_profile(monkeypatch, tmp_path) -> None:
+    from astra.dispatcher.config import DispatchConfig
+    from astra_runner.astra_runner_engine import AstraDaemon
+
+    monkeypatch.setenv("PI_API_KEY", "sk-test")
+    monkeypatch.setenv("ASTRA_PI_HOME", str(tmp_path / "pi-home"))
+    monkeypatch.setenv("ASTRA_EXECUTE_REPLICAS", "1")
+    monkeypatch.setenv("PI_TOOL_PROFILE", "full")
+
+    config = DispatchConfig.load(AstraDaemon()._render_dispatch_config())
+    assert {worker.env["PI_TOOL_PROFILE"] for worker in config.workers} == {"full"}
+
+
+def test_render_dispatch_config_rejects_invalid_pi_tool_profile(monkeypatch, tmp_path) -> None:
+    import pytest
+    from astra_runner.astra_runner_engine import AstraDaemon
+
+    monkeypatch.setenv("PI_API_KEY", "sk-test")
+    monkeypatch.setenv("ASTRA_PI_HOME", str(tmp_path / "pi-home"))
+    monkeypatch.setenv("PI_TOOL_PROFILE", "full\n      INJECTED: true")
+
+    with pytest.raises(ValueError, match="PI_TOOL_PROFILE must be one of"):
+        AstraDaemon()._render_dispatch_config()
 
 
 def test_render_dispatch_config_pi_requires_token(monkeypatch) -> None:
@@ -1538,3 +1574,255 @@ def test_probe_after_heal(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(_urlreq, "urlopen", _must_not_call)
     runner_mod._probe_after_heal()
     assert _json.loads(budget.read_text(encoding="utf-8"))["pending_probe"] is False
+
+
+def test_multiflag_engine_completion_waits_for_verified_flags_and_survives_restart(monkeypatch, tmp_path) -> None:
+    """引擎提前归航的 1/4 旗不能 done；重启后旧旗不再提交或计分，其余旗继续。"""
+    from astra_runner.runner import ProgressStore, _run_single_challenge
+
+    monkeypatch.setattr(_runner_module, "DONE_FLAG_WAIT_SECONDS", 0.01)
+    monkeypatch.setattr(_runner_module, "_record_constellation", lambda *args: None)
+    challenge = FakeChallenge("p0-multi", flag_count=4, total_score=1200)
+    flags = [f"flag{{p0_{i}}}" for i in range(4)]
+    progress_file = tmp_path / "progress.json"
+    progress = ProgressStore.load(str(progress_file))
+    assert progress is not None
+
+    first_client = FakeClient([challenge], flags={challenge.unique_code: flags})
+    first_engine = FakeEngine({"proj-0": flags[:1]}, done=True)
+    first = ChallengeResult(challenge.unique_code, challenge.description, flag_count=4)
+    status = _run_single_challenge(
+        first_client, lambda: first_engine, challenge, first,
+        0.1, 0, progress, defer_after_seconds=0.05,
+    )
+    assert status == "deferred"
+    assert first.flags_correct == 1
+    assert progress.state_of(challenge.unique_code) == "started"
+    assert challenge.unique_code not in progress.skipped_codes()
+    assert first_client.submitted == [(challenge.unique_code, flags[0])]
+
+    second_client = FakeClient([challenge], flags={challenge.unique_code: flags})
+    second_client.accepted[challenge.unique_code] = {flags[0]}  # 平台状态跨 runner 重启保留
+    second_engine = FakeEngine({"proj-0": flags}, done=True)
+    results = run_benchmark(
+        second_client, lambda: second_engine, progress_file=str(progress_file),
+        flag_poll_seconds=0, challenge_timeout_seconds=0.1,
+        defer_after_seconds=0.05, parallel=1,
+    )
+    assert second_client.submitted == [(challenge.unique_code, flag) for flag in flags[1:]]
+    assert results[0].flags_correct == 4
+    assert results[0].awarded == 400
+    assert ProgressStore.load(str(progress_file)).state_of(challenge.unique_code) == "done"
+
+
+def test_wrong_candidates_and_unknown_flag_count_never_complete(monkeypatch, tmp_path) -> None:
+    """只有错误候选时，即使引擎归航且旗数未知也只能 defer。"""
+    from astra_runner.runner import ProgressStore, _run_single_challenge
+
+    monkeypatch.setattr(_runner_module, "_record_constellation", lambda *args: None)
+    for count in (0, 4):
+        challenge = FakeChallenge(f"p0-wrong-{count}", flag_count=count)
+        client = FakeClient([challenge], flags={})
+        engine = FakeEngine({"proj-0": ["flag{decoy}"]}, done=True)
+        progress = ProgressStore.load(str(tmp_path / f"wrong-{count}.json"))
+        result = ChallengeResult(challenge.unique_code, challenge.description, flag_count=count)
+        status = _run_single_challenge(
+            client, lambda: engine, challenge, result,
+            0.1, 0, progress, defer_after_seconds=0.05,
+        )
+        assert status == "deferred"
+        assert result.flags_correct == 0 and result.wrong_count == 1
+        assert progress.state_of(challenge.unique_code) == "started"
+        assert challenge.unique_code not in progress.skipped_codes()
+
+
+def test_platform_completion_is_authoritative_even_without_local_flags(tmp_path) -> None:
+    """平台明确 is_completed 时，本地未观测到 flag 也能真实收口。"""
+    from astra_runner.runner import ProgressStore, _run_single_challenge
+
+    challenge = FakeChallenge("p0-platform", is_completed=True, flag_count=0)
+    client = FakeClient([challenge])
+    engine = FakeEngine({}, done=True)
+    progress = ProgressStore.load(str(tmp_path / "platform.json"))
+    result = ChallengeResult(challenge.unique_code, challenge.description, flag_count=0)
+    status = _run_single_challenge(
+        client, lambda: engine, challenge, result,
+        0.1, 0, progress, defer_after_seconds=0.05,
+    )
+    assert status is None
+    assert result.flags_correct == 0
+    assert progress.state_of(challenge.unique_code) == "done"
+
+
+def test_address_drift_starts_clean_project_without_old_facts(monkeypatch) -> None:
+    """地址变化或旧 origin 未知时，旧星图不得恢复，也不得把旧事实带到新地址。"""
+    from astra_runner.runner import _run_single_challenge
+
+    monkeypatch.setattr(_runner_module, "_record_constellation", lambda *args: None)
+    monkeypatch.setattr(_runner_module, "_constellation_text", lambda *args: (_ for _ in ()).throw(AssertionError("stale recon injected")))
+
+    class DriftEngine(FakeEngine):
+        def reactivate_project(self, project_id):
+            self.reactivate_calls.append(project_id)
+            return True
+
+        def list_fact_descriptions(self, project_id):
+            return ["flag{old_target}"] if project_id == "old-project" else ["flag{new_target}"]
+
+    challenge = FakeChallenge("p0-drift", flag_count=1)
+    for old_origin in ("10.0.0.1:80", ""):
+        engine = DriftEngine({}, done=True)
+        client = FakeClient([challenge], flags={challenge.unique_code: ["flag{new_target}"]})
+        result = ChallengeResult(
+            challenge.unique_code, challenge.description,
+            flag_count=1, project_id="old-project", last_origin=old_origin,
+            kb_approach_draft="old target step",
+        )
+        status = _run_single_challenge(
+            client, lambda: engine, challenge, result,
+            0.1, 0, defer_after_seconds=0.05,
+        )
+        assert status is None
+        assert engine.deleted == ["old-project"]
+        assert engine.reactivate_calls == []
+        assert engine.projects[0][2] == "10.0.0.5:8080"
+        assert result.project_id == "proj-0" and result.last_origin == "10.0.0.5:8080"
+        assert client.submitted == [(challenge.unique_code, "flag{new_target}")]
+        assert result.kb_approach_draft != "old target step"
+
+
+def test_address_drift_cleanup_failure_still_never_reuses_old_project() -> None:
+    from astra_runner.runner import _run_single_challenge
+
+    class CleanupFails(FakeEngine):
+        def delete_project(self, project_id):
+            raise OSError("cleanup unavailable")
+
+        def reactivate_project(self, project_id):
+            raise AssertionError("old project must not reactivate")
+
+        def list_fact_descriptions(self, project_id):
+            assert project_id != "old-project"
+            return ["flag{fresh}"]
+
+    challenge = FakeChallenge("p0-drift-cleanup", flag_count=1)
+    client = FakeClient([challenge], flags={challenge.unique_code: ["flag{fresh}"]})
+    engine = CleanupFails({}, done=True)
+    result = ChallengeResult(
+        challenge.unique_code, challenge.description,
+        flag_count=1, project_id="old-project", last_origin="10.0.0.1:80",
+    )
+    assert _run_single_challenge(client, lambda: engine, challenge, result, 0.1, 0) is None
+    assert result.project_id == "proj-0"
+    assert client.submitted == [(challenge.unique_code, "flag{fresh}")]
+
+
+def test_unchanged_address_reuses_existing_project() -> None:
+    """同一 origin 的回访继续原项目，保留在途事实。"""
+    from astra_runner.runner import _run_single_challenge
+
+    class ReuseEngine(FakeEngine):
+        def reactivate_project(self, project_id):
+            self.reactivate_calls.append(project_id)
+            return True
+
+        def list_fact_descriptions(self, project_id):
+            assert project_id == "old-project"
+            return ["flag{same_target}"]
+
+    challenge = FakeChallenge("p0-same", flag_count=1)
+    client = FakeClient([challenge], flags={challenge.unique_code: ["flag{same_target}"]})
+    engine = ReuseEngine({}, done=True)
+    result = ChallengeResult(
+        challenge.unique_code, challenge.description,
+        flag_count=1, project_id="old-project", last_origin="10.0.0.5:8080",
+    )
+    status = _run_single_challenge(client, lambda: engine, challenge, result, 0.1, 0)
+    assert status is None
+    assert engine.reactivate_calls == ["old-project"]
+    assert engine.projects == [] and engine.deleted == []
+
+
+def test_close_reaper_preserves_incomplete_state_and_allows_restart(monkeypatch, tmp_path) -> None:
+    """补关仅释放名额；未完成题补关后仍可重启，不能转 done。"""
+    from astra_runner.runner import ProgressStore, _reap_failed_closes, _run_single_challenge
+
+    monkeypatch.setattr(_runner_module.time, "sleep", lambda _: None)
+    challenge = FakeChallenge("p0-close-failed", flag_count=4)
+
+    class CloseFails(FakeClient):
+        def close_challenge(self, unique_code):
+            raise OSError("temporary close failure")
+
+    client = CloseFails([challenge], flags={challenge.unique_code: ["flag{first}"]})
+    engine = FakeEngine({"proj-0": ["flag{first}"]}, done=True)
+    progress = ProgressStore.load(str(tmp_path / "close.json"))
+    result = ChallengeResult(challenge.unique_code, challenge.description, flag_count=4)
+    status = _run_single_challenge(
+        client, lambda: engine, challenge, result,
+        0.1, 0, progress, defer_after_seconds=0.05,
+    )
+    assert status == "deferred"
+    assert progress.state_of(challenge.unique_code) == "close_failed"
+    assert challenge.unique_code in progress.skipped_codes()
+
+    recovered = FakeClient([challenge])
+    _reap_failed_closes(recovered, progress)
+    assert recovered.closed == [challenge.unique_code]
+    assert progress.state_of(challenge.unique_code) == "started"
+    assert challenge.unique_code not in progress.skipped_codes()
+
+
+def test_zero_defer_window_still_exits_without_false_done(tmp_path) -> None:
+    """defer_after_seconds=0 且仅错旗时按预算退出，不陷入无限续跑。"""
+    from astra_runner.runner import ProgressStore
+
+    challenge = FakeChallenge("p0-zero-window", flag_count=0)
+    client = FakeClient([challenge])
+    progress_file = tmp_path / "zero-window.json"
+    results = run_benchmark(
+        client, lambda: FakeEngine({"proj-0": ["flag{wrong}"]}, done=True),
+        progress_file=str(progress_file), challenge_timeout_seconds=0.05,
+        flag_poll_seconds=0, defer_after_seconds=0, parallel=1,
+    )
+    assert len(results) == 1
+    assert results[0].flags_correct == 0
+    assert results[0].defer_count == 2
+    assert 1 <= client.started.count(challenge.unique_code) <= 2
+    assert ProgressStore.load(str(progress_file)).state_of(challenge.unique_code) == "abandoned"
+
+
+def test_legacy_partial_done_reopens_and_preserves_score(tmp_path) -> None:
+    """旧版误写 done(1/4) 在平台仍未完成时重开，并只补交剩余三旗。"""
+    from astra_runner.runner import ProgressStore
+
+    challenge = FakeChallenge("p0-legacy", flag_count=4)
+    flags = [f"flag{{legacy_{i}}}" for i in range(4)]
+    progress_file = tmp_path / "legacy.json"
+    progress = ProgressStore.load(str(progress_file))
+    progress.mark(challenge.unique_code, "done", flags=1, awarded=100)
+    client = FakeClient([challenge], flags={challenge.unique_code: flags})
+    client.accepted[challenge.unique_code] = {flags[0]}
+    results = run_benchmark(
+        client, lambda: FakeEngine({"proj-0": flags}, done=True),
+        progress_file=str(progress_file), flag_poll_seconds=0,
+        challenge_timeout_seconds=0.1, defer_after_seconds=0.05, parallel=1,
+    )
+    assert client.started == [challenge.unique_code]
+    assert results[0].flags_correct == 4 and results[0].awarded == 400
+    assert ProgressStore.load(str(progress_file)).state_of(challenge.unique_code) == "done"
+
+
+def test_idempotent_platform_receipt_does_not_double_count() -> None:
+    from astra_runner.runner import _submit_flag_safely
+
+    class IdempotentClient:
+        def submit_flag(self, code, flag):
+            return FakeSubmitResult(
+                correct=True, awarded=100, correct_flag_count=1,
+                total_flag_count=4,
+            )
+
+    result = ChallengeResult("p0-idempotent", "", flags_correct=1, awarded=100, flag_count=4)
+    _submit_flag_safely(IdempotentClient(), result.unique_code, "flag{old}", result)
+    assert result.flags_correct == 1 and result.awarded == 100

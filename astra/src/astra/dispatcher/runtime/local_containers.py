@@ -22,25 +22,16 @@ LOG = logging.getLogger(__name__)
 
 
 def _workspace_seed_dir() -> Path | None:
-    """工作区种子目录（含 AGENTS.md / .agents，复制进每个 local workspace）。
-
-    优先 env ASTRA_WORKSPACE_SEED；其次仓库内默认 <repo>/container
-    （与 Docker 模式的 /home/kali/workspace 种子一致，保证题型模式库/协作规则生效）。
-    """
+    """仅在显式配置时复制工作区种子；Pi 默认禁用自动技能和上下文加载。"""
     env_seed = os.environ.get("ASTRA_WORKSPACE_SEED")
     if env_seed:
         candidate = Path(env_seed)
         return candidate if candidate.is_dir() else None
-    candidate = Path(__file__).resolve().parents[5] / "container"
-    return candidate if (candidate / "AGENTS.md").exists() else None
+    return None
 
 
 def _seed_workspace(workspace: Path) -> None:
-    """把 AGENTS.md 与 .agents/skills 复制进工作区（首次创建时）。
-
-    DSH 的 agent-instructions 从工作区加载 AGENTS.md；题型模式库与靶场协作规则
-    依赖此文件，缺失会导致模型缺少关键先验（local 模式曾漏复制）。
-    """
+    """显式配置 ASTRA_WORKSPACE_SEED 时复制 AGENTS.md 与 .agents/skills。"""
     seed = _workspace_seed_dir()
     if seed is None:
         return

@@ -1,3 +1,5 @@
+A high-value Finding with pending verification is only a lead. Do not cite it as confirmed evidence for complete; check its verification status and verification Fact.
+
 在星图上做面向北辰（goal）的判断，不做任何执行。
 
 下方 user 消息里是整张图的 YAML：facts 是已确认的客观事实，steps 是从若干事实出发的探索方向，goal 是达成标准；图总是从事实经由 step 产出新事实。先读懂全图、把握整体进展，再判断。

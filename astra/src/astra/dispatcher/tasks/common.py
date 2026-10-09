@@ -7,10 +7,15 @@ import re
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
+
+import yaml
 
 from astra.dispatcher.config import DispatchConfig, WorkerConfig
 from astra.dispatcher.protocol.client import ASTRAClient
@@ -30,6 +35,7 @@ GRAPH_SNAPSHOT_MAX_AGE_SECONDS = 2 * 3600
 _GRAPH_SNAPSHOT_CLEANUP_INTERVAL_SECONDS = 600
 _last_snapshot_cleanup_at = [0.0]
 LOG = logging.getLogger(__name__)
+_phase_usage_write_lock = threading.Lock()
 
 # 瞬时模型错误重试（信任缺失-数据网络类控制）：托管模式模型流量必须走平台网关
 # （http + .tsecbench.gw），SSE 流被网关/代理中途截断（"incomplete SSE response"；
@@ -230,6 +236,75 @@ def _cleanup_stale_graph_snapshots() -> None:
         pass
 
 
+_GRAPH_READ_LINE_BYTES = 40 * 1024  # Pi read truncates a single line above 50 KiB.
+_GRAPH_WRAP_COLUMN = 8192
+
+
+class _ReadableGraphDumper(yaml.SafeDumper):
+    """Allow a long quoted scalar to wrap even when it contains no spaces."""
+
+    def write_double_quoted(self, value: str, split: bool = True) -> None:
+        if len(value) <= _GRAPH_WRAP_COLUMN:
+            super().write_double_quoted(value, split=split)
+            return
+
+        self.write_indicator('"', True)
+        for char in value:
+            if char == " ":
+                # YAML normally folds spaces at a line break; keep them exact.
+                encoded = "\\x20"
+            elif char in self.ESCAPE_REPLACEMENTS:
+                encoded = "\\" + self.ESCAPE_REPLACEMENTS[char]
+            elif not (" " <= char <= "~" or (self.allow_unicode and (
+                "\u00a0" <= char <= "\ud7ff" or "\ue000" <= char <= "\ufffd"
+            ))):
+                ordinal = ord(char)
+                encoded = (f"\\x{ordinal:02X}" if ordinal <= 0xFF else
+                           f"\\u{ordinal:04X}" if ordinal <= 0xFFFF else
+                           f"\\U{ordinal:08X}")
+            else:
+                encoded = char
+            if self.column + len(encoded) > _GRAPH_WRAP_COLUMN:
+                continuation = "\\"
+                self.stream.write(continuation.encode(self.encoding) if self.encoding else continuation)
+                self.column += 1
+                self.write_indent()
+                self.whitespace = False
+                self.indention = False
+            self.stream.write(encoded.encode(self.encoding) if self.encoding else encoded)
+            self.column += len(encoded)
+        self.write_indicator('"', False)
+
+
+def _represent_graph_string(dumper: _ReadableGraphDumper, value: str):
+    style = '"' if len(value) > _GRAPH_WRAP_COLUMN else None
+    return dumper.represent_scalar("tag:yaml.org,2002:str", value, style=style)
+
+
+_ReadableGraphDumper.add_representer(str, _represent_graph_string)
+
+
+def _wrap_long_graph_lines(graph_yaml: str) -> str:
+    """Preserve YAML values while making every line readable by Pi's read tool."""
+    if all(len(line.encode("utf-8")) <= _GRAPH_READ_LINE_BYTES for line in graph_yaml.splitlines()):
+        return graph_yaml
+    try:
+        graph = yaml.safe_load(graph_yaml)
+        wrapped = yaml.dump(
+            graph, Dumper=_ReadableGraphDumper, allow_unicode=True,
+            default_flow_style=False, sort_keys=False,
+        )
+        if yaml.safe_load(wrapped) == graph and all(
+            len(line.encode("utf-8")) <= _GRAPH_READ_LINE_BYTES for line in wrapped.splitlines()
+        ):
+            return wrapped
+    except (yaml.YAMLError, UnicodeError):
+        pass
+    # Invalid input cannot be transformed losslessly. Keep the original bytes.
+    LOG.warning("graph snapshot contains an unreadable long line that could not be wrapped")
+    return graph_yaml
+
+
 def write_graph_snapshot_reference(
     container_manager: ContainerManager,
     container_name: str,
@@ -240,7 +315,7 @@ def write_graph_snapshot_reference(
     # P1-4：写入新快照前顺手清理陈旧快照目录（节流，见函数内说明）
     _cleanup_stale_graph_snapshots()
     path = f"{GRAPH_SNAPSHOT_ROOT}/{phase}-{uuid.uuid4().hex[:12]}/graph.yaml"
-    container_manager.write_text_file(container_name, path, graph_yaml)
+    container_manager.write_text_file(container_name, path, _wrap_long_graph_lines(graph_yaml))
     return (
         "The graph YAML snapshot is stored in this file inside the current container:\n\n"
         f"{path}\n\n"
@@ -292,6 +367,8 @@ def run_worker_process(
     timeout_seconds: int,
     lease: HeartbeatLease | None = None,
     cancellation: TaskCancellation | None = None,
+    project_id: str | None = None,
+    step_id: str | None = None,
 ) -> ProcessResult:
     LOG.info(
         "starting container exec container=%s worker=%s phase=%s timeout=%ss",
@@ -306,16 +383,27 @@ def run_worker_process(
         argv,
         timeout_seconds=timeout_seconds,
     )
-    process.start()
-    if lease is not None:
-        lease.attach_process(process)
-    if cancellation is not None:
-        cancellation.attach_process(process)
+    started = time.perf_counter()
+    result: ProcessResult | None = None
     try:
+        process.start()
+        if lease is not None:
+            lease.attach_process(process)
+        if cancellation is not None:
+            cancellation.attach_process(process)
         result = process.communicate(timeout=communicate_timeout(timeout_seconds))
-        _log_phase_usage(worker.name, phase, result.stdout or "")
         return result
     finally:
+        if worker.type == "pi":
+            _log_phase_usage(
+                worker.name,
+                phase,
+                result.stdout if result is not None else "",
+                project_id=project_id,
+                step_id=step_id,
+                duration_ms=int((time.perf_counter() - started) * 1000),
+                result=result,
+            )
         if lease is not None:
             lease.attach_process(None)
         if cancellation is not None:
@@ -333,6 +421,8 @@ def run_worker_process_with_retry(
     lease: HeartbeatLease | None = None,
     cancellation: TaskCancellation | None = None,
     runner=None,
+    project_id: str | None = None,
+    step_id: str | None = None,
 ) -> ProcessResult:
     """run_worker_process + 瞬时模型错误退避重试（网关断流/5xx 不杀步骤）。
 
@@ -342,6 +432,11 @@ def run_worker_process_with_retry(
     的 run_worker_process，保持既有测试打桩点有效）。
     """
     run = runner if runner is not None else run_worker_process
+    identifiers = {}
+    if project_id is not None:
+        identifiers["project_id"] = project_id
+    if step_id is not None:
+        identifiers["step_id"] = step_id
     result = run(
         container_manager,
         container_name,
@@ -351,6 +446,7 @@ def run_worker_process_with_retry(
         timeout_seconds=timeout_seconds,
         lease=lease,
         cancellation=cancellation,
+        **identifiers,
     )
     max_retries = _transient_retry_max()
     for attempt in range(max_retries):
@@ -383,47 +479,167 @@ def run_worker_process_with_retry(
             timeout_seconds=timeout_seconds,
             lease=lease,
             cancellation=cancellation,
+            **identifiers,
         )
     return result
 
 
-def _log_phase_usage(worker_name: str, phase: str, stdout: str) -> None:
-    """从 pi 的 json 事件流提取本阶段 token 用量并记日志（会话文件落盘不稳定，
-    stdout 事件才是可靠载体；usage 口径=各 turn 累计）。"""
-    import json as _json
+def _usage_number(usage: dict[str, Any], *keys: str) -> int | None:
+    for key in keys:
+        value = usage.get(key)
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int) and value >= 0:
+            return value
+        if isinstance(value, str) and value.isdecimal():
+            return int(value)
+        if value is not None:
+            return None
+    return None
 
-    total = 0
-    cache_read = 0
-    hits = 0
+
+def _parse_pi_usage(stdout: str) -> dict[str, int | bool]:
+    """Sum assistant responses from Pi events without counting replayed snapshots.
+
+    Pi may emit the same assistant message in both ``message_end`` and
+    ``turn_end``. A turn_end without a matching message_end is counted as a
+    fallback. ``agent_end`` can contain session history, so it is ignored.
+    """
+    totals: dict[str, int | bool] = {
+        "assistant_turns": 0,
+        "usage_turns": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_read_turns": 0,
+    }
+    pending_usage: list[dict[str, Any] | None] = []
+    cache_keys = ("cacheRead", "cache_read", "cacheReadInputTokens", "cache_read_input_tokens")
+
+    def usage_quality(usage: dict[str, Any] | None) -> int:
+        if usage is None:
+            return 0
+        return sum((
+            _usage_number(usage, "input", "inputTokens", "input_tokens") is not None,
+            _usage_number(usage, "output", "outputTokens", "output_tokens") is not None,
+            _usage_number(usage, *cache_keys) is not None,
+        ))
+
+    def add(usage: dict[str, Any] | None) -> None:
+        totals["assistant_turns"] += 1
+        if usage is None:
+            return
+        input_tokens = _usage_number(usage, "input", "inputTokens", "input_tokens")
+        output_tokens = _usage_number(usage, "output", "outputTokens", "output_tokens")
+        if input_tokens is None or output_tokens is None:
+            return
+        cache_read_tokens = _usage_number(usage, *cache_keys)
+        totals["usage_turns"] += 1
+        totals["input_tokens"] += input_tokens
+        totals["output_tokens"] += output_tokens
+        if cache_read_tokens is not None:
+            totals["cache_read_turns"] += 1
+            totals["cache_read_tokens"] += cache_read_tokens
+
+    def flush() -> None:
+        for usage in pending_usage:
+            add(usage)
+        pending_usage.clear()
+
     for line in stdout.splitlines():
-        line = line.strip()
-        if '"usage"' not in line or not line.startswith("{"):
+        if not line.lstrip().startswith("{"):
             continue
         try:
-            ev = _json.loads(line)
-        except _json.JSONDecodeError:
+            event = json.loads(line)
+        except json.JSONDecodeError:
             continue
-        msg = ev.get("message") or {}
-        u = msg.get("usage") or {}
-        if not u:
+        if not isinstance(event, dict):
             continue
-        hits += 1
-        total = max(total, int(u.get("totalTokens") or 0))
-        # r10 缓存经济学计量（榜首 96% 命中是吞吐倍增器，我们从未实测）：
-        # pi/anthropic 端点的缓存读字段多形态兼容提取
-        cache_read = max(cache_read, int(
-            u.get("cacheRead")
-            or u.get("cache_read")
-            or u.get("cache_read_input_tokens")
-            or u.get("cacheReadInputTokens")
-            or 0
-        ))
-    if hits:
-        hit_rate = f"{cache_read * 100 // max(total, 1)}%" if cache_read else "n/a"
-        LOG.info(
-            "phase usage worker=%s phase=%s turns=%s totalTokens~%s cacheRead~%s(hit %s)",
-            worker_name, phase, hits, total, cache_read, hit_rate,
-        )
+        event_type = event.get("type")
+        if event_type not in ("message_end", "turn_end"):
+            continue
+        message = event.get("message")
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        usage = message.get("usage")
+        if not isinstance(usage, dict):
+            usage = None
+        if event_type == "message_end":
+            pending_usage.append(usage)
+        else:
+            if pending_usage:
+                # turn_end repeats the last assistant message. Prefer its usage
+                # when message_end was emitted before usage was populated.
+                if usage_quality(usage) > usage_quality(pending_usage[-1]):
+                    pending_usage[-1] = usage
+                flush()
+            else:
+                add(usage)
+    flush()
+    totals["usage_complete"] = (
+        totals["assistant_turns"] > 0
+        and totals["usage_turns"] == totals["assistant_turns"]
+    )
+    totals["cache_read_complete"] = (
+        totals["assistant_turns"] > 0
+        and totals["cache_read_turns"] == totals["assistant_turns"]
+    )
+    return totals
+
+
+def _log_phase_usage(
+    worker_name: str,
+    phase: str,
+    stdout: str,
+    *,
+    project_id: str | None = None,
+    step_id: str | None = None,
+    duration_ms: int | None = None,
+    result: ProcessResult | None = None,
+) -> None:
+    """Emit metadata-only accounting; JSONL is an explicit opt-in."""
+    try:
+        usage = _parse_pi_usage(stdout)
+        if result is None:
+            outcome = "error"
+        elif result.cancelled:
+            outcome = "cancelled"
+        elif did_timeout(result):
+            outcome = "timed_out"
+        elif result.returncode == 0:
+            outcome = "completed"
+        else:
+            outcome = "failed"
+        record = {
+            "record_type": "pi_phase_usage",
+            "recorded_at": datetime.now(timezone.utc).isoformat(),
+            "run_id": uuid.uuid4().hex,
+            "project_id": project_id,
+            "step_id": step_id,
+            "worker": worker_name,
+            "phase": phase,
+            "duration_ms": duration_ms,
+            "outcome": outcome,
+            "returncode": result.returncode if result is not None else None,
+            **usage,
+        }
+        encoded = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
+        LOG.info("pi phase usage %s", encoded)
+        jsonl_path = os.environ.get("ASTRA_PHASE_USAGE_JSONL")
+        if jsonl_path:
+            # One append call per record, serialized across dispatcher threads.
+            # No stdout, stderr, prompt, command, or tool output enters the record.
+            payload = (encoded + "\n").encode("utf-8")
+            with _phase_usage_write_lock:
+                fd = os.open(jsonl_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+                try:
+                    if os.write(fd, payload) != len(payload):
+                        raise OSError("short JSONL write")
+                finally:
+                    os.close(fd)
+    except (OSError, ValueError, TypeError) as exc:
+        # Accounting must not turn a completed worker execution into a failure.
+        LOG.warning("pi phase usage accounting failed: %s", type(exc).__name__)
 
 
 def project_allows_conclude_fallback(client: ASTRAClient, project_id: str, *, worker_name: str, step_id: str) -> bool:
@@ -472,6 +688,10 @@ def write_conclude_result(
     total_ms: int | None = None,
     kind: str = "regular",
     finding: str | None = None,
+    finding_high_value: bool = False,
+    reuse_fact_id: str | None = None,
+    verification_status: str | None = None,
+    verification_summary: str | None = None,
 ) -> str:
     return write_conclude_result_with_fact_id(
         client,
@@ -484,6 +704,10 @@ def write_conclude_result(
         total_ms=total_ms,
         kind=kind,
         finding=finding,
+        finding_high_value=finding_high_value,
+        reuse_fact_id=reuse_fact_id,
+        verification_status=verification_status,
+        verification_summary=verification_summary,
     ).status
 
 
@@ -499,7 +723,20 @@ def write_conclude_result_with_fact_id(
     total_ms: int | None = None,
     kind: str = "regular",
     finding: str | None = None,
+    finding_high_value: bool = False,
+    reuse_fact_id: str | None = None,
+    verification_status: str | None = None,
+    verification_summary: str | None = None,
 ) -> ConcludeWriteResult:
+    conclude_kwargs: dict[str, Any] = {}
+    if finding_high_value:
+        conclude_kwargs["finding_high_value"] = True
+    if reuse_fact_id is not None:
+        conclude_kwargs["reuse_fact_id"] = reuse_fact_id
+    if verification_status is not None:
+        conclude_kwargs["verification_status"] = verification_status
+    if verification_summary is not None:
+        conclude_kwargs["verification_summary"] = verification_summary
     response = client.conclude(
         project_id,
         step_id,
@@ -507,6 +744,7 @@ def write_conclude_result_with_fact_id(
         description,
         kind=kind,
         finding=finding,
+        **conclude_kwargs,
     )
     if response.ok:
         fact_id: str | None = None

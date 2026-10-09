@@ -382,6 +382,19 @@ aside#right{
 .badge.summary{ color: var(--accent); border-color: oklch(0.82 0.115 200 / 0.45); background: var(--accent-dim); }
 .badge.challenged{ color: var(--bad); border-color: oklch(0.71 0.15 25 / 0.45); background: oklch(0.71 0.15 25 / 0.10); }
 
+.finding-entry{ padding: 9px 0; border-bottom: 1px solid var(--line); }
+.finding-entry .k{ width: 60px; }
+.finding-head{ display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 5px; }
+.badge.finding-status.not_requested,
+.badge.finding-status.unknown{ color: var(--ink-faint); border-color: var(--line-strong); background: var(--paper-inset); }
+.badge.finding-status.pending{ color: var(--warn); border-color: oklch(0.83 0.12 85 / 0.45); background: oklch(0.83 0.12 85 / 0.10); }
+.badge.finding-status.confirmed{ color: var(--ok); border-color: oklch(0.79 0.13 160 / 0.45); background: oklch(0.79 0.13 160 / 0.10); }
+.badge.finding-status.refuted{ color: var(--ink-dim); border-color: var(--line-strong); background: var(--paper-inset); }
+.badge.finding-status.blocked{ color: var(--bad); border-color: oklch(0.71 0.15 25 / 0.45); background: oklch(0.71 0.15 25 / 0.10); }
+.finding-priority{ color: var(--warn); font-size: 11px; }
+.finding-summary{ margin-top: 5px; color: var(--ink-dim); white-space: pre-wrap; }
+.finding-meta{ margin-top: 5px; color: var(--ink-faint); font-family: var(--font-mono); font-size: 10.5px; word-break: break-word; }
+
 .evidence-wrap{ position: relative; }
 .evidence{
   font-family: var(--font-mono); font-size: 11.5px;

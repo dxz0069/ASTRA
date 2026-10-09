@@ -107,9 +107,6 @@ RUN ok=""; for idx in 1 2 3; do \
       sleep $((idx*5)); \
     done; [ -n "$ok" ]
 COPY ./container/astra_runner /opt/astra-runner
-# V2-6 知识库（runner 按 /opt/knowledge/challenge-approaches.md 读取，ASTRA_KNOWLEDGE_FILE 可覆盖）
-COPY ./container/knowledge /opt/knowledge
-
 # 镜像默认入口：astra-runner（本地模式可手动执行 python3 /opt/astra-runner/runner.py）
 ENTRYPOINT ["python3", "/opt/astra-runner/runner.py"]
 
@@ -133,10 +130,6 @@ ENV PYTHONUNBUFFERED=1
 ENV ASTRA_CHALLENGE_MODE=0 \
     ASTRA_EPITOME=0 \
     ASTRA_AUTO_DISTILL=0
-
-COPY ./container/.agents /home/kali/workspace/.agents
-COPY ./container/AGENTS.md /home/kali/workspace/AGENTS.md
-COPY ./container/knowledge /home/kali/workspace/knowledge
 
 # V9 体积治理（托管 3G 上传硬限，裸 fs 8.6G→目标 ~7G）：
 # - 砍 OpenCL 整链 hashcat→pocl→clang-21→llvm-21（~776M；容器无 GPU，pocl 只是 CPU 模拟，

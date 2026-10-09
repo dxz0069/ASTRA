@@ -133,26 +133,118 @@ def conclude(project_id: str, step_id: str, body: ConcludeRequest):
     with get_conn() as conn:
         check_project_active(conn, project_id)
         now = conclude_step_atomic(conn, project_id, step_id, body.worker)
+        source_step = get_step_or_404(conn, project_id, step_id)
+        is_strike = source_step["task_type"] == "strike"
 
-        fid = next_fact_id(conn, project_id)
+        if body.finding_high_value and body.finding is None:
+            raise HTTPException(422, "finding_high_value requires finding")
+        if (body.reuse_fact_id is not None
+                and (is_strike or body.finding is None)):
+            raise HTTPException(422, "reuse_fact_id requires a finding on an Execute step")
+        if is_strike:
+            if (body.verification_status is None or body.verification_summary is None
+                    or body.finding is not None or body.finding_high_value
+                    or body.reuse_fact_id is not None):
+                raise HTTPException(422, "Strike conclusion requires a verification status and summary only")
+            finding_row = conn.execute(
+                "SELECT * FROM findings WHERE id = ? AND project_id = ?",
+                (source_step["finding_id"], project_id),
+            ).fetchone()
+            if (finding_row is None or finding_row["verification_status"] != "pending"
+                    or finding_row["verification_step_id"] != step_id):
+                raise HTTPException(409, "Strike step has no pending linked finding")
+        elif body.verification_status is not None or body.verification_summary is not None:
+            raise HTTPException(422, "Only Strike steps may update finding verification")
 
-        conn.execute(
-            "INSERT INTO facts (id, project_id, description, kind) VALUES (?, ?, ?, ?)",
-            (fid, project_id, body.description, body.kind),
-        )
+        if body.reuse_fact_id is None:
+            fid = next_fact_id(conn, project_id)
+            fact = Fact(id=fid, description=body.description, kind=body.kind)
+            conn.execute(
+                "INSERT INTO facts (id, project_id, description, kind) VALUES (?, ?, ?, ?)",
+                (fid, project_id, body.description, body.kind),
+            )
+        else:
+            if body.reuse_fact_id in ("origin", "goal"):
+                raise HTTPException(422, "System facts cannot be reused as a step conclusion")
+            fact_row = conn.execute(
+                "SELECT * FROM facts WHERE id = ? AND project_id = ?",
+                (body.reuse_fact_id, project_id),
+            ).fetchone()
+            if fact_row is None:
+                raise HTTPException(404, f"Fact {body.reuse_fact_id} not found")
+            fid = fact_row["id"]
+            fact = Fact(**dict(fact_row))
+
         conn.execute(
             "UPDATE steps SET to_fact_id = ?, last_heartbeat_at = ?, concluded_at = ? WHERE id = ? AND project_id = ? AND worker = ?",
             (fid, now, now, step_id, project_id, body.worker),
         )
 
         finding: Finding | None = None
-        if body.finding:
-            finding_id = next_finding_id(conn, project_id)
-            conn.execute(
-                "INSERT INTO findings (id, project_id, description, created_at) VALUES (?, ?, ?, ?)",
-                (finding_id, project_id, body.finding, now),
+        if is_strike:
+            cursor = conn.execute(
+                """UPDATE findings SET verification_status = ?, verification_fact_id = ?,
+                          verification_summary = ?
+                   WHERE id = ? AND project_id = ? AND verification_status = 'pending'
+                     AND verification_step_id = ?""",
+                (body.verification_status, fid, body.verification_summary,
+                 source_step["finding_id"], project_id, step_id),
             )
-            finding = Finding(id=finding_id, description=body.finding, created_at=now)
+            if cursor.rowcount != 1:
+                raise HTTPException(409, "Finding is no longer pending verification")
+            finding_row = conn.execute(
+                "SELECT * FROM findings WHERE id = ? AND project_id = ?",
+                (source_step["finding_id"], project_id),
+            ).fetchone()
+            finding = Finding(**dict(finding_row))
+        elif body.finding:
+            existing = None
+            if body.finding_high_value:
+                normalized = " ".join(body.finding.casefold().split())
+                pending = conn.execute(
+                    """SELECT * FROM findings WHERE project_id = ? AND high_value = 1
+                       AND verification_status = 'pending'""",
+                    (project_id,),
+                ).fetchall()
+                existing = next(
+                    (row for row in pending
+                     if " ".join(row["description"].casefold().split()) == normalized),
+                    None,
+                )
+            if existing is not None:
+                finding = Finding(**dict(existing))
+            else:
+                finding_id = next_finding_id(conn, project_id)
+                verification_step_id = next_step_id(conn, project_id) if body.finding_high_value else None
+                conn.execute(
+                    """INSERT INTO findings
+                       (id, project_id, description, created_at, high_value,
+                        verification_status, source_fact_id, source_step_id, verification_step_id)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (finding_id, project_id, body.finding, now, int(body.finding_high_value),
+                     "pending" if body.finding_high_value else "not_requested",
+                     fid, step_id, verification_step_id),
+                )
+                if verification_step_id is not None:
+                    conn.execute(
+                        """INSERT INTO steps
+                           (id, project_id, description, expect, status, creator,
+                            created_at, task_type, finding_id)
+                           VALUES (?, ?, ?, ?, 'open', ?, ?, 'strike', ?)""",
+                        (verification_step_id, project_id,
+                         f"Independently verify high-value finding: {body.finding}",
+                         "Confirm, refute, or report a blocked verification with evidence.",
+                         body.worker, now, finding_id),
+                    )
+                    conn.execute(
+                        "INSERT INTO step_sources (step_id, project_id, fact_id) VALUES (?, ?, ?)",
+                        (verification_step_id, project_id, fid),
+                    )
+                finding_row = conn.execute(
+                    "SELECT * FROM findings WHERE id = ? AND project_id = ?",
+                    (finding_id, project_id),
+                ).fetchone()
+                finding = Finding(**dict(finding_row))
 
         updated = conn.execute(
             "SELECT * FROM steps WHERE id = ? AND project_id = ?",
@@ -160,7 +252,7 @@ def conclude(project_id: str, step_id: str, body: ConcludeRequest):
         ).fetchone()
 
         return ConcludeResponse(
-            fact=Fact(id=fid, description=body.description, kind=body.kind),
+            fact=fact,
             step=step_to_model(conn, updated, project_id),
             finding=finding,
         )
@@ -175,6 +267,8 @@ def close_step(project_id: str, step_id: str, body: CloseStepRequest):
     with get_conn() as conn:
         check_project_active(conn, project_id)
         row = get_step_or_404(conn, project_id, step_id)
+        if row["task_type"] == "strike":
+            raise HTTPException(409, "Strike steps require a verification conclusion")
         if row["to_fact_id"] is not None:
             raise HTTPException(409, "Step already concluded")
         if row["status"] == "closed":

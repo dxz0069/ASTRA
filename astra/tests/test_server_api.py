@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sqlite3
+
 from fastapi.testclient import TestClient
 import pytest
 
@@ -546,3 +548,298 @@ def test_csp_tiering_ui_page_vs_api(client: TestClient) -> None:
 
     static_csp = client.get("/static/app.css").headers.get("content-security-policy")
     assert static_csp in (None, "")
+
+
+def _create_execute_step(client: TestClient, project_id: str, source: str = "origin") -> str:
+    response = client.post(
+        f"/projects/{project_id}/steps",
+        json={"from": [source], "description": "investigate", "creator": "decider"},
+    )
+    assert response.status_code == 201
+    return response.json()["id"]
+
+
+def _conclude_execute(
+    client: TestClient, project_id: str, step_id: str, *,
+    finding: str | None = None, high_value: bool = False,
+    reuse_fact_id: str | None = None,
+):
+    return client.post(
+        f"/projects/{project_id}/steps/{step_id}/conclude",
+        json={
+            "worker": "executor", "description": "observed evidence",
+            "finding": finding, "finding_high_value": high_value,
+            "reuse_fact_id": reuse_fact_id,
+        },
+    )
+
+
+def test_high_value_finding_creates_linked_strike_step_atomically(client: TestClient) -> None:
+    project_id = _create_project(client)
+    source_step = _create_execute_step(client, project_id)
+
+    response = _conclude_execute(
+        client, project_id, source_step,
+        finding="Unverified sensitive data exposure", high_value=True,
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    finding = payload["finding"]
+    assert finding["high_value"] is True
+    assert finding["verification_status"] == "pending"
+    assert finding["source_step_id"] == source_step
+    assert finding["source_fact_id"] == payload["fact"]["id"]
+    assert finding["verification_fact_id"] is None
+
+    detail = client.get(f"/projects/{project_id}").json()
+    strike = next(step for step in detail["steps"] if step["task_type"] == "strike")
+    assert strike["id"] == finding["verification_step_id"]
+    assert strike["finding_id"] == finding["id"]
+    assert strike["from"] == [payload["fact"]["id"]]
+    assert strike["status"] == "open" and strike["to"] is None
+    assert detail["findings"] == [finding]
+
+
+def test_ordinary_finding_does_not_create_strike_step(client: TestClient) -> None:
+    project_id = _create_project(client)
+    source_step = _create_execute_step(client, project_id)
+    response = _conclude_execute(client, project_id, source_step, finding="A routine clue")
+    assert response.status_code == 200
+    finding = response.json()["finding"]
+    assert finding["high_value"] is False
+    assert finding["verification_status"] == "not_requested"
+    assert finding["verification_step_id"] is None
+    detail = client.get(f"/projects/{project_id}").json()
+    assert len(detail["steps"]) == 1
+    assert detail["steps"][0]["task_type"] == "execute"
+
+
+@pytest.mark.parametrize("status", ["confirmed", "refuted", "blocked"])
+def test_strike_conclusion_updates_finding_with_fact(
+    client: TestClient, status: str,
+) -> None:
+    project_id = _create_project(client)
+    source_step = _create_execute_step(client, project_id)
+    first = _conclude_execute(
+        client, project_id, source_step, finding="High-value lead", high_value=True,
+    ).json()
+    strike_id = first["finding"]["verification_step_id"]
+
+    response = client.post(
+        f"/projects/{project_id}/steps/{strike_id}/conclude",
+        json={
+            "worker": "strike-worker", "description": "independent verification evidence",
+            "kind": "negative" if status == "refuted" else "regular",
+            "verification_status": status,
+            "verification_summary": "Checked independently against the source.",
+        },
+    )
+    assert response.status_code == 200
+    verified = response.json()["finding"]
+    assert verified["verification_status"] == status
+    assert verified["verification_fact_id"] == response.json()["fact"]["id"]
+    assert verified["verification_summary"] == "Checked independently against the source."
+    assert response.json()["step"]["task_type"] == "strike"
+
+    detail = client.get(f"/projects/{project_id}").json()
+    assert len(detail["findings"]) == 1
+    assert detail["findings"][0] == verified
+    assert len(detail["steps"]) == 2
+    assert detail["steps"][1]["to"] == response.json()["fact"]["id"]
+
+
+def test_invalid_strike_conclusion_keeps_finding_pending_and_retryable(client: TestClient) -> None:
+    project_id = _create_project(client)
+    source_step = _create_execute_step(client, project_id)
+    first = _conclude_execute(
+        client, project_id, source_step, finding="High-value lead", high_value=True,
+    ).json()
+    strike_id = first["finding"]["verification_step_id"]
+    url = f"/projects/{project_id}/steps/{strike_id}/conclude"
+
+    for invalid in (
+        {"verification_status": "confirmed"},
+        {"verification_status": "unconfirmed", "verification_summary": "checked"},
+        {"verification_status": "confirmed", "verification_summary": "checked", "finding": "new lead"},
+    ):
+        response = client.post(
+            url, json={"worker": "strike-worker", "description": "attempt", **invalid},
+        )
+        assert response.status_code == 422
+
+    detail = client.get(f"/projects/{project_id}").json()
+    assert detail["findings"][0]["verification_status"] == "pending"
+    assert detail["findings"][0]["verification_fact_id"] is None
+    assert detail["steps"][1]["to"] is None
+    assert len(detail["facts"]) == 3
+
+    retry = client.post(
+        url,
+        json={"worker": "strike-worker", "description": "verified evidence",
+              "verification_status": "confirmed", "verification_summary": "confirmed"},
+    )
+    assert retry.status_code == 200
+    assert retry.json()["finding"]["verification_status"] == "confirmed"
+
+
+def test_pending_high_value_finding_deduplicates_normalized_description(client: TestClient) -> None:
+    project_id = _create_project(client)
+    first_step = _create_execute_step(client, project_id)
+    second_step = _create_execute_step(client, project_id)
+    first = _conclude_execute(
+        client, project_id, first_step, finding="Sensitive   DATA exposure", high_value=True,
+    ).json()
+    second = _conclude_execute(
+        client, project_id, second_step, finding=" sensitive data\n exposure ", high_value=True,
+    )
+    assert second.status_code == 200
+    assert second.json()["finding"]["id"] == first["finding"]["id"]
+    assert second.json()["step"]["to"] == second.json()["fact"]["id"]
+    detail = client.get(f"/projects/{project_id}").json()
+    assert len(detail["findings"]) == 1
+    assert len([step for step in detail["steps"] if step["task_type"] == "strike"]) == 1
+
+
+def test_conclude_reuses_project_fact_and_still_records_high_value_finding(client: TestClient) -> None:
+    project_id = _create_project(client)
+    fact = client.post(
+        f"/projects/{project_id}/facts",
+        json={"description": "preexisting evidence", "creator": "human"},
+    ).json()
+    source_step = _create_execute_step(client, project_id)
+    response = _conclude_execute(
+        client, project_id, source_step, finding="High-value lead",
+        high_value=True, reuse_fact_id=fact["id"],
+    )
+    assert response.status_code == 200
+    assert response.json()["fact"] == fact
+    assert response.json()["step"]["to"] == fact["id"]
+    assert response.json()["finding"]["source_fact_id"] == fact["id"]
+    detail = client.get(f"/projects/{project_id}").json()
+    assert len(detail["facts"]) == 3
+    strike = next(step for step in detail["steps"] if step["task_type"] == "strike")
+    assert strike["from"] == [fact["id"]]
+
+    wrong_project = _create_project(client)
+    other_step = _create_execute_step(client, wrong_project)
+    rejected = _conclude_execute(
+        client, wrong_project, other_step, finding="Lead", high_value=True,
+        reuse_fact_id=fact["id"],
+    )
+    assert rejected.status_code == 404
+    other_detail = client.get(f"/projects/{wrong_project}").json()
+    assert len(other_detail["facts"]) == 2
+    assert other_detail["steps"][0]["to"] is None
+    assert other_detail["findings"] == []
+
+
+def test_high_value_flag_requires_finding_without_partial_write(client: TestClient) -> None:
+    project_id = _create_project(client)
+    step_id = _create_execute_step(client, project_id)
+    response = _conclude_execute(client, project_id, step_id, high_value=True)
+    assert response.status_code == 422
+    detail = client.get(f"/projects/{project_id}").json()
+    assert len(detail["facts"]) == 2
+    assert detail["steps"][0]["to"] is None
+
+
+@pytest.mark.parametrize("system_fact_id", ["origin", "goal"])
+def test_reuse_fact_rejects_system_facts(client: TestClient, system_fact_id: str) -> None:
+    project_id = _create_project(client)
+    step_id = _create_execute_step(client, project_id)
+    response = _conclude_execute(
+        client, project_id, step_id, finding="High-value lead",
+        high_value=True, reuse_fact_id=system_fact_id,
+    )
+    assert response.status_code == 422
+    detail = client.get(f"/projects/{project_id}").json()
+    assert detail["steps"][0]["to"] is None
+    assert detail["findings"] == []
+
+
+def test_reuse_fact_requires_high_value_finding(client: TestClient) -> None:
+    project_id = _create_project(client)
+    fact = client.post(
+        f"/projects/{project_id}/facts", json={"description": "existing"},
+    ).json()
+    step_id = _create_execute_step(client, project_id)
+    response = _conclude_execute(
+        client, project_id, step_id, reuse_fact_id=fact["id"],
+    )
+    assert response.status_code == 422
+    detail = client.get(f"/projects/{project_id}").json()
+    assert detail["steps"][0]["to"] is None
+    assert len(detail["facts"]) == 3
+
+
+def test_strike_step_cannot_be_closed_without_verdict(client: TestClient) -> None:
+    project_id = _create_project(client)
+    source_step = _create_execute_step(client, project_id)
+    first = _conclude_execute(
+        client, project_id, source_step, finding="High-value lead", high_value=True,
+    ).json()
+    strike_id = first["finding"]["verification_step_id"]
+
+    response = client.post(
+        f"/projects/{project_id}/steps/{strike_id}/close",
+        json={"reason": "close all old steps"},
+    )
+    assert response.status_code == 409
+    detail = client.get(f"/projects/{project_id}").json()
+    strike = next(step for step in detail["steps"] if step["id"] == strike_id)
+    assert strike["status"] == "open" and strike["to"] is None
+    assert detail["findings"][0]["verification_status"] == "pending"
+
+    retry = client.post(
+        f"/projects/{project_id}/steps/{strike_id}/conclude",
+        json={"worker": "strike-worker", "description": "verified evidence",
+              "verification_status": "confirmed", "verification_summary": "confirmed"},
+    )
+    assert retry.status_code == 200
+
+
+def test_legacy_database_adds_strike_fields_with_compatible_defaults(
+    tmp_path, monkeypatch,
+) -> None:
+    path = tmp_path / "legacy.db"
+    with sqlite3.connect(path) as conn:
+        conn.executescript("""
+            CREATE TABLE projects (
+                id TEXT PRIMARY KEY, title TEXT NOT NULL, status TEXT NOT NULL,
+                bootstrap_enabled INTEGER NOT NULL, created_at TEXT NOT NULL,
+                decide_worker TEXT, decide_trigger TEXT, decide_started_at TEXT,
+                decide_last_heartbeat_at TEXT, decide_token TEXT
+            );
+            CREATE TABLE facts (
+                id TEXT NOT NULL, project_id TEXT NOT NULL, description TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'regular', PRIMARY KEY (id, project_id)
+            );
+            CREATE TABLE steps (
+                id TEXT NOT NULL, project_id TEXT NOT NULL, to_fact_id TEXT,
+                description TEXT NOT NULL, expect TEXT, status TEXT NOT NULL DEFAULT 'open',
+                close_reason TEXT, closed_at TEXT, creator TEXT NOT NULL, worker TEXT,
+                dispatch_count INTEGER NOT NULL DEFAULT 0, last_heartbeat_at TEXT,
+                created_at TEXT NOT NULL, concluded_at TEXT, PRIMARY KEY (id, project_id)
+            );
+            CREATE TABLE findings (
+                id TEXT NOT NULL, project_id TEXT NOT NULL, description TEXT NOT NULL,
+                created_at TEXT NOT NULL, PRIMARY KEY (id, project_id)
+            );
+            INSERT INTO projects (id, title, status, bootstrap_enabled, created_at)
+            VALUES ('proj_001', 'old', 'active', 1, '2026-01-01T00:00:00Z');
+            INSERT INTO steps (id, project_id, description, creator, created_at)
+            VALUES ('s001', 'proj_001', 'old step', 'decider', '2026-01-01T00:00:00Z');
+            INSERT INTO findings (id, project_id, description, created_at)
+            VALUES ('fnd001', 'proj_001', 'old clue', '2026-01-01T00:00:00Z');
+        """)
+
+    monkeypatch.setattr(db, "_db_path", None)
+    db.configure(path)
+    with db.get_conn() as conn:
+        step = conn.execute("SELECT * FROM steps WHERE id = 's001'").fetchone()
+        finding = conn.execute("SELECT * FROM findings WHERE id = 'fnd001'").fetchone()
+        assert step["task_type"] == "execute"
+        assert step["finding_id"] is None
+        assert finding["high_value"] == 0
+        assert finding["verification_status"] == "not_requested"
+        assert finding["verification_step_id"] is None

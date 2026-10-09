@@ -2,10 +2,16 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 
+import yaml
+
 from astra.dispatcher.protocol.client import ApiResult
 from astra.dispatcher.runtime.cancellation import TaskCancellation
 from astra.dispatcher.runtime.process import ProcessResult
-from astra.dispatcher.tasks.common import HealthcheckRun
+from astra.dispatcher.tasks.common import (
+    HealthcheckRun,
+    _wrap_long_graph_lines,
+    write_graph_snapshot_reference,
+)
 from astra.dispatcher.tasks import bootstrap, decide, execute
 
 from conftest import (
@@ -25,6 +31,25 @@ def _healthy(*_args, **_kwargs) -> HealthcheckRun:
 
 def _lease_factory(lease: FakeLease):
     return lambda *_args, **_kwargs: lease
+
+
+def test_long_graph_snapshot_lines_are_wrapped_without_changing_yaml() -> None:
+    graph = {
+        "project": {"origin": "A" * 60_000 + " \\\n🧭", "goal": "find the flag"},
+        "facts": [{"id": "f001", "description": "flag{" + "X" * 60_000 + "}"}],
+    }
+    original = yaml.dump(graph, allow_unicode=True, default_flow_style=False, sort_keys=False)
+    assert max(len(line.encode("utf-8")) for line in original.splitlines()) > 50 * 1024
+
+    wrapped = _wrap_long_graph_lines(original)
+
+    assert yaml.safe_load(wrapped) == yaml.safe_load(original)
+    assert all(len(line.encode("utf-8")) < 50 * 1024 for line in wrapped.splitlines())
+    assert _wrap_long_graph_lines("project:\n  title: short\n") == "project:\n  title: short\n"
+
+    containers = FakeContainerManager()
+    write_graph_snapshot_reference(containers, "container-proj_001", original, phase="decide_execute")
+    assert containers.writes[0][2] == wrapped
 
 
 def test_decide_writes_graph_snapshot_and_creates_step(monkeypatch) -> None:
@@ -178,6 +203,98 @@ def test_execute_finding_submitted_with_fact(monkeypatch) -> None:
     assert outcome == "success"
     assert client.concluded == [("proj_001", "s001", "test-worker", "SQLi confirmed")]
     assert client.created_findings == [("proj_001", "SQL injection at /login")]
+
+
+def test_execute_explicit_high_value_finding_requests_strike(monkeypatch) -> None:
+    config = make_config()
+    step = make_step()
+    project = make_project(steps=[step])
+    client = FakeClient(project)
+    lease = FakeLease()
+    monkeypatch.setattr(execute, "get_driver", lambda _name: FakeDriver())
+    monkeypatch.setattr(execute.HeartbeatLease, "for_step", _lease_factory(lease))
+    monkeypatch.setattr(execute, "run_healthcheck", _healthy)
+    monkeypatch.setattr(
+        execute, "run_worker_process",
+        lambda *_args, **_kwargs: ProcessResult(
+            0,
+            '{"accepted":true,"data":{"description":"observed access to target",'
+            '"finding":{"description":"retest target endpoint using saved trace",'
+            '"high_value":true}}}',
+            "",
+        ),
+    )
+    outcome = execute.run_execute_task(
+        config, client, FakeContainerManager(), project, "graph", step,
+        config.workers[0], TaskCancellation(),
+    )
+    assert outcome == "success"
+    assert client.conclude_options[0]["finding_high_value"] is True
+    assert client.conclude_options[0]["reuse_fact_id"] is None
+
+
+def test_execute_duplicate_fact_still_saves_high_value_finding(monkeypatch) -> None:
+    from astra.server.models import Fact
+
+    config = make_config()
+    step = make_step()
+    project = make_project(steps=[step])
+    project.facts.append(Fact(id="f_scan", description="Endpoint /login returned admin session"))
+    client = FakeClient(project)
+    lease = FakeLease()
+    monkeypatch.setattr(execute, "get_driver", lambda _name: FakeDriver())
+    monkeypatch.setattr(execute.HeartbeatLease, "for_step", _lease_factory(lease))
+    monkeypatch.setattr(execute, "run_healthcheck", _healthy)
+    monkeypatch.setattr(
+        execute, "run_worker_process",
+        lambda *_args, **_kwargs: ProcessResult(
+            0,
+            '{"accepted":true,"data":{"description":"Endpoint /login returned admin session",'
+            '"finding":{"description":"Verify reproducibility of /login admin session",'
+            '"high_value":true}}}',
+            "",
+        ),
+    )
+    outcome = execute.run_execute_task(
+        config, client, FakeContainerManager(), project, "graph", step,
+        config.workers[0], TaskCancellation(),
+    )
+    assert outcome == "success"
+    assert client.concluded == [("proj_001", "s001", "test-worker", "Endpoint /login returned admin session")]
+    assert client.created_findings == [("proj_001", "Verify reproducibility of /login admin session")]
+    assert client.conclude_options[0]["finding_high_value"] is True
+    assert client.conclude_options[0]["reuse_fact_id"] == "f_scan"
+
+
+def test_execute_duplicate_fact_preserves_ordinary_finding(monkeypatch) -> None:
+    from astra.server.models import Fact
+
+    config = make_config()
+    step = make_step()
+    project = make_project(steps=[step])
+    project.facts.append(Fact(id="f_scan", description="Endpoint /profile returned token"))
+    client = FakeClient(project)
+    lease = FakeLease()
+    monkeypatch.setattr(execute, "get_driver", lambda _name: FakeDriver())
+    monkeypatch.setattr(execute.HeartbeatLease, "for_step", _lease_factory(lease))
+    monkeypatch.setattr(execute, "run_healthcheck", _healthy)
+    monkeypatch.setattr(
+        execute, "run_worker_process",
+        lambda *_args, **_kwargs: ProcessResult(
+            0,
+            '{"accepted":true,"data":{"description":"Endpoint /profile returned token",'
+            '"finding":"Review token scope"}}',
+            "",
+        ),
+    )
+    outcome = execute.run_execute_task(
+        config, client, FakeContainerManager(), project, "graph", step,
+        config.workers[0], TaskCancellation(),
+    )
+    assert outcome == "success"
+    assert client.created_findings == [("proj_001", "Review token scope")]
+    assert client.conclude_options[0]["finding_high_value"] is False
+    assert client.conclude_options[0]["reuse_fact_id"] == "f_scan"
 
 
 def test_execute_healthcheck_failure_releases_claim(monkeypatch) -> None:

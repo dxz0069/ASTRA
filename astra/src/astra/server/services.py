@@ -291,6 +291,8 @@ def step_to_model(conn: sqlite3.Connection, row: sqlite3.Row, project_id: str) -
         dispatch_count=int(row["dispatch_count"] or 0),
         created_at=row["created_at"],
         concluded_at=row["concluded_at"],
+        task_type=row["task_type"],
+        finding_id=row["finding_id"],
     )
 
 

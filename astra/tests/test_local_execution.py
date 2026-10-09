@@ -142,6 +142,20 @@ def test_local_workspace_seeded_with_agents_and_skills(monkeypatch, tmp_path) ->
     manager.close()
 
 
+def test_local_workspace_has_no_implicit_seed(monkeypatch, tmp_path) -> None:
+    from astra.dispatcher.config import ContainerConfig
+
+    monkeypatch.delenv("ASTRA_WORKSPACE_SEED", raising=False)
+    manager = LocalContainerManager(
+        ContainerConfig(image="unused", network_mode="host", completed_action="stop"),
+        workspace_root=tmp_path / "workspaces",
+    )
+    workspace = manager.workspace_of(manager.ensure_running("proj_clean"))
+    assert not (workspace / "AGENTS.md").exists()
+    assert not (workspace / ".agents").exists()
+    manager.close()
+
+
 def test_build_container_manager_selects_local() -> None:
     from astra.dispatcher.config import ContainerConfig
 

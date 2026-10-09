@@ -35,7 +35,9 @@ def _fold_fact_description(description: str, limit: int = 80) -> str:
     return first
 
 
-def _epitome_keep_full_ids(facts, steps, sources_by_step, recent_keep: int = 30) -> set[str]:
+def _epitome_keep_full_ids(
+    facts, steps, sources_by_step, recent_keep: int = 30, findings=()
+) -> set[str]:
     """不折叠集合：origin/goal、负结果、凭据/flag 级关键事实、因果骨架上的一切
     事实（任一步骤的来源或落点）、以及最近写入的事实。折叠的只有"老旧且脱离
     因果链"的浅层侦察记录。"""
@@ -47,6 +49,11 @@ def _epitome_keep_full_ids(facts, steps, sources_by_step, recent_keep: int = 30)
         keep.update(sources_by_step.get(s["id"], []))
         if s["to_fact_id"]:
             keep.add(s["to_fact_id"])
+    for finding in findings:
+        if finding["source_fact_id"]:
+            keep.add(finding["source_fact_id"])
+        if finding["verification_fact_id"]:
+            keep.add(finding["verification_fact_id"])
     keep.update(f["id"] for f in facts[-recent_keep:])
     return keep
 
@@ -143,7 +150,9 @@ def _export_yaml(conn, project_id: str) -> str:
     folded_count = 0
     keep_full: set[str] | None = None
     if _epitome_enabled() and len(facts) > _epitome_threshold():
-        keep_full = _epitome_keep_full_ids(facts, steps, sources_by_step)
+        keep_full = _epitome_keep_full_ids(
+            facts, steps, sources_by_step, findings=findings
+        )
     fact_rows = []
     for f in facts:
         description = f["description"]
@@ -163,6 +172,7 @@ def _export_yaml(conn, project_id: str) -> str:
     step_list = []
     for s in steps:
         entry: dict = {
+            "id": s["id"],
             "from": sources_by_step.get(s["id"], []),
             "to": s["to_fact_id"],
             "description": s["description"],
@@ -174,6 +184,10 @@ def _export_yaml(conn, project_id: str) -> str:
         }
         if s["expect"]:
             entry["expect"] = s["expect"]
+        if s["task_type"] == "strike":
+            entry["task_type"] = "strike"
+        if s["finding_id"]:
+            entry["finding_id"] = s["finding_id"]
         if s["close_reason"]:
             entry["close_reason"] = s["close_reason"]
             entry["closed_at"] = format_export_timestamp(s["closed_at"])
@@ -183,14 +197,21 @@ def _export_yaml(conn, project_id: str) -> str:
         data["steps"] = step_list
 
     if findings:
-        data["findings"] = [
-            {
+        finding_list = []
+        for f in findings:
+            entry = {
                 "id": f["id"],
                 "description": f["description"],
+                "high_value": bool(f["high_value"]),
+                "verification_status": f["verification_status"],
                 "created_at": format_export_timestamp(f["created_at"]),
             }
-            for f in findings
-        ]
+            for key in ("source_fact_id", "source_step_id", "verification_step_id",
+                        "verification_fact_id", "verification_summary"):
+                if f[key] is not None:
+                    entry[key] = f[key]
+            finding_list.append(entry)
+        data["findings"] = finding_list
 
     active_subgoals = [sg for sg in subgoals if sg["status"] == "active"]
     if active_subgoals:
@@ -235,6 +256,8 @@ def _export_timeline(conn, project_id: str) -> str:
 
         ts = format_export_timestamp(s["created_at"]) or ""
         meta = f"  from: {from_str}"
+        if s["task_type"] == "strike":
+            meta += f"\n  task_type: strike\n  finding_id: {s['finding_id']}"
         if s["worker"] and not s["concluded_at"]:
             meta += f"\n  worker: {s['worker']} (in progress)"
         block = f"[{ts}] STEP DECLARED {s['id']} by {s['creator']}\n{meta}\n  {s['description']}"
@@ -263,7 +286,13 @@ def _export_timeline(conn, project_id: str) -> str:
 
     for f in findings:
         ts = format_export_timestamp(f["created_at"]) or ""
-        block = f"[{ts}] FINDING {f['id']}\n  {f['description']}"
+        block = (f"[{ts}] FINDING {f['id']}\n  {f['description']}"
+                 f"\n  high_value: {bool(f['high_value'])}"
+                 f"\n  verification_status_at_export: {f['verification_status']}")
+        for key in ("source_fact_id", "source_step_id", "verification_step_id",
+                    "verification_fact_id", "verification_summary"):
+            if f[key] is not None:
+                block += f"\n  {key}: {f[key]}"
         events.append((f["created_at"] or "", order, block))
         order += 1
 

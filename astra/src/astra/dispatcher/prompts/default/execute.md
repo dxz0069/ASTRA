@@ -20,6 +20,7 @@
 ```json
 {"accepted": true, "data": {"description": "...", "finding": {"description": "..."}}}
 ```
+当 finding 是值得另派独立核验的高价值线索时，显式添加 `"high_value": true`。仅在描述给出具体目标、可复核的观察或证据位置，并说明可能的任务收益时标记；这只是待核验线索，不代表已确认。普通 finding 保持原格式；不要根据措辞自动升级。
 除这些 JSON 行外不要输出任何其他内容。禁止拒答（{"accepted": false} 仅在不可抗力时使用）。
 
 # Context

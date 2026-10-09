@@ -17,6 +17,7 @@ agent 只需把拿到的 flag 作为天枢写回星图（见 skill 说明）。
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -68,6 +69,7 @@ class ChallengeResult:
     description: str
     started: bool = False
     flags_found: list[str] = field(default_factory=list)
+    submitted_flag_hashes: set[str] = field(default_factory=set)  # 跨进程去重；进度文件不落明文 flag
     flags_correct: int = 0
     awarded: int = 0
     cumulative_score: int = 0
@@ -167,8 +169,8 @@ class ProgressStore:
     - v2：{题码: {"state": ..., "flags": int, "awarded": int}}——崩溃重启后
       报告不再把已解题记 0 分（进度文件是唯一跨进程战果载体）。
 
-    每题 start 成功后标记 started，关题后标记 done；重启 runner 时用同一
-    --progress-file 自动跳过已尝试的题。
+    每题 start 成功后标记 started；仅在平台确认完成或正确旗数收齐后标记
+    done。已确认战果和提交指纹逐次落盘，重启后可继续收剩余旗。
     """
 
     def __init__(self, path: Path) -> None:
@@ -189,6 +191,11 @@ class ProgressStore:
                     entry[key] = int(entry.get(key) or 0)
                 except (TypeError, ValueError):
                     entry[key] = 0
+            hashes = entry.get("submitted_flag_hashes", [])
+            entry["submitted_flag_hashes"] = [
+                h for h in hashes if isinstance(h, str) and len(h) == 64
+            ] if isinstance(hashes, list) else []
+            entry["complete"] = bool(entry.get("complete", entry["state"] == "done"))
             return entry
         return {}
 
@@ -231,6 +238,20 @@ class ProgressStore:
             entry = self._data.get(code) or {}
             return int(entry.get("flags", 0) or 0), int(entry.get("awarded", 0) or 0)
 
+    def submitted_hashes_of(self, code: str) -> set[str]:
+        """返回已获得平台回复的 flag 指纹，不暴露明文 flag。"""
+        with self._lock:
+            return set((self._data.get(code) or {}).get("submitted_flag_hashes", []))
+
+    def pending_closes(self) -> list[tuple[str, bool]]:
+        """补关清单及其真实完成状态。"""
+        with self._lock:
+            return [
+                (code, bool(entry.get("complete", False)))
+                for code, entry in self._data.items()
+                if entry.get("state") == "close_failed"
+            ]
+
     def skipped_codes(self) -> set[str]:
         # 跳过 done / close_failed：已完整跑过或关题泄漏需人工；started 不跳过——
         # 崩溃重启后重新 start（平台幂等返回同地址）继续解题，避免放弃已启动的题目。
@@ -238,7 +259,11 @@ class ProgressStore:
         with self._lock:
             return {code for code, entry in self._data.items() if entry.get("state") in ("done", "close_failed")}
 
-    def mark(self, code: str, state: str, *, flags: int | None = None, awarded: int | None = None) -> None:
+    def mark(
+        self, code: str, state: str, *, flags: int | None = None,
+        awarded: int | None = None, submitted_flag_hashes: set[str] | None = None,
+        complete: bool | None = None,
+    ) -> None:
         """标记状态（可选携带战果）。已有战果未被显式覆盖时保留（增量关题场景）。"""
         with self._lock:
             entry = dict(self._data.get(code) or {})
@@ -251,6 +276,12 @@ class ProgressStore:
                 entry["awarded"] = int(awarded)
             elif "awarded" not in entry:
                 entry["awarded"] = 0
+            if submitted_flag_hashes is not None:
+                entry["submitted_flag_hashes"] = sorted(submitted_flag_hashes)
+            if complete is not None:
+                entry["complete"] = bool(complete)
+            elif state == "done":
+                entry["complete"] = True
             self._data[code] = entry
             try:
                 self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -325,12 +356,15 @@ def run_benchmark(
         stale = getattr(ch, "is_completed", False) or (
             str(getattr(ch, "container_status", "") or "").lower() == "available"
         )
-        if code0 and stale:
+        if code0 and stale and not (progress is not None and progress.state_of(code0) == "close_failed"):
             try:
                 call_with_retry(lambda: client.close_challenge(code0), f"close_challenge:{code0}", retries=2)
                 LOG.info("startup stale slot reclaimed code=%s", code0)
             except Exception:  # noqa: BLE001 —— 幂等清理，失败忽略
                 pass
+    # 重启时优先补关历史泄漏容器；成功后未完成题立即回到可执行队列。
+    if progress is not None:
+        _reap_failed_closes(client, progress)
     queue: deque = deque()
     # P1-1：队列互斥锁——_pick_candidate 的"快照→clear→extend"与 worker 线程的
     # requeue（appendleft/append）并发时非原子，落在 list 与 clear 间隙里的题会被
@@ -345,6 +379,21 @@ def run_benchmark(
         result = ChallengeResult(unique_code=code, description=description)
         result.flag_count = int(getattr(ch, "flag_count", 0) or 0)
         result.total_score = int(getattr(ch, "total_score", 0) or 0)
+        if progress is not None:
+            prior_flags, prior_awarded = progress.score_of(code)
+            result.flags_correct = prior_flags
+            result.awarded = prior_awarded
+            result.submitted_flag_hashes = progress.submitted_hashes_of(code)
+            if prior_flags:
+                result.flags_found = [f"flag#{i + 1}" for i in range(prior_flags)]
+            # 修复旧 runner 已误写的 1/4 done；平台未完成且旗未收齐的旧记录可续跑。
+            if (
+                progress.state_of(code) == "done"
+                and not getattr(ch, "is_completed", False)
+                and (result.flag_count <= 0 or result.flags_correct < result.flag_count)
+            ):
+                progress.mark(code, "started", complete=False)
+                LOG.warning("reopen legacy premature done code=%s flags=%s/%s", code, result.flags_correct, result.flag_count or "?")
         if skip_completed and getattr(ch, "is_completed", False):
             LOG.info("skip completed challenge code=%s", code)
             results[code] = result
@@ -355,15 +404,11 @@ def run_benchmark(
             continue
         if progress is not None and code in progress.skipped_codes():
             # 审计第十轮：回填历史战果——崩溃重启后报告不再把已解题记 0 分
-            prior_flags, prior_awarded = progress.score_of(code)
-            if prior_flags or prior_awarded:
-                result.flags_correct = prior_flags
-                result.awarded = prior_awarded
-                result.flags_found = result.flags_found or [f"flag#{i + 1}" for i in range(prior_flags)]
+            if result.flags_correct or result.awarded:
                 result.started = True
             LOG.info(
                 "skip challenge by progress file code=%s（断点续跑；历史战果 flags=%s awarded=%s）",
-                code, prior_flags, prior_awarded,
+                code, result.flags_correct, result.awarded,
             )
             results[code] = result
             continue
@@ -509,7 +554,8 @@ def run_benchmark(
                     budget = min(budget, 2)
                 budget = min(budget, MAX_DEFER_BUDGET_CAP)
                 if result.defer_count >= budget:
-                    # 达到 defer 上限：彻底放弃——删引擎项目并标 done（防重启重跑）
+                    # 达到本轮 defer 上限：删引擎项目并记 abandoned；未核验完成
+                    # 不能写 done，后续启动仍可重试该题。
                     LOG.info(
                         "challenge give up code=%s defer=%s（达到上限，删除项目放弃）",
                         result.unique_code, result.defer_count,
@@ -531,12 +577,13 @@ def run_benchmark(
                     except Exception:  # noqa: BLE001
                         pass
                     if progress is not None:
-                        # 审计第十轮：finally 关题失败已标 close_failed（清道夫负责补关
-                        # 泄漏容器）——此处无条件 done 会抹掉它，补关永久失联
+                        # finally 关题失败已标 close_failed；不能抹掉待补关状态。
                         if progress.state_of(result.unique_code) != "close_failed":
                             progress.mark(
-                                result.unique_code, "done",
+                                result.unique_code, "abandoned",
                                 flags=result.flags_correct, awarded=result.awarded,
+                                submitted_flag_hashes=result.submitted_flag_hashes,
+                                complete=False,
                             )
                         else:
                             LOG.warning(
@@ -893,11 +940,20 @@ def _pending_new_flags(flags: list[str], flags_found: list[str], result: Any = N
     batch_folded: set[str] = set()
     for f in flags:
         folded = f.lower()
-        if f in flags_found or folded in seen_folded or folded in batch_folded:
+        if (
+            f in flags_found or folded in seen_folded or folded in batch_folded
+            or (result is not None and hashlib.sha256(f.encode("utf-8")).hexdigest()
+                in getattr(result, "submitted_flag_hashes", set()))
+        ):
             continue
         batch_folded.add(folded)
         out.append(f)
     return out
+
+
+def _confirmed_complete(result: ChallengeResult, platform_completed: bool = False) -> bool:
+    """只有平台完成标志或已确认的全旗数才能结束题目。候选旗不参与判定。"""
+    return platform_completed or (result.flag_count > 0 and result.flags_correct >= result.flag_count)
 
 
 def _run_single_challenge(
@@ -923,6 +979,7 @@ def _run_single_challenge(
     description = result.description
     started_at = time.monotonic()
     status: str | None = None  # 函数返回状态：None=完成/关闭；"deferred"=保留进度放回队尾
+    platform_completed = False
     difficulty = str(getattr(ch, "difficulty", "") or "").lower()
     timeout_seconds = DIFFICULTY_TIMEOUTS.get(difficulty, challenge_timeout_seconds)
     engine = engine_factory()
@@ -944,17 +1001,30 @@ def _run_single_challenge(
         result.started = True
         started_this_round = True
         if progress is not None:
-            progress.mark(code, "started")
+            progress.mark(code, "started", flags=result.flags_correct, awarded=result.awarded)
         container_addr = challenge_addr(started)
         origin = ", ".join(str(addr) for addr in container_addr) or code
-        # r9 波次回访配套：平台重建容器后地址可能漂移（R6 实锤 .97→.96）——星图 origin
-        # 存的是旧地址，不处理则回访 agent 全程打空靶。漂移即注入运维提示告知新地址。
-        if result.last_origin and result.last_origin != origin and project_id:
-            try:
-                engine.create_hint(project_id, f"[运维提示·地址漂移] 靶机已重建，新地址：{origin}（旧地址 {result.last_origin} 已失效，全部探测用新地址）")
-                LOG.warning("challenge addr drifted code=%s old=%s new=%s（已注入新地址提示）", code, result.last_origin, origin)
-            except Exception:  # noqa: BLE001
-                pass
+        # 旧项目保存的是旧实例的 facts/steps。地址变化（或旧地址未知）时直接换干净
+        # 项目，不能靠给旧图添加提示来覆盖已经调度中的旧目标行动。
+        previous_project_id = result.project_id
+        address_drifted = bool(previous_project_id and result.last_origin != origin)
+        if address_drifted:
+            LOG.warning(
+                "challenge addr drifted code=%s old=%s new=%s（弃用旧项目 %s）",
+                code, result.last_origin or "<unknown>", origin, previous_project_id,
+            )
+            for method in ("stop_project", "delete_project"):
+                try:
+                    fn = getattr(engine, method, None)
+                    if callable(fn):
+                        fn(previous_project_id)
+                except Exception as exc:  # noqa: BLE001 —— 清理失败也绝不复用旧图
+                    LOG.warning("old project cleanup failed code=%s method=%s error=%s", code, method, exc)
+            result.project_id = None
+            result.kb_approach_draft = None
+            result.facts_count = 0
+            result.facts_count_at_defer = -1
+            result.flags_correct_at_defer = result.flags_correct
         result.last_origin = origin
         goal = build_goal_text(description, ch)
         # defer 续跑：复用原引擎项目（星图/会话进度保留），否则新建。
@@ -993,7 +1063,7 @@ def _run_single_challenge(
                 goal=goal,
             )
             # V2-6：新题注入知识库思路参考（仅新项目；defer 复用项目已注入过）
-            if result.kb_entry_text:
+            if result.kb_entry_text and not address_drifted:
                 try:
                     create_fact_fn = getattr(engine, "create_fact", None)
                     if callable(create_fact_fn):
@@ -1009,7 +1079,7 @@ def _run_single_challenge(
                 except Exception as exc:  # noqa: BLE001
                     LOG.warning("kb inject failed code=%s error=%s（继续）", code, exc)
             # V4：同题型邻居经验注入（举一反三）——无精确条目的题也能吃到同类打法参考
-            if result.kb_neighbor_texts:
+            if result.kb_neighbor_texts and not address_drifted:
                 try:
                     create_fact_fn = getattr(engine, "create_fact", None)
                     if callable(create_fact_fn):
@@ -1024,7 +1094,7 @@ def _run_single_challenge(
                 except Exception as exc:  # noqa: BLE001
                     LOG.warning("neighbor inject failed code=%s error=%s（继续）", code, exc)
             # V5：失败经验库注入——同题型死路避坑提示（负记忆）
-            if result.kb_deadend_texts:
+            if result.kb_deadend_texts and not address_drifted:
                 try:
                     create_fact_fn = getattr(engine, "create_fact", None)
                     if callable(create_fact_fn):
@@ -1038,7 +1108,7 @@ def _run_single_challenge(
                 except Exception as exc:  # noqa: BLE001
                     LOG.warning("deadend inject failed code=%s error=%s（继续）", code, exc)
             # V7 Constellation：同网段侦察共享卡注入（多目标场景免重复扫描）
-            if project_id and origin:
+            if project_id and origin and not address_drifted:
                 try:
                     shared = _constellation_text(origin)
                     if shared:
@@ -1053,6 +1123,7 @@ def _run_single_challenge(
 
         # 等待引擎归航的同时，周期扫描星图 flag 并立即提交（发现即提交，不等归航）
         done = False
+        engine_completed = False
         project_gone = False  # 提前收尾删了引擎项目 → 跳过后续取 flag（避免 404）
         # 单题最长连续分析：defer_after_seconds（默认 45 分钟）无结果 → 保留进度放回队尾
         # defer 梯子保持 V2-5 原精调逻辑（首攻缩短/第二发恢复完整梯子）——
@@ -1112,7 +1183,7 @@ def _run_single_challenge(
                 flags = collect_flags_from_facts(fact_descs, [result.description])
                 pending = _pending_new_flags(flags, result.flags_found, result)
                 for flag in pending:
-                    _submit_flag_safely(client, code, flag, result, started_at, engine=engine)
+                    _submit_flag_safely(client, code, flag, result, started_at, engine=engine, progress=progress)
             except Exception:  # noqa: BLE001 —— 引擎 API 偶发失败不中断等待
                 pass
             stalled_no_new_flag = len(result.flags_found) == flags_at_window_start
@@ -1156,13 +1227,14 @@ def _run_single_challenge(
                     fresh = {c.unique_code: c for c in call_with_retry(lambda: client.list_challenges(), "list_challenges", retries=2)}
                     current = fresh.get(code)
                     if current is not None and getattr(current, "is_completed", False):
+                        platform_completed = True
                         LOG.info("challenge completed on platform side code=%s 提前收尾并停引擎项目", code)
                         # 先收最后一批 flag（多 flag 题可能还有未提交的），再删引擎项目
                         try:
                             last_descs = engine.list_fact_descriptions(project_id)
                             last_flags = collect_flags_from_facts(last_descs, [result.description])
                             for flag in _pending_new_flags(last_flags, result.flags_found, result):
-                                _submit_flag_safely(client, code, flag, result, started_at, engine=engine)
+                                _submit_flag_safely(client, code, flag, result, started_at, engine=engine, progress=progress)
                             if last_descs:
                                 # V2-6：删项目前留末段天枢（解出后沉淀知识库）；注入记忆剔除
                                 result.kb_approach_draft = "；".join(_sediment_fact_filter(last_descs)[-3:])[:800]
@@ -1194,61 +1266,18 @@ def _run_single_challenge(
                 except Exception:  # noqa: BLE001
                     pass
             if engine.wait_project(project_id, timeout_seconds=0.5):
-                if not result.flags_correct and not result.flags_found:
-                    # 审计28轮：decide 自主关题但全程 0 旗（r7 c-07 实例）——
-                    # 引擎 completed 直接标 done 会让整题本轮沉没。转 not-done
-                    # 分支按 defer 语义收尾（回队续跑/预算耗尽才放弃），与
-                    # 45min 空转题同待遇；已有旗（flags_correct>0）仍正常收卷。
-                    LOG.warning(
-                        "engine completed with zero flags code=%s（转 defer 回队，不沉没）",
-                        code,
-                    )
-                    break
-                done = True
+                engine_completed = True
                 break
             time.sleep(flag_poll_seconds)
         if not done:
-            # 引擎未完成：最后收一次 flag
+            # 引擎归航/窗口结束：最后收一次 flag。候选旗不代表完成。
             flags = collect_flags_from_facts(engine.list_fact_descriptions(project_id), [goal])
             pending = _pending_new_flags(flags, result.flags_found, result)
             for flag in pending:
-                _submit_flag_safely(client, code, flag, result, started_at, engine=engine)
-            expected = result.flag_count or 1
-            remaining_flags = expected - result.flags_correct
-            if result.flags_found and (remaining_flags <= 0 or result.flag_count <= 0):
-                # 旗已收满，或旗数未知（flag_count=0，含"只交了错旗"）——保守收割正常
-                # 关题。修复：此前未知旗数+全错旗（flags_correct=0）会落进多旗 defer
-                # 分支反复回队烧窗口（审计 2026-08-28：注释宣称的保守分支不可达）。
-                LOG.info("challenge closed all flags collected code=%s flags=%s", code, result.flags_found)
-                continue_flag_wait = False
-            elif result.flags_found and remaining_flags > 0 and result.flag_count > 0 and defer_after_seconds > 0:
-                # V9 多旗收割：部分得手但旗未收满（b 系 4-6 旗大分题）——原逻辑
-                # 此处直接关题放弃剩余旗（b-02 六旗题单题曾漏上千分）。改为 defer
-                # 保留星图进度回队续攻；预算由 _work 按 flags_correct 扩展。
-                LOG.info(
-                    "challenge deferred for remaining flags code=%s flags=%s/%s（保留进度回队收割）",
-                    code, len(result.flags_found), expected,
-                )
-                project_gone = True
-                continue_flag_wait = False
-                status = "deferred"
-                return status
-            elif result.flags_found:
-                # 已知多旗但 defer 关闭（defer_after_seconds=0）或多旗条件不满足：关题
-                LOG.info("challenge closed with partial flags code=%s flags=%s", code, result.flags_found)
-                continue_flag_wait = False
-            else:
-                # 45 分钟无任何结果：保留引擎项目进度放回队尾（不删项目、不标 done）
-                LOG.warning(
-                    "challenge deferred code=%s difficulty=%s 连续分析 %ss 无结果（保留进度放回队尾）",
-                    code, difficulty, effective_timeout,
-                )
-                project_gone = True
-                continue_flag_wait = False
-                status = "deferred"
-                return status
-        else:
-            continue_flag_wait = True
+                _submit_flag_safely(client, code, flag, result, started_at, engine=engine, progress=progress)
+        # 仅引擎归航且已有正确旗时保留短落图窗口；零正确旗的错误候选与零候选
+        # 直接转 defer，避免 completed 星图空转 90 秒。窗口结束也不为候选延时。
+        continue_flag_wait = engine_completed and result.flags_correct > 0 and not _confirmed_complete(result)
 
         # 从星图收集 flag 并统一提交（引擎完成后再等一个短窗口）
         deadline = time.monotonic() + (DONE_FLAG_WAIT_SECONDS if continue_flag_wait and not project_gone else 0)
@@ -1261,8 +1290,27 @@ def _run_single_challenge(
                 time.sleep(flag_poll_seconds)
                 continue
             for flag in pending:
-                _submit_flag_safely(client, code, flag, result, started_at, engine=engine)
+                _submit_flag_safely(client, code, flag, result, started_at, engine=engine, progress=progress)
             time.sleep(flag_poll_seconds)
+        if not _confirmed_complete(result, platform_completed):
+            # 平台状态可能在最后一批提交后才刷新；只以平台完成或已确认全旗数收口。
+            try:
+                fresh = call_with_retry(lambda: client.list_challenges(), "list_challenges", retries=2)
+                platform_completed = any(
+                    (getattr(item, "unique_code", None) or getattr(item, "code", "")) == code
+                    and bool(getattr(item, "is_completed", False))
+                    for item in fresh
+                )
+            except Exception as exc:  # noqa: BLE001 —— 无法核验时保持未完成
+                LOG.warning("completion check failed code=%s error=%s（按未完成续跑）", code, exc)
+        if not _confirmed_complete(result, platform_completed):
+            LOG.info(
+                "challenge deferred incomplete code=%s correct=%s/%s candidates=%s",
+                code, result.flags_correct, result.flag_count or "?", len(result.flags_found),
+            )
+            project_gone = True
+            status = "deferred"
+            return status
     except TaskFinishedError:
         raise
     except SlotBusyError:
@@ -1297,9 +1345,8 @@ def _run_single_challenge(
                         pass
             except Exception:  # noqa: BLE001
                 pass
-        # defer：保留引擎项目进度（不删），仅关平台题释放名额；progress 保持
-        # started/不标 done，队列轮转后重新 start 直接续跑同项目
-        deferred = status == "deferred"
+        # defer：保留引擎项目进度，仅关平台容器释放名额；progress 保持
+        # started/不标 done，队列轮转后重新 start 直接续跑同项目。
         if started_this_round:
             closed = False
             for attempt in range(3):
@@ -1312,13 +1359,16 @@ def _run_single_challenge(
                     time.sleep(5)
             if not closed:
                 LOG.error("close_challenge exhausted retries code=%s（平台活跃名额可能泄漏，需人工关闭）", code)
-            if progress is not None and not deferred:
-                # 关题失败不标 done：close_failed 保留在进度文件里便于事后排查/补关
+            if progress is not None:
+                confirmed = _confirmed_complete(result, platform_completed)
+                # close 是释放平台名额，不等同解题完成。补关也必须保留此区分。
                 progress.mark(
                     code,
-                    "done" if closed else "close_failed",
+                    "close_failed" if not closed else ("done" if confirmed else "started"),
                     flags=result.flags_correct,
                     awarded=result.awarded,
+                    submitted_flag_hashes=result.submitted_flag_hashes,
+                    complete=confirmed,
                 )
         engine.stop()
 
@@ -1901,21 +1951,19 @@ _watchdog_seen_fresh = [False]
 
 
 def _reap_failed_closes(client: BenchmarkClient, progress: Any, active: dict | None = None) -> None:
-    """自愈②：补试历史 close_failed 题的容器关闭，成功转 done（释放平台名额记忆）。
+    """自愈②：补试历史 close_failed 题的容器关闭，保持原完成判定。
 
     B2 修复：跳过当前活跃（active）的题——TransientNet 重进后该题可能正在解题，
     清道夫误关其容器等于杀活题。
     """
     try:
-        for code, state in list(progress._data.items()):
-            if state != "close_failed":
-                continue
+        for code, complete in progress.pending_closes():
             if active and code in active:
                 continue  # B2：活跃题正在打，不能关
             closed = _close_challenge_quiet(client, code)
             if closed:
-                progress.mark(code, "done")
-                LOG.info("self-heal: 补关泄漏容器成功 code=%s（转 done）", code)
+                progress.mark(code, "done" if complete else "started", complete=complete)
+                LOG.info("self-heal: 补关泄漏容器成功 code=%s complete=%s", code, complete)
     except Exception as exc:  # noqa: BLE001
         LOG.warning("close reaper failed error=%s（下轮再试）", exc)
 
@@ -2307,10 +2355,20 @@ def _submit_flag_safely(
     result: ChallengeResult,
     started_at: float | None = None,
     engine: Any = None,
+    progress: ProgressStore | None = None,
 ) -> None:
     flag = (flag or "").strip()  # V2-3：提交前清洗空白
     if not flag:
         return
+    flag_hash = hashlib.sha256(flag.encode("utf-8")).hexdigest()
+
+    def _save_submission() -> None:
+        result.submitted_flag_hashes.add(flag_hash)
+        if progress is not None:
+            progress.mark(
+                code, "started", flags=result.flags_correct, awarded=result.awarded,
+                submitted_flag_hashes=result.submitted_flag_hashes,
+            )
 
     def _submit_once(value: str):
         try:
@@ -2319,6 +2377,7 @@ def _submit_flag_safely(
             if type(exc).__name__ == "DuplicateSubmit":
                 LOG.info("flag duplicate skip code=%s flag=%s", code, value)
                 result.flags_found.append(value)
+                _save_submission()
                 return "dup"
             LOG.warning("submit_flag failed code=%s flag=%s error=%s", code, value, exc)
             return None
@@ -2332,17 +2391,27 @@ def _submit_flag_safely(
             result.submit_outcomes = result.submit_outcomes[-20:]
         awarded = int(getattr(res, "awarded", 0) or 0)
         cumulative = int(getattr(res, "cumulative_score", 0) or 0)
+        previous_correct = result.flags_correct
         if correct:
-            result.flags_correct += 1
+            reported_correct = getattr(res, "correct_flag_count", None)
+            if reported_correct is None:
+                result.flags_correct += 1
+            else:
+                # 平台计数是权威值：幂等回复可能仍 correct=True，但计数未增长。
+                result.flags_correct = max(result.flags_correct, int(reported_correct or 0))
+            reported_total = int(getattr(res, "total_flag_count", 0) or 0)
+            if reported_total > 0:
+                result.flag_count = max(result.flag_count, reported_total)
             if result.first_flag_seconds is None and started_at is not None:
                 result.first_flag_seconds = round(time.monotonic() - started_at, 1)
         else:
             result.wrong_count += 1  # V2-2：近失信号（回队插队首 + 尾段优先重攻）
             result.rejected_flag_tails.add(value[-6:])  # 已判错尾号入禁交名单（诱饵变体拦截）
-        if awarded:
+        if awarded and (not correct or result.flags_correct > previous_correct):
             result.awarded += awarded
         if cumulative:
             result.cumulative_score = cumulative
+        _save_submission()
         LOG.info(
             "flag submitted code=%s flag=%s correct=%s awarded=%s progress=%s/%s",
             code, value, correct, awarded,

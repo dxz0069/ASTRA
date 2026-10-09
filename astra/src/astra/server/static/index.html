@@ -217,7 +217,18 @@
             </template>
             <div class="sec-t" x-show="current.findings && current.findings.length">客星（Finding）</div>
             <template x-for="fd in current.findings||[]" :key="fd.id">
-              <div class="kv"><span class="k mono" x-text="fd.id"></span><span class="v" x-text="fd.description"></span></div>
+              <div class="kv finding-entry">
+                <span class="k mono" x-text="fd.id"></span>
+                <div class="v">
+                  <div class="finding-head">
+                    <span class="badge finding-status" :class="findingStatusClass(fd)" x-text="findingStatusText(fd)"></span>
+                    <span class="finding-priority" x-show="fd.high_value">高价值线索</span>
+                  </div>
+                  <div x-text="fd.description"></div>
+                  <div class="finding-summary" x-show="fd.verification_summary" x-text="fd.verification_summary"></div>
+                  <div class="finding-meta" x-show="findingLinks(fd)" x-text="findingLinks(fd)"></div>
+                </div>
+              </div>
             </template>
           </div>
         </template>

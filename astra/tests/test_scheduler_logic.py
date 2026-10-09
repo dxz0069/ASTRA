@@ -8,7 +8,7 @@ from astra.dispatcher.scheduler.loop import DispatcherLoop
 from astra.dispatcher.scheduler.worker_select import choose_worker
 from astra.server.models import Fact, ProjectSummary
 
-from conftest import make_config, make_step, make_project
+from conftest import FakeClient, make_config, make_step, make_project
 
 
 def _loop() -> DispatcherLoop:
@@ -150,6 +150,92 @@ def test_new_fact_dispatches_reason_before_unclaimed_explore_intent() -> None:
 
     assert loop._try_dispatch_project(_summary("proj_001", "active"))
     assert dispatched == [("decide", "facts:3->4")]
+
+
+def test_pending_strike_preempts_decide_and_ordinary_execute() -> None:
+    loop = _loop()
+    loop.config = make_config()
+    loop.futures = {}
+    normal = make_step("s-normal").model_copy(update={"worker": None, "created_at": "2026-01-01T00:00:04Z"})
+    strike = make_step("s-strike").model_copy(update={
+        "worker": None, "task_type": "strike", "finding_id": "fnd001",
+        "created_at": "2026-01-01T00:00:03Z",
+    })
+    project = make_project(steps=[normal, strike])
+    project.facts.append(Fact(id="f002", description="new"))
+    loop.decide_checkpoints["proj_001"] = DecideCheckpoint(fact_count=3, hint_count=1, open_step_count=2)
+    loop.container_manager = type("Containers", (), {"container_name": lambda _self, project_id: project_id})()
+    loop.client = type("Client", (), {
+        "get_project": lambda _self, _project_id: project,
+        "export_project": lambda _self, _project_id: "graph",
+    })()
+    dispatched: list[str] = []
+    loop._dispatch_strike = lambda *_args: dispatched.append("strike") or True
+    loop._dispatch_decide = lambda *_args: dispatched.append("decide") or True
+    loop._dispatch_execute = lambda *_args: dispatched.append("execute") or True
+
+    assert loop._try_dispatch_project(_summary("proj_001", "active"))
+    assert dispatched == ["strike"]
+
+
+def test_strike_uses_dedicated_worker_and_execute_fallback() -> None:
+    from astra.dispatcher.tasks.strike import run_strike_task
+
+    for dedicated in (True, False):
+        loop = _loop()
+        config = make_config()
+        execute = config.workers[0].model_copy(update={"name": "execute", "task_types": ["execute"]})
+        strike_worker = config.workers[0].model_copy(update={"name": "strike", "task_types": ["strike"]})
+        loop.config = config.model_copy(update={"workers": [execute, strike_worker] if dedicated else [execute]})
+        loop.futures = {}
+        project = make_project()
+        step = make_step().model_copy(update={"worker": None, "task_type": "strike", "finding_id": "fnd001"})
+        client = FakeClient(project)
+        loop.client = client
+        loop.container_manager = object()
+        submissions: list[tuple[object, tuple[object, ...]]] = []
+
+        class Executor:
+            def submit(self, fn, *args):
+                submissions.append((fn, args))
+                return Future()
+
+        loop.executor = Executor()
+        assert loop._dispatch_strike(project, "graph", step)
+        assert len(submissions) == 1
+        assert submissions[0][0] is run_strike_task
+        assert submissions[0][1][6].name == ("strike" if dedicated else "execute")
+        running = next(iter(loop.futures.values()))
+        assert running.task_type == "strike"
+        assert running.step_id == step.id
+
+
+def test_busy_dedicated_strike_worker_waits_without_execute_fallback() -> None:
+    loop = _loop()
+    config = make_config()
+    execute = config.workers[0].model_copy(update={"name": "execute", "task_types": ["execute"]})
+    strike = config.workers[0].model_copy(update={"name": "strike", "task_types": ["strike"]})
+    loop.config = config.model_copy(update={"workers": [execute, strike]})
+    loop.futures = {Future(): RunningTask("other", "strike", "strike", TaskCancellation())}
+    loop.client = FakeClient(make_project())
+    step = make_step().model_copy(update={"worker": None, "task_type": "strike", "finding_id": "fnd001"})
+
+    assert not loop._dispatch_strike(loop.client.project, "graph", step)
+    assert loop.client.concluded == []
+
+
+def test_strike_fallback_observes_strike_failure_cooldown(monkeypatch) -> None:
+    loop = _loop()
+    config = make_config()
+    worker = config.workers[0].model_copy(update={"task_types": ["execute"]})
+    loop.config = config.model_copy(update={"workers": [worker]})
+    loop.futures = {}
+    loop.worker_rejected_until[("proj_001", "strike", worker.name)] = 120.0
+    monkeypatch.setattr("astra.dispatcher.scheduler.loop.time.time", lambda: 100.0)
+
+    selection = loop._select_worker("proj_001", "execute", rejection_task_type="strike")
+    assert selection.worker is None
+    assert selection.blocked_rejected == [f"{worker.name}(20.0s)"]
 
 
 def test_initial_enabled_project_without_bootstrap_worker_dispatches_reason() -> None:

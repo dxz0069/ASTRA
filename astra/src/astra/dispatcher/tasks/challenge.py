@@ -108,7 +108,7 @@ def run_challenge_task(
             },
         )
         session = driver.prepare_session()
-        command = driver.build_execute(worker, prompt, session)
+        command = driver.build_challenge(worker, prompt, session)
         result = run_worker_process_with_retry(
             container_manager,
             container_name,
@@ -119,6 +119,7 @@ def run_challenge_task(
             lease=lease,
             cancellation=cancellation,
             runner=run_worker_process,
+            project_id=project.project.id,
         )
         if cancel_reason(result, cancellation) is not None or did_timeout(result) or result.returncode != 0:
             LOG.warning(

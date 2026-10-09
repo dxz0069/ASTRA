@@ -5,7 +5,7 @@ Less is More 是其哲学口号，submit_fact 是其机制命名，cairn/l3yx �
 ——ASTRA 是独立产品，产品面一律用自有表述（星图/星图架构/星图导航/自证入图）。
 
 扫描范围（产品面）：astra/src、astra/tests、container/astra_runner、
-container/AGENTS.md、README.md、note/。
+container/AGENTS.md、README.md、note/release。研究草稿不属于产品面。
 豁免：docs/ 下的竞品调研文档（引用其公众号原文的研究记录，含文件名，
 如"榜首闭源架构解读与FGS提炼.md"——note 中指向这些文件的路径引用同步豁免）；
 FGSM（对抗样本学术术语 Fast Gradient Sign Method）。
@@ -26,6 +26,7 @@ SCAN_DIRS = [
     "astra/src",
     "astra/tests",
     "container/astra_runner",
+    "note/release",
 ]
 SCAN_FILES = [
     "container/AGENTS.md",
@@ -67,8 +68,6 @@ def _iter_product_files():
         path = REPO_ROOT / rel
         if path.exists():
             yield path
-    for path in (REPO_ROOT / "note").rglob("*.md"):
-        yield path
 
 
 def test_product_surface_has_no_upstream_coined_terms() -> None:
