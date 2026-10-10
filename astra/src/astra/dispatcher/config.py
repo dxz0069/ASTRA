@@ -30,7 +30,7 @@ WORKER_ENV_KEYS: dict[WorkerType, tuple[str, ...]] = {
 # Pi tool schemas are intentionally kept small by default.  The profile is
 # optional so existing dispatch files continue to work with the minimal
 # phase-isolated set.
-PI_TOOL_PROFILES = frozenset({"minimal", "full"})
+PI_TOOL_PROFILES = frozenset({"minimal", "full", "vuln"})
 
 DEFAULT_PROMPT_REQUIRED_TOKENS: dict[str, tuple[str, ...]] = {
     "decide.md": ("{graph_yaml}", "{fact_ids}", "{open_steps}", "{max_steps}"),
@@ -43,6 +43,15 @@ DEFAULT_PROMPT_REQUIRED_TOKENS: dict[str, tuple[str, ...]] = {
 }
 
 PROMPT_REQUIRED_TOKENS_BY_GROUP: dict[str, dict[str, tuple[str, ...]]] = {
+    "vuln": {
+        "decide.md": ("{graph_yaml}", "{fact_ids}", "{open_steps}", "{max_steps}"),
+        "execute.md": ("{graph_yaml}", "{step_id}", "{step_description}"),
+        "execute_conclude.md": ("{graph_yaml}", "{step_id}", "{step_description}"),
+        "strike.md": ("{graph_yaml}", "{step_id}", "{finding_id}", "{finding_description}"),
+        "bootstrap.md": ("{origin}", "{goal}", "{hints}"),
+        "bootstrap_conclude.md": ("{origin}", "{goal}", "{hints}"),
+        "challenge.md": ("{graph_yaml}", "{claim}", "{claim_context}"),
+    },
     "mock": {
         "decide.md": ("{fact_ids}", "{open_steps}", "{max_steps}"),
         "execute.md": ("{step_id}",),
@@ -246,8 +255,30 @@ class WorkerConfig(BaseModel):
             profile = self.env.get("PI_TOOL_PROFILE", "minimal")
             if profile not in PI_TOOL_PROFILES:
                 raise ValueError(
-                    f"worker {self.name} PI_TOOL_PROFILE must be one of: minimal, full"
+                    f"worker {self.name} PI_TOOL_PROFILE must be one of: minimal, full, vuln"
                 )
+            if profile == "vuln":
+                from astra.dispatcher.vuln_scope import validate_scope_json
+
+                local_test = self.env.get("ASTRA_VULN_LOCAL_TEST") == "1"
+                if self.env.get("ASTRA_VULN_LOCAL_TEST", "0") not in {"0", "1"}:
+                    raise ValueError("ASTRA_VULN_LOCAL_TEST must be 0 or 1")
+                validate_scope_json(self.env.get("ASTRA_VULN_SCOPE_JSON", ""), local_test=local_test)
+                if local_test:
+                    from urllib.parse import urlsplit
+                    import ipaddress
+
+                    model_host = urlsplit(self.env["PI_BASE_URL"]).hostname
+                    try:
+                        loopback_model = model_host is not None and ipaddress.ip_address(model_host).is_loopback
+                    except ValueError:
+                        loopback_model = False
+                    if not loopback_model:
+                        raise ValueError("local test requires a loopback model endpoint")
+                else:
+                    gateway = self.env.get("ASTRA_VULN_GATEWAY_URL", "")
+                    if not gateway.startswith("https://") or gateway != self.env["PI_BASE_URL"]:
+                        raise ValueError("vuln profile requires PI_BASE_URL matching an explicit HTTPS gateway URL")
         if self.type == "mock":
             resolve_mock_behavior(self.name, self.env)
         return self
@@ -302,6 +333,21 @@ class DispatchConfig(BaseModel):
             raise ValueError("workers must not be empty")
         if self.runtime.max_project_workers > self.runtime.max_workers:
             raise ValueError("max_project_workers cannot exceed max_workers")
+        if self.runtime.execution == "local" and any(
+            worker.env.get("PI_TOOL_PROFILE") == "vuln" and worker.env.get("ASTRA_VULN_LOCAL_TEST") != "1"
+            for worker in self.workers
+        ):
+            raise ValueError("vuln profile requires Docker execution outside local tests")
+        if self.runtime.execution != "local" and any(
+            worker.env.get("PI_TOOL_PROFILE") == "vuln" and worker.env.get("ASTRA_VULN_LOCAL_TEST") != "0"
+            for worker in self.workers
+        ):
+            raise ValueError("production vuln profile requires ASTRA_VULN_LOCAL_TEST=0")
+        if any(worker.env.get("PI_TOOL_PROFILE") == "vuln" for worker in self.workers):
+            if self.runtime.prompt_group != "vuln":
+                raise ValueError("vuln profile requires vuln prompt group")
+            if any(worker.type != "pi" or worker.env.get("PI_TOOL_PROFILE") != "vuln" for worker in self.workers):
+                raise ValueError("vuln dispatch cannot mix unscoped workers")
         return self
 
     @classmethod

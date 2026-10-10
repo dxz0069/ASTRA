@@ -1,0 +1,39 @@
+# Local loopback smoke test only. Never copy ASTRA_VULN_LOCAL_TEST=1 into a live run.
+server: http://127.0.0.1:8000
+runtime:
+  max_workers: 1
+  max_running_projects: 1
+  max_project_workers: 1
+  interval: 5
+  healthcheck_timeout: 10
+  prompt_group: vuln
+  execution: local
+tasks:
+  bootstrap:
+    timeout: 60
+    conclude_timeout: 15
+  decide:
+    timeout: 30
+    max_steps: 1
+  execute:
+    timeout: 60
+    conclude_timeout: 15
+container:
+  image: unused-in-local-mode
+  network_mode: none
+  completed_action: stop
+workers:
+  - name: vuln-local-test
+    type: pi
+    task_types: [bootstrap, decide, execute, strike]
+    max_running: 1
+    priority: 0
+    env:
+      PI_MODEL: local-test-model
+      PI_BASE_URL: http://127.0.0.1:9000/v1
+      PI_API_KEY: synthetic-key
+      PI_PROVIDER_API: openai-completions
+      PI_TOOL_PROFILE: vuln
+      ASTRA_VULN_LOCAL_TEST: "1"
+      ASTRA_VULN_SCOPE_JSON: >-
+        {"project_code":"PROJ2026_AISRC01","not_before":"2026-01-01T00:00:00Z","not_after":"2027-01-01T00:00:00Z","targets":[{"origin":"http://127.0.0.1:8080","path_prefixes":["/allowed"],"methods":["GET"]}]}

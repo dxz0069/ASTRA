@@ -30,6 +30,7 @@ class PiDriver(WorkerDriver):
     _FULL_TOOLS = "read,write,edit,bash,grep,find,ls"
     _EXECUTE_TOOLS = "read,write,bash,ls"
     _READONLY_TOOLS = "read"
+    _VULN_TOOLS = "read,scoped_request"
 
     def build_healthcheck(self, worker: WorkerConfig) -> list[str]:
         env = worker.env
@@ -159,6 +160,7 @@ class PiDriver(WorkerDriver):
     def _wrap_with_models(
         self, worker: WorkerConfig, pi_argv: list[str], *, enable_tools: bool = True, read_only: bool = False
     ) -> list[str]:
+        vuln_profile = worker.env.get("PI_TOOL_PROFILE") == "vuln"
         argv = [
             "--no-extensions",
             "--no-skills",
@@ -166,6 +168,8 @@ class PiDriver(WorkerDriver):
             "--no-themes",
             "--no-context-files",
         ]
+        if vuln_profile:
+            argv.append("--no-mcp")
         if enable_tools:
             argv.extend(["--tools", self._tool_list(worker, read_only=read_only)])
         if sys.platform == "win32":
@@ -189,20 +193,30 @@ class PiDriver(WorkerDriver):
                 base_dir.mkdir(parents=True, exist_ok=True)
                 (base_dir / "sessions").mkdir(exist_ok=True)
                 (base_dir / "models.json").write_text(self._models_json(worker), encoding="utf-8")
+                if vuln_profile and enable_tools:
+                    extension = base_dir / "vuln_scope.js"
+                    extension.write_text(self._vuln_extension_source(), encoding="utf-8")
+                    argv.extend(["--extension", str(extension)])
             except OSError as exc:
                 raise RuntimeError(
                     f"pi worker 目录/models.json 写入失败 dir={base_dir}（检查磁盘空间与权限）: {exc}"
                 ) from exc
             return ["node", cli_js, *argv, *pi_argv]
-        script = (
-            'agent_dir="$1"\n'
-            'models_json="$2"\n'
-            "shift 2\n"
-            'mkdir -p "$agent_dir"\n'
-            'mkdir -p "$agent_dir/sessions"\n'
-            'printf "%s" "$models_json" > "$agent_dir/models.json"\n'
-            'exec env PI_CODING_AGENT_DIR="$agent_dir" pi "$@"\n'
-        )
+        script_lines = [
+            'agent_dir="$1"',
+            'models_json="$2"',
+            'extension_source="$3"' if vuln_profile and enable_tools else '',
+            'shift 3' if vuln_profile and enable_tools else 'shift 2',
+            'mkdir -p "$agent_dir"',
+            'mkdir -p "$agent_dir/sessions"',
+            'printf "%s" "$models_json" > "$agent_dir/models.json"',
+        ]
+        if vuln_profile and enable_tools:
+            script_lines.append('printf "%s" "$extension_source" > "$agent_dir/vuln_scope.js"')
+        script_lines.append('exec env PI_CODING_AGENT_DIR="$agent_dir" pi "$@"')
+        script = "\n".join(line for line in script_lines if line) + "\n"
+        if vuln_profile and enable_tools:
+            argv.extend(["--extension", f"{self._agent_dir(worker)}/vuln_scope.js"])
         return [
             shutil.which("sh") or "/bin/sh",
             "-lc",
@@ -210,6 +224,7 @@ class PiDriver(WorkerDriver):
             "--",
             self._agent_dir(worker),
             self._models_json(worker),
+            *([self._vuln_extension_source()] if vuln_profile and enable_tools else []),
             *argv,
             *pi_argv,
         ]
@@ -219,9 +234,15 @@ class PiDriver(WorkerDriver):
         """Select Pi schemas by invocation phase, independent of worker capabilities."""
         if read_only:
             return cls._READONLY_TOOLS
+        if worker.env.get("PI_TOOL_PROFILE") == "vuln":
+            return cls._VULN_TOOLS
         if worker.env.get("PI_TOOL_PROFILE", "minimal") == "full":
             return cls._FULL_TOOLS
         return cls._EXECUTE_TOOLS
+
+    @staticmethod
+    def _vuln_extension_source() -> str:
+        return Path(__file__).with_name("vuln_scope.js").read_text(encoding="utf-8")
 
     @staticmethod
     def _pi_cli_js() -> str:
