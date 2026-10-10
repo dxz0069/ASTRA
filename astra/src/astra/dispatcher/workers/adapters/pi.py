@@ -159,6 +159,7 @@ class PiDriver(WorkerDriver):
     def _wrap_with_models(
         self, worker: WorkerConfig, pi_argv: list[str], *, enable_tools: bool = True, read_only: bool = False
     ) -> list[str]:
+        offline_profile = worker.env.get("PI_OFFLINE_MODEL_POLICY", "disabled") != "disabled"
         argv = [
             "--no-extensions",
             "--no-skills",
@@ -166,6 +167,10 @@ class PiDriver(WorkerDriver):
             "--no-themes",
             "--no-context-files",
         ]
+        if offline_profile:
+            # --tools is not an MCP denylist.  Keep the offline model profile
+            # from discovering or invoking a configured MCP server.
+            argv.append("--no-mcp")
         if enable_tools:
             argv.extend(["--tools", self._tool_list(worker, read_only=read_only)])
         if sys.platform == "win32":

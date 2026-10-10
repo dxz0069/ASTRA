@@ -6,6 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from astra.dispatcher.config import DispatchConfig
+from astra.dispatcher.workers.adapters.pi import PiDriver
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -22,6 +23,12 @@ def test_secsophon_example_is_single_local_pi_worker() -> None:
     assert config.runtime.offline_model_policy == "loopback"
     assert len(config.workers) == 1
     assert set(config.workers[0].task_types) == {"bootstrap", "decide", "execute", "strike"}
+
+
+def test_offline_profile_disables_mcp_discovery() -> None:
+    config = DispatchConfig.load(ROOT / "dispatch.secsophon.example.yaml")
+    argv = PiDriver().build_execute(config.workers[0], "health check", None).argv
+    assert "--no-mcp" in argv
 
 
 @pytest.mark.parametrize("url", [
@@ -44,6 +51,7 @@ def test_private_lan_requires_explicit_policy_and_allows_rfc1918() -> None:
     with pytest.raises(ValidationError, match="offline_model_policy"):
         DispatchConfig.model_validate(payload)
     payload["runtime"]["offline_model_policy"] = "private_lan"
+    payload["workers"][0]["env"]["PI_OFFLINE_MODEL_POLICY"] = "private_lan"
     assert DispatchConfig.model_validate(payload).runtime.offline_model_policy == "private_lan"
 
 

@@ -314,6 +314,10 @@ class DispatchConfig(BaseModel):
                     raise ValueError("offline_model_policy requires Pi workers only")
                 if not _is_local_model_url(worker.env["PI_BASE_URL"], self.runtime.offline_model_policy):
                     raise ValueError(f"worker {worker.name} PI_BASE_URL is outside offline_model_policy")
+                if worker.env.get("PI_OFFLINE_MODEL_POLICY") != self.runtime.offline_model_policy:
+                    raise ValueError(
+                        f"worker {worker.name} must set PI_OFFLINE_MODEL_POLICY to {self.runtime.offline_model_policy}"
+                    )
         return self
 
     @classmethod

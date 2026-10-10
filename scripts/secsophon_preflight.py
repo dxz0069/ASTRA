@@ -16,11 +16,18 @@ import subprocess
 import sys
 import tempfile
 import time
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from astra.dispatcher.config import DispatchConfig
 from astra.dispatcher.runtime.local_process import LocalProcess
 from astra.dispatcher.workers.adapters.pi import PiDriver
+
+
+class _NoRedirect(HTTPRedirectHandler):
+    """A local model catalog probe must never follow a remote redirect."""
+
+    def redirect_request(self, _req, _fp, _code, _msg, _headers, _newurl):
+        return None
 
 
 def _versions() -> dict[str, str]:
@@ -37,7 +44,7 @@ def _versions() -> dict[str, str]:
 def _catalog(worker) -> bool:
     base = worker.env["PI_BASE_URL"].rstrip("/")
     request = Request(base + "/models", headers={"Authorization": f"Bearer {worker.env['PI_API_KEY']}"})
-    with urlopen(request, timeout=10) as response:
+    with build_opener(_NoRedirect).open(request, timeout=10) as response:
         payload = json.load(response)
     models = payload.get("data", [])
     return any(isinstance(item, dict) and item.get("id") == worker.env["PI_MODEL"] for item in models)

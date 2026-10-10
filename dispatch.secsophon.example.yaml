@@ -21,6 +21,9 @@ container:
   image: "unused-local-mode"
   network_mode: "none"
   completed_action: stop
+common_env:
+  # PiDriver uses this marker to disable MCP discovery for the offline profile.
+  PI_OFFLINE_MODEL_POLICY: "loopback"
 workers:
   - name: pi-local
     type: pi
