@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import click
@@ -11,6 +12,39 @@ from astra.server import db
 @click.group()
 def main():
     """ASTRA - 星图导航引擎：面向 AI 攻防全链路的状态空间搜索与决策系统."""
+
+
+@main.command("static-js")
+@click.argument("directory", required=False)
+@click.option("--run-id", default=None, help="Saved analysis run ID")
+@click.option("--file", "artifact_file", default=None, help="Relative artifact path")
+@click.option("--view", type=click.Choice(["application", "semantic"]), default="application")
+@click.option("--offset", type=click.IntRange(min=0), default=0)
+@click.option("--limit", type=click.IntRange(min=1, max=40), default=10)
+def static_js(directory: str | None, run_id: str | None, artifact_file: str | None,
+              view: str, offset: int, limit: int) -> None:
+    """Inspect a local JS application with an optional static analyzer."""
+    from astra import static_js as analyzer
+
+    analyze_mode = directory is not None and run_id is None and artifact_file is None
+    inspect_mode = directory is None and run_id is not None and artifact_file is not None
+    if not (analyze_mode or inspect_mode):
+        raise click.UsageError("provide DIRECTORY, or both --run-id and --file")
+    try:
+        if analyze_mode:
+            result = analyzer.analyze(directory, workspace=Path.cwd())
+        else:
+            result = analyzer.inspect(
+                run_id, artifact_file, workspace=Path.cwd(), view=view, offset=offset, limit=limit
+            )
+        output = json.dumps(result, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    except analyzer.StaticJsError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise click.ClickException("static analysis produced invalid JSON") from exc
+    if len(output.encode("utf-8")) + 1 > 12 * 1024:
+        raise click.ClickException("static analysis output exceeds the 12 KiB limit")
+    click.echo(output)
 
 
 @main.command()

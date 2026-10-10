@@ -30,6 +30,14 @@ class PiDriver(WorkerDriver):
     _FULL_TOOLS = "read,write,edit,bash,grep,find,ls"
     _EXECUTE_TOOLS = "read,write,bash,ls"
     _READONLY_TOOLS = "read"
+    _STATIC_JS_HINT = (
+        "Optional local JS/Electron static clues: an execution-capable phase may run "
+        "`astra static-js <directory>` and inspect saved evidence with "
+        "`astra static-js --run-id <run_id> --file <relative_file>` "
+        "(add `--view semantic` for semantic relations). Use only a trusted local directory in the "
+        "current workspace. Results are candidates, not verified findings; "
+        "check the original source before making a claim."
+    )
 
     def build_healthcheck(self, worker: WorkerConfig) -> list[str]:
         env = worker.env
@@ -81,7 +89,7 @@ class PiDriver(WorkerDriver):
         ]
         if session:
             argv.extend(["--session", session])
-        argv.extend(["-p", self._prompt_arg(prompt)])
+        argv.extend(["-p", self._prompt_arg(self._with_static_js_hint(worker, prompt))])
         command = self._wrap_with_models(worker, argv, read_only=read_only)
         return DriverResult(argv=command, session=session)
 
@@ -99,9 +107,15 @@ class PiDriver(WorkerDriver):
             "--session",
             session,
             "-p",
-            self._prompt_arg(prompt),
+            self._prompt_arg(self._with_static_js_hint(worker, prompt)),
         ]
         return self._wrap_with_models(worker, argv)
+
+    @classmethod
+    def _with_static_js_hint(cls, worker: WorkerConfig, prompt: str) -> str:
+        if worker.env.get("ASTRA_STATIC_JS_ENABLED") != "1":
+            return prompt
+        return f"{prompt}\n\n{cls._STATIC_JS_HINT}"
 
     def extract_session(self, session: str | None, stdout: str, stderr: str) -> str | None:
         if session:
