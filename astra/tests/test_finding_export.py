@@ -94,3 +94,37 @@ def test_finding_verification_state_and_links_are_exported(client: TestClient) -
         assert f"verification_status_at_export: {status}" in timeline
     assert f"finding_id: {finding_ids['pending']}" in timeline
     assert f"verification_fact_id: {verdict_fact}" in timeline
+
+
+def test_structured_identity_and_evidence_links_are_exported(client: TestClient) -> None:
+    project_id = client.post(
+        "/projects", json={"title": "export evidence", "origin": "start", "goal": "finish"},
+    ).json()["project"]["id"]
+    identity = {
+        "asset_origin": "https://example.test",
+        "entry_point": "/account",
+        "category": "authorization",
+        "root_cause": "missing owner check",
+        "impact": "read another user's record",
+        "conditions": "authenticated user",
+    }
+    finding = client.post(f"/projects/{project_id}/findings", json={
+        "description": "candidate", "identity": identity,
+    }).json()
+    with db.get_conn() as conn:
+        conn.execute(
+            """UPDATE findings SET source_evidence_id = ?, verification_evidence_id = ?
+               WHERE project_id = ? AND id = ?""",
+            ("ev_source", "ev_verification", project_id, finding["id"]),
+        )
+
+    yaml_text = client.get(f"/projects/{project_id}/export?format=yaml").text
+    exported = yaml.safe_load(yaml_text)["findings"][0]
+    assert exported["identity"] == identity
+    assert exported["source_evidence_id"] == "ev_source"
+    assert exported["verification_evidence_id"] == "ev_verification"
+
+    timeline = client.get(f"/projects/{project_id}/export?format=timeline").text
+    assert '"root_cause": "missing owner check"' in timeline
+    assert "source_evidence_id: ev_source" in timeline
+    assert "verification_evidence_id: ev_verification" in timeline

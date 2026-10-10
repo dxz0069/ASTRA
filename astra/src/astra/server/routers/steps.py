@@ -245,7 +245,7 @@ def conclude(project_id: str, step_id: str, body: ConcludeRequest):
             if body.finding_identity is not None:
                 rows = conn.execute(
                     """SELECT * FROM findings WHERE project_id = ? AND identity_json IS NOT NULL
-                       AND verification_status IN ('pending', 'confirmed')""",
+                       AND verification_status IN ('not_requested', 'pending', 'confirmed')""",
                     (project_id,),
                 ).fetchall()
                 candidates = [(row, json.loads(row["identity_json"])) for row in rows]
@@ -268,23 +268,37 @@ def conclude(project_id: str, step_id: str, body: ConcludeRequest):
                      if " ".join(row["description"].casefold().split()) == normalized),
                     None,
                 )
-            if existing is not None:
+            if existing is not None and not (
+                body.finding_high_value and existing["verification_status"] == "not_requested"
+            ):
                 finding = Finding(**dict(existing))
             else:
-                finding_id = next_finding_id(conn, project_id)
+                finding_id = existing["id"] if existing is not None else next_finding_id(conn, project_id)
                 verification_step_id = next_step_id(conn, project_id) if body.finding_high_value else None
-                conn.execute(
-                    """INSERT INTO findings
-                       (id, project_id, description, created_at, high_value,
-                        verification_status, source_fact_id, source_step_id, verification_step_id,
-                        source_evidence_id, identity_json)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (finding_id, project_id, body.finding, now, int(body.finding_high_value),
-                     "pending" if body.finding_high_value else "not_requested",
-                     fid, step_id, verification_step_id,
-                     evidence_rows[0]["id"] if evidence_rows else None,
-                     json.dumps(body.finding_identity, ensure_ascii=False) if body.finding_identity else None),
-                )
+                if existing is not None:
+                    # A later high-value observation promotes the same issue
+                    # into verification instead of losing its Strike step.
+                    conn.execute(
+                        """UPDATE findings SET description = ?, high_value = 1,
+                                  verification_status = 'pending', source_fact_id = ?,
+                                  source_step_id = ?, verification_step_id = ?, source_evidence_id = ?
+                           WHERE id = ? AND project_id = ?""",
+                        (body.finding, fid, step_id, verification_step_id,
+                         evidence_rows[0]["id"] if evidence_rows else None, finding_id, project_id),
+                    )
+                else:
+                    conn.execute(
+                        """INSERT INTO findings
+                           (id, project_id, description, created_at, high_value,
+                            verification_status, source_fact_id, source_step_id, verification_step_id,
+                            source_evidence_id, identity_json)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (finding_id, project_id, body.finding, now, int(body.finding_high_value),
+                         "pending" if body.finding_high_value else "not_requested",
+                         fid, step_id, verification_step_id,
+                         evidence_rows[0]["id"] if evidence_rows else None,
+                         json.dumps(body.finding_identity, ensure_ascii=False) if body.finding_identity else None),
+                    )
                 if verification_step_id is not None:
                     conn.execute(
                         """INSERT INTO steps

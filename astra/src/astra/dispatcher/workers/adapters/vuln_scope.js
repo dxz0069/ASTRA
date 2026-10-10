@@ -32,7 +32,7 @@ function publicIPv4(address) {
   if (a === 100 && b >= 64 && b <= 127) return false;
   if (a === 169 && b === 254) return false;
   if (a === 172 && b >= 16 && b <= 31) return false;
-  if (a === 192 && ((b === 0 && (c === 0 || c === 2)) || b === 168)) return false;
+  if (a === 192 && (b === 0 || b === 168)) return false;
   if (a === 198 && (b === 18 || b === 19 || (b === 51 && c === 100))) return false;
   if (a === 203 && b === 0 && c === 113) return false;
   return true;
@@ -109,12 +109,14 @@ async function oneRequest(url, method, address, signal) {
 }
 
 async function scopedRequest(value, method, signal) {
-  const manifest = scope();
   const startedAt = new Date().toISOString();
   let current = value;
   for (let redirects = 0; redirects <= 3; redirects++) {
+    // A redirect or DNS lookup may outlive the authorization window.
+    const manifest = scope();
     const url = allowedUrl(current, method, manifest);
     const address = await resolvePinned(url);
+    scope();
     if (++requestCount > 20) throw new Error("Per-run request budget exhausted");
     const result = await oneRequest(url, method, address, signal);
     if (result.status >= 300 && result.status < 400 && result.location) {

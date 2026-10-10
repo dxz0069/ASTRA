@@ -1,3 +1,4 @@
+import json
 import os
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
@@ -206,8 +207,11 @@ def _export_yaml(conn, project_id: str) -> str:
                 "verification_status": f["verification_status"],
                 "created_at": format_export_timestamp(f["created_at"]),
             }
+            if f["identity_json"] is not None:
+                entry["identity"] = json.loads(f["identity_json"])
             for key in ("source_fact_id", "source_step_id", "verification_step_id",
-                        "verification_fact_id", "verification_summary"):
+                        "verification_fact_id", "verification_summary",
+                        "source_evidence_id", "verification_evidence_id"):
                 if f[key] is not None:
                     entry[key] = f[key]
             finding_list.append(entry)
@@ -289,8 +293,11 @@ def _export_timeline(conn, project_id: str) -> str:
         block = (f"[{ts}] FINDING {f['id']}\n  {f['description']}"
                  f"\n  high_value: {bool(f['high_value'])}"
                  f"\n  verification_status_at_export: {f['verification_status']}")
+        if f["identity_json"] is not None:
+            block += f"\n  identity: {f['identity_json']}"
         for key in ("source_fact_id", "source_step_id", "verification_step_id",
-                    "verification_fact_id", "verification_summary"):
+                    "verification_fact_id", "verification_summary",
+                    "source_evidence_id", "verification_evidence_id"):
             if f[key] is not None:
                 block += f"\n  {key}: {f[key]}"
         events.append((f["created_at"] or "", order, block))

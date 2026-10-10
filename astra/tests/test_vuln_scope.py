@@ -5,6 +5,8 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import shutil
+import subprocess
 import threading
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -216,3 +218,98 @@ def test_real_pi_scoped_request_loopback(
             assert "edit" not in names
             tool_messages = [item for item in model.requests[1]["messages"] if item.get("role") == "tool"]
             assert expected_text in str(tool_messages[-1].get("content"))
+
+
+def test_redirect_rechecks_authorization_window_before_next_request() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required for the scoped_request extension")
+    extension = (Path(__file__).resolve().parents[1] / "src" / "astra" / "dispatcher"
+                 / "workers" / "adapters" / "vuln_scope.js").as_uri()
+    script = f"import register from {json.dumps(extension)};\n" + """
+import http from 'node:http';
+import { EventEmitter } from 'node:events';
+
+const before = Date.parse('2026-10-11T16:00:00Z');
+const after = before + 1000;
+let now = before + 100;
+Date.now = () => now;
+process.env.ASTRA_VULN_LOCAL_TEST = '1';
+process.env.ASTRA_VULN_SCOPE_JSON = JSON.stringify({
+  project_code: 'PROJ2026_AISRC01',
+  not_before: new Date(before).toISOString(),
+  not_after: new Date(after).toISOString(),
+  targets: [{ origin: 'http://127.0.0.1:8080', path_prefixes: ['/allowed'], methods: ['GET'] }],
+});
+
+const calls = [];
+http.request = (url, _options, onResponse) => {
+  calls.push(url.href);
+  const request = new EventEmitter();
+  request.end = () => queueMicrotask(() => {
+    const response = new EventEmitter();
+    response.statusCode = calls.length === 1 ? 302 : 200;
+    response.headers = calls.length === 1 ? { location: '/allowed/next' } : {};
+    if (calls.length === 1) now = after + 1;
+    onResponse(response);
+    response.emit('end');
+  });
+  request.destroy = (error) => request.emit('error', error);
+  return request;
+};
+
+let tool;
+register({ registerTool(value) { tool = value; } });
+let error = null;
+try {
+  await tool.execute('call-1', { url: 'http://127.0.0.1:8080/allowed/start', method: 'GET' });
+} catch (caught) {
+  error = caught.message;
+}
+console.log(JSON.stringify({ calls, error }));
+if (calls.length !== 1 || !error?.includes('Outside authorized time window')) process.exitCode = 1;
+"""
+    result = subprocess.run(
+        [node, "--input-type=module", "--eval", script],
+        text=True, capture_output=True, timeout=10, check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_reserved_192_0_0_address_is_denied_before_request() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required for the scoped_request extension")
+    extension = (Path(__file__).resolve().parents[1] / "src" / "astra" / "dispatcher"
+                 / "workers" / "adapters" / "vuln_scope.js").as_uri()
+    script = f"import register from {json.dumps(extension)};\n" + """
+import https from 'node:https';
+
+const now = Date.parse('2026-10-11T16:00:00Z');
+Date.now = () => now;
+process.env.ASTRA_VULN_LOCAL_TEST = '0';
+process.env.ASTRA_VULN_SCOPE_JSON = JSON.stringify({
+  project_code: 'PROJ2026_AISRC01',
+  not_before: new Date(now - 1000).toISOString(),
+  not_after: new Date(now + 1000).toISOString(),
+  targets: [{ origin: 'https://192.0.0.42', path_prefixes: ['/allowed'], methods: ['GET'] }],
+});
+
+let requests = 0;
+https.request = () => { requests++; throw new Error('Network request must not run'); };
+let tool;
+register({ registerTool(value) { tool = value; } });
+let error = null;
+try {
+  await tool.execute('call-1', { url: 'https://192.0.0.42/allowed', method: 'GET' });
+} catch (caught) {
+  error = caught.message;
+}
+console.log(JSON.stringify({ requests, error }));
+if (requests !== 0 || error !== 'Private/reserved IP is denied') process.exitCode = 1;
+"""
+    result = subprocess.run(
+        [node, "--input-type=module", "--eval", script],
+        text=True, capture_output=True, timeout=10, check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
