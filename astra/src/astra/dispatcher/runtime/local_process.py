@@ -58,6 +58,9 @@ class LocalProcess:
     def start(self) -> None:
         full_env = dict(__import__("os").environ)
         full_env.update(self.env)
+        # Evidence imports use a dispatcher-only credential. Local worker
+        # subprocesses otherwise inherit the parent environment wholesale.
+        full_env.pop("ASTRA_EVIDENCE_COLLECTOR_TOKEN", None)
         # MSYS2 程序（sh/git 等）从 Windows 命令行重建 argv 时会破坏含空格的参数，
         # 禁用其参数转换以保持 Python list2cmdline 的引号语义
         full_env.setdefault("MSYS2_ARG_CONV_EXCL", "*")

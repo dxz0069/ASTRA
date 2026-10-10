@@ -97,6 +97,7 @@ async function oneRequest(url, method, address, signal) {
         status: response.statusCode,
         location: response.headers.location,
         contentType: response.headers["content-type"] || "",
+        headers: { "content-type": response.headers["content-type"] || "" },
         body: Buffer.concat(chunks),
       }));
     });
@@ -109,6 +110,7 @@ async function oneRequest(url, method, address, signal) {
 
 async function scopedRequest(value, method, signal) {
   const manifest = scope();
+  const startedAt = new Date().toISOString();
   let current = value;
   for (let redirects = 0; redirects <= 3; redirects++) {
     const url = allowedUrl(current, method, manifest);
@@ -122,10 +124,23 @@ async function scopedRequest(value, method, signal) {
     }
     return {
       url: url.href,
+      method,
       status: result.status,
       content_type: result.contentType,
       sha256: createHash("sha256").update(result.body).digest("hex"),
       body: result.body.toString("utf8"),
+      _astra_evidence: {
+        requested_url: value,
+        scope_sha256: createHash("sha256").update(process.env.ASTRA_VULN_SCOPE_JSON, "utf8").digest("hex"),
+        url: url.href,
+        method,
+        status: result.status,
+        headers: result.headers,
+        body_base64: result.body.toString("base64"),
+        started_at: startedAt,
+        finished_at: new Date().toISOString(),
+        pinned_address: address,
+      },
     };
   }
   throw new Error("Redirect limit exceeded");
@@ -147,7 +162,12 @@ export default function (pi) {
     },
     async execute(_id, params, signal) {
       const result = await scopedRequest(params.url, params.method, signal);
-      return { content: [{ type: "text", text: JSON.stringify(result) }], details: result };
+      const { _astra_evidence, ...visible } = result;
+      return {
+        content: [{ type: "text", text: JSON.stringify(visible) }],
+        details: { _astra_evidence },
+        _astra_evidence: true,
+      };
     },
   });
 }

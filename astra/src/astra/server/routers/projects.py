@@ -1,6 +1,8 @@
+import os
 import sqlite3
 from fastapi import APIRouter, HTTPException
 
+from astra.dispatcher.completion_gate import check_project_work_completion
 from astra.server.db import get_conn
 from astra.server.models import (
     CompleteRequest,
@@ -162,7 +164,7 @@ def add_fact(project_id: str, body: CreateFactRequest):
 def add_finding(project_id: str, body: CreateFindingRequest):
     """写入一条沿途发现（Finding）——搜索过程的产出物，与 Goal 终点相对。"""
     with get_conn() as conn:
-        finding_id = create_finding(conn, project_id, body.description)
+        finding_id = create_finding(conn, project_id, body.description, body.identity)
         row = conn.execute(
             "SELECT * FROM findings WHERE id = ? AND project_id = ?",
             (finding_id, project_id),
@@ -347,6 +349,11 @@ def release_project_decide(project_id: str, body: HeartbeatRequest):
 @router.post("/projects/{project_id}/complete", response_model=Step)
 def complete_project(project_id: str, body: CompleteRequest):
     with get_conn() as conn:
+        vuln_completion_gate = os.environ.get("ASTRA_VULN_STRICT") == "1"
+        if vuln_completion_gate:
+            # Hold the write transaction through the work check and completion
+            # insert. A fresh dispatcher read alone has a read/write race.
+            conn.execute("BEGIN IMMEDIATE")
         check_project_active(conn, project_id)
         expire_decide_leases(conn, project_id)
         # 完成依据不得全为系统事实——origin 对每个项目必然存在，
@@ -362,6 +369,22 @@ def complete_project(project_id: str, body: CompleteRequest):
             raise HTTPException(403, f"Project decide lease is held by {live_holder}")
         if live_holder is not None:
             _verify_lease_token(row, body.lease_token)
+
+        if vuln_completion_gate:
+            graph = ProjectDetail(
+                project=project_meta_from_row(row),
+                facts=[],
+                steps=build_steps(conn, project_id),
+                hints=[],
+                findings=_load_findings(conn, project_id),
+                subgoals=[],
+            )
+            work = check_project_work_completion(graph)
+            if work.status != "complete":
+                raise HTTPException(
+                    409,
+                    {"work_status": work.status, "reasons": work.reasons},
+                )
 
         now = utcnow()
         sid = next_step_id(conn, project_id)

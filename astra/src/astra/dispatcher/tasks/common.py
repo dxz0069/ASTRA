@@ -690,9 +690,11 @@ def write_conclude_result(
     kind: str = "regular",
     finding: str | None = None,
     finding_high_value: bool = False,
+    finding_identity: dict[str, str] | None = None,
     reuse_fact_id: str | None = None,
     verification_status: str | None = None,
     verification_summary: str | None = None,
+    evidence_refs: list[str] | None = None,
 ) -> str:
     return write_conclude_result_with_fact_id(
         client,
@@ -706,9 +708,11 @@ def write_conclude_result(
         kind=kind,
         finding=finding,
         finding_high_value=finding_high_value,
+        finding_identity=finding_identity,
         reuse_fact_id=reuse_fact_id,
         verification_status=verification_status,
         verification_summary=verification_summary,
+        evidence_refs=evidence_refs,
     ).status
 
 
@@ -725,19 +729,25 @@ def write_conclude_result_with_fact_id(
     kind: str = "regular",
     finding: str | None = None,
     finding_high_value: bool = False,
+    finding_identity: dict[str, str] | None = None,
     reuse_fact_id: str | None = None,
     verification_status: str | None = None,
     verification_summary: str | None = None,
+    evidence_refs: list[str] | None = None,
 ) -> ConcludeWriteResult:
     conclude_kwargs: dict[str, Any] = {}
     if finding_high_value:
         conclude_kwargs["finding_high_value"] = True
+    if finding_identity:
+        conclude_kwargs["finding_identity"] = finding_identity
     if reuse_fact_id is not None:
         conclude_kwargs["reuse_fact_id"] = reuse_fact_id
     if verification_status is not None:
         conclude_kwargs["verification_status"] = verification_status
     if verification_summary is not None:
         conclude_kwargs["verification_summary"] = verification_summary
+    if evidence_refs:
+        conclude_kwargs["evidence_refs"] = evidence_refs
     response = client.conclude(
         project_id,
         step_id,

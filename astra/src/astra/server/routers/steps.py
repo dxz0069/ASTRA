@@ -1,6 +1,11 @@
+import hashlib
+import json
+import os
+
 from fastapi import APIRouter, HTTPException
 
 from astra.server.db import get_conn
+from astra.server.finding_identity import find_duplicate_finding
 from astra.server.models import (
     CloseStepRequest,
     ConcludeRequest,
@@ -138,12 +143,15 @@ def conclude(project_id: str, step_id: str, body: ConcludeRequest):
 
         if body.finding_high_value and body.finding is None:
             raise HTTPException(422, "finding_high_value requires finding")
+        if body.finding_identity is not None and body.finding is None:
+            raise HTTPException(422, "finding_identity requires finding")
         if (body.reuse_fact_id is not None
                 and (is_strike or body.finding is None)):
             raise HTTPException(422, "reuse_fact_id requires a finding on an Execute step")
         if is_strike:
             if (body.verification_status is None or body.verification_summary is None
                     or body.finding is not None or body.finding_high_value
+                    or body.finding_identity is not None
                     or body.reuse_fact_id is not None):
                 raise HTTPException(422, "Strike conclusion requires a verification status and summary only")
             finding_row = conn.execute(
@@ -155,6 +163,40 @@ def conclude(project_id: str, step_id: str, body: ConcludeRequest):
                 raise HTTPException(409, "Strike step has no pending linked finding")
         elif body.verification_status is not None or body.verification_summary is not None:
             raise HTTPException(422, "Only Strike steps may update finding verification")
+
+        evidence_rows = []
+        for evidence_id in body.evidence_refs:
+            evidence_row = conn.execute(
+                """SELECT * FROM evidence
+                   WHERE project_id = ? AND step_id = ? AND id = ?""",
+                (project_id, step_id, evidence_id),
+            ).fetchone()
+            if evidence_row is None or evidence_row["worker"] != body.worker:
+                raise HTTPException(422, "Evidence reference is not a collected event for this step")
+            if hashlib.sha256(evidence_row["artifact"]).hexdigest() != evidence_row["sha256"]:
+                raise HTTPException(409, "Evidence artifact integrity check failed")
+            evidence_rows.append(evidence_row)
+
+        if (os.environ.get("ASTRA_VULN_STRICT") == "1"
+                and body.finding_high_value and not evidence_rows):
+            raise HTTPException(422, "High-value Finding requires collected source evidence")
+
+        if is_strike and body.verification_status == "confirmed":
+            if not evidence_rows:
+                raise HTTPException(422, "Confirmed Strike requires a new collected tool event")
+            # A Strike runs in a separate step. Guard the source action and
+            # session explicitly to preserve independent replay semantics.
+            source_evidence_id = finding_row["source_evidence_id"]
+            if source_evidence_id:
+                source_evidence = conn.execute(
+                    "SELECT * FROM evidence WHERE id = ? AND project_id = ?",
+                    (source_evidence_id, project_id),
+                ).fetchone()
+                if source_evidence is not None and any(
+                    row["session_id"] == source_evidence["session_id"]
+                    for row in evidence_rows
+                ):
+                    raise HTTPException(422, "Confirmed Strike requires an independent collection session")
 
         if body.reuse_fact_id is None:
             fid = next_fact_id(conn, project_id)
@@ -184,10 +226,11 @@ def conclude(project_id: str, step_id: str, body: ConcludeRequest):
         if is_strike:
             cursor = conn.execute(
                 """UPDATE findings SET verification_status = ?, verification_fact_id = ?,
-                          verification_summary = ?
+                          verification_summary = ?, verification_evidence_id = ?
                    WHERE id = ? AND project_id = ? AND verification_status = 'pending'
                      AND verification_step_id = ?""",
                 (body.verification_status, fid, body.verification_summary,
+                 evidence_rows[0]["id"] if evidence_rows else None,
                  source_step["finding_id"], project_id, step_id),
             )
             if cursor.rowcount != 1:
@@ -199,10 +242,24 @@ def conclude(project_id: str, step_id: str, body: ConcludeRequest):
             finding = Finding(**dict(finding_row))
         elif body.finding:
             existing = None
-            if body.finding_high_value:
+            if body.finding_identity is not None:
+                rows = conn.execute(
+                    """SELECT * FROM findings WHERE project_id = ? AND identity_json IS NOT NULL
+                       AND verification_status IN ('pending', 'confirmed')""",
+                    (project_id,),
+                ).fetchall()
+                candidates = [(row, json.loads(row["identity_json"])) for row in rows]
+                match = find_duplicate_finding(body.finding_identity, (item for _, item in candidates))
+                if match is not None:
+                    existing = next(row for row, item in candidates if item is match)
+            elif body.finding_high_value:
+                # Legacy candidates have no structured identity. Preserve the
+                # old exact normalized-description guard without treating it
+                # as root-cause deduplication.
                 normalized = " ".join(body.finding.casefold().split())
                 pending = conn.execute(
                     """SELECT * FROM findings WHERE project_id = ? AND high_value = 1
+                       AND identity_json IS NULL
                        AND verification_status = 'pending'""",
                     (project_id,),
                 ).fetchall()
@@ -219,11 +276,14 @@ def conclude(project_id: str, step_id: str, body: ConcludeRequest):
                 conn.execute(
                     """INSERT INTO findings
                        (id, project_id, description, created_at, high_value,
-                        verification_status, source_fact_id, source_step_id, verification_step_id)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        verification_status, source_fact_id, source_step_id, verification_step_id,
+                        source_evidence_id, identity_json)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (finding_id, project_id, body.finding, now, int(body.finding_high_value),
                      "pending" if body.finding_high_value else "not_requested",
-                     fid, step_id, verification_step_id),
+                     fid, step_id, verification_step_id,
+                     evidence_rows[0]["id"] if evidence_rows else None,
+                     json.dumps(body.finding_identity, ensure_ascii=False) if body.finding_identity else None),
                 )
                 if verification_step_id is not None:
                     conn.execute(

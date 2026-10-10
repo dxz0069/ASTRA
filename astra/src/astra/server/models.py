@@ -1,8 +1,25 @@
 from __future__ import annotations
 
+import json
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from astra.server.finding_identity import IDENTITY_FIELDS
+
+
+def validate_finding_identity(value: dict[str, str] | None) -> dict[str, str] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != set(IDENTITY_FIELDS):
+        raise ValueError("finding identity requires all six structural fields")
+    cleaned = {}
+    for key in IDENTITY_FIELDS:
+        item = value[key]
+        if not isinstance(item, str) or not item.strip() or len(item) > 2048:
+            raise ValueError(f"finding identity {key} must be nonempty and at most 2048 characters")
+        cleaned[key] = item.strip()
+    return cleaned
 
 
 class Settings(BaseModel):
@@ -57,6 +74,19 @@ class Finding(BaseModel):
     verification_step_id: str | None = None
     verification_fact_id: str | None = None
     verification_summary: str | None = None
+    source_evidence_id: str | None = None
+    verification_evidence_id: str | None = None
+    # Human reproduction is a separate review process. Model-facing endpoints
+    # never accept an update to this field.
+    human_reproduction_status: Literal["not_started", "passed", "failed", "blocked"] = "not_started"
+    identity: dict[str, str] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def load_identity_from_row(cls, value):
+        if isinstance(value, dict) and value.get("identity_json") is not None:
+            return {**value, "identity": json.loads(value["identity_json"])}
+        return value
 
 
 class SubGoal(BaseModel):
@@ -203,6 +233,9 @@ class CreateStepRequest(BaseModel):
 
 class CreateFindingRequest(BaseModel):
     description: str = Field(max_length=65536)
+    identity: dict[str, str] | None = None
+
+    model_config = {"extra": "forbid"}
 
     @field_validator("description")
     @classmethod
@@ -211,6 +244,11 @@ class CreateFindingRequest(BaseModel):
         if not text:
             raise ValueError("must not be empty")
         return text
+
+    @field_validator("identity")
+    @classmethod
+    def validate_identity(cls, value: dict[str, str] | None) -> dict[str, str] | None:
+        return validate_finding_identity(value)
 
 
 class CreateSubGoalRequest(BaseModel):
@@ -276,9 +314,29 @@ class ConcludeRequest(BaseModel):
     # Execute 沿途发现（可选）：与事实一并写回
     finding: str | None = Field(default=None, max_length=65536)
     finding_high_value: bool = False
+    finding_identity: dict[str, str] | None = None
     reuse_fact_id: str | None = Field(default=None, max_length=128)
     verification_status: Literal["confirmed", "refuted", "blocked"] | None = None
     verification_summary: str | None = Field(default=None, max_length=65536)
+    # Model tool call IDs are resolved to ev_ IDs by the dispatcher. The server
+    # verifies exact project/step ownership of these imported records.
+    evidence_refs: list[str] = Field(default_factory=list, max_length=16)
+
+    model_config = {"extra": "forbid"}
+
+    @field_validator("evidence_refs")
+    @classmethod
+    def validate_evidence_refs(cls, value: list[str]) -> list[str]:
+        if any(not item.strip() or len(item) > 256 for item in value):
+            raise ValueError("evidence refs must be nonempty tool call IDs of at most 256 characters")
+        if len(set(value)) != len(value):
+            raise ValueError("evidence refs must be unique")
+        return value
+
+    @field_validator("finding_identity")
+    @classmethod
+    def validate_identity(cls, value: dict[str, str] | None) -> dict[str, str] | None:
+        return validate_finding_identity(value)
 
     @field_validator("worker", "description", "finding", "reuse_fact_id", "verification_summary")
     @classmethod
@@ -324,6 +382,39 @@ class ConcludeResponse(BaseModel):
     fact: Fact
     step: Step
     finding: Finding | None = None
+
+
+class EvidenceImportRequest(BaseModel):
+    session_id: str = Field(min_length=1, max_length=256)
+    tool_call_id: str = Field(min_length=1, max_length=256)
+    scope_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    url: str = Field(min_length=1, max_length=4096, pattern=r"^https?://")
+    method: Literal["GET", "HEAD"]
+    status: int = Field(ge=100, le=599)
+    headers: dict[str, str] = Field(default_factory=dict, max_length=128)
+    body_base64: str = Field(max_length=100000)
+    started_at: str = Field(min_length=1, max_length=64)
+    finished_at: str = Field(min_length=1, max_length=64)
+    pinned_address: str = Field(min_length=1, max_length=64)
+
+    model_config = {"extra": "forbid"}
+
+
+class EvidenceRecord(BaseModel):
+    id: str
+    uri: str
+    sha256: str
+    body_sha256: str
+    project_id: str
+    step_id: str
+    worker: str
+    session_id: str
+    tool_call_id: str
+    scope_sha256: str
+    url: str
+    method: Literal["GET", "HEAD"]
+    status: int
+    created_at: str
 
 
 class UpdateProjectStatusRequest(BaseModel):

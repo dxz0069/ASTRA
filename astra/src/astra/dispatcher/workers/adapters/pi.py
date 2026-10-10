@@ -157,6 +157,43 @@ class PiDriver(WorkerDriver):
                 parts.append(text)
         return "\n".join(parts).strip() or stdout
 
+    @classmethod
+    def extract_scoped_request_evidence(cls, stdout: str) -> list[dict[str, Any]]:
+        """Read completed scoped_request tool events, never assistant text.
+
+        Pi emits a start and an end event around each actual tool invocation.
+        The extension places raw response bytes in the result details, while
+        the model only receives the bounded text content. An end without its
+        matching start, a failed tool, or mismatched arguments is not evidence.
+        """
+        starts: dict[str, dict[str, Any]] = {}
+        records: list[dict[str, Any]] = []
+        for event in cls._iter_events(stdout):
+            if event.get("toolName") != "scoped_request":
+                continue
+            call_id = event.get("toolCallId")
+            if not isinstance(call_id, str) or not call_id:
+                continue
+            if event.get("type") == "tool_execution_start":
+                args = event.get("args")
+                if isinstance(args, dict) and call_id not in starts:
+                    starts[call_id] = args
+            elif event.get("type") == "tool_execution_end":
+                args = starts.pop(call_id, None)
+                if args is None or event.get("isError") is not False:
+                    continue
+                result = event.get("result")
+                if not isinstance(result, dict):
+                    continue
+                details = result.get("details")
+                evidence = details.get("_astra_evidence") if isinstance(details, dict) else None
+                if not isinstance(evidence, dict):
+                    continue
+                if args.get("method") != evidence.get("method") or args.get("url") != evidence.get("requested_url"):
+                    continue
+                records.append({"tool_call_id": call_id, **{k: v for k, v in evidence.items() if k != "requested_url"}})
+        return records
+
     def _wrap_with_models(
         self, worker: WorkerConfig, pi_argv: list[str], *, enable_tools: bool = True, read_only: bool = False
     ) -> list[str]:

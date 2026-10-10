@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from astra.dispatcher.output_parser import extract_json_object
+from astra.server.finding_identity import IDENTITY_FIELDS, finding_fingerprint
 
 
 def parse_json_output(stdout: str) -> dict[str, Any]:
@@ -282,6 +283,8 @@ def validate_execute_payload(payload: dict[str, Any]) -> tuple[str, dict[str, An
     finding = data.get("finding")
     finding_description: str | None = None
     finding_high_value = False
+    finding_identity: dict[str, str] | None = None
+    evidence_refs = _validate_evidence_refs(data.get("evidence_refs", []))
     if isinstance(finding, dict):
         fd = finding.get("description")
         if isinstance(fd, str) and fd.strip():
@@ -290,6 +293,11 @@ def validate_execute_payload(payload: dict[str, Any]) -> tuple[str, dict[str, An
         if not isinstance(high_value, bool):
             raise ValueError("finding.high_value must be a boolean")
         finding_high_value = high_value
+        raw_identity = finding.get("identity")
+        if isinstance(raw_identity, dict) and set(raw_identity) == set(IDENTITY_FIELDS):
+            if all(isinstance(raw_identity[key], str) and len(raw_identity[key]) <= 2048
+                   for key in IDENTITY_FIELDS) and finding_fingerprint(raw_identity) is not None:
+                finding_identity = {key: raw_identity[key].strip() for key in IDENTITY_FIELDS}
     elif isinstance(finding, str) and finding.strip():
         finding_description = finding.strip()
     if finding_high_value and finding_description is None:
@@ -298,10 +306,22 @@ def validate_execute_payload(payload: dict[str, Any]) -> tuple[str, dict[str, An
         "description": description.strip(),
         "finding": finding_description,
         "finding_high_value": finding_high_value,
+        "finding_identity": finding_identity,
+        "evidence_refs": evidence_refs,
     }
 
 
-def validate_strike_payload(payload: dict[str, Any]) -> tuple[str, str]:
+def _validate_evidence_refs(value: Any) -> list[str]:
+    if not isinstance(value, list) or len(value) > 16:
+        raise ValueError("evidence_refs must be a list of at most 16 tool call IDs")
+    if any(not isinstance(item, str) or not item.strip() or len(item) > 256 for item in value):
+        raise ValueError("evidence_refs must contain nonempty tool call IDs of at most 256 characters")
+    if len(set(value)) != len(value):
+        raise ValueError("evidence_refs must be unique")
+    return value
+
+
+def validate_strike_payload(payload: dict[str, Any]) -> tuple[str, str, list[str]]:
     """A Strike result must give one explicit verdict and an evidence summary."""
     accepted, data = _unwrap_wrapped_payload(payload)
     if accepted is False:
@@ -310,15 +330,18 @@ def validate_strike_payload(payload: dict[str, Any]) -> tuple[str, str]:
         if not isinstance(payload, dict) or "verdict" not in payload:
             raise ValueError("accepted must be true or false")
         data = payload
-    if not isinstance(data, dict) or set(data) != {"verdict", "summary"}:
-        raise ValueError("strike requires only verdict and summary")
+    if not isinstance(data, dict) or set(data) - {"verdict", "summary", "evidence_refs"}:
+        raise ValueError("strike requires verdict, summary, and optional evidence_refs only")
     verdict = data.get("verdict")
     summary = data.get("summary")
     if verdict not in ("confirmed", "refuted", "blocked"):
         raise ValueError("strike verdict must be confirmed, refuted or blocked")
     if not isinstance(summary, str) or not summary.strip():
         raise ValueError("strike summary is required")
-    return verdict, summary.strip()
+    evidence_refs = _validate_evidence_refs(data.get("evidence_refs", []))
+    if verdict == "confirmed" and not evidence_refs:
+        raise ValueError("confirmed Strike requires new evidence_refs")
+    return verdict, summary.strip(), evidence_refs
 
 
 # 质询理由封顶（防长篇倾倒；正常反驳一句话说清缺什么验证）

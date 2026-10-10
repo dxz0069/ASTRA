@@ -156,6 +156,7 @@ class FakeClient:
         reuse_fact_id: str | None = None,
         verification_status: str | None = None,
         verification_summary: str | None = None,
+        evidence_refs: list[str] | None = None,
     ) -> ApiResult:
         self.concluded.append((project_id, step_id, worker, description))
         self.conclude_options.append({
@@ -163,6 +164,7 @@ class FakeClient:
             "reuse_fact_id": reuse_fact_id,
             "verification_status": verification_status,
             "verification_summary": verification_summary,
+            "evidence_refs": evidence_refs,
         })
         if finding:
             self.created_findings.append((project_id, finding))

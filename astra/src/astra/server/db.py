@@ -76,7 +76,31 @@ CREATE TABLE IF NOT EXISTS findings (
     verification_step_id TEXT,
     verification_fact_id TEXT,
     verification_summary TEXT,
+    source_evidence_id TEXT,
+    verification_evidence_id TEXT,
+    human_reproduction_status TEXT NOT NULL DEFAULT 'not_started',
+    identity_json TEXT,
     PRIMARY KEY (id, project_id)
+);
+
+CREATE TABLE IF NOT EXISTS evidence (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    step_id TEXT NOT NULL,
+    worker TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    tool_call_id TEXT NOT NULL,
+    scope_sha256 TEXT NOT NULL,
+    uri TEXT NOT NULL UNIQUE,
+    sha256 TEXT NOT NULL,
+    body_sha256 TEXT NOT NULL,
+    url TEXT NOT NULL,
+    method TEXT NOT NULL,
+    status INTEGER NOT NULL,
+    artifact BLOB NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (project_id, step_id, session_id, tool_call_id),
+    FOREIGN KEY (step_id, project_id) REFERENCES steps(id, project_id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS subgoals (
@@ -225,6 +249,10 @@ def _migrate_legacy(conn: sqlite3.Connection) -> None:
         "verification_step_id": "TEXT",
         "verification_fact_id": "TEXT",
         "verification_summary": "TEXT",
+        "source_evidence_id": "TEXT",
+        "verification_evidence_id": "TEXT",
+        "human_reproduction_status": "TEXT NOT NULL DEFAULT 'not_started'",
+        "identity_json": "TEXT",
     }
     for column, declaration in finding_additions.items():
         if column not in finding_cols:

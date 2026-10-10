@@ -5,6 +5,7 @@ import time
 
 from astra.dispatcher.config import DispatchConfig, WorkerConfig
 from astra.dispatcher.contracts import parse_json_output, validate_strike_payload
+from astra.dispatcher.evidence_collector import collect_scoped_request_evidence, resolve_evidence_refs
 from astra.dispatcher.prompting import format_json_block, load_prompt, render_prompt
 from astra.dispatcher.protocol.client import ASTRAClient
 from astra.dispatcher.runtime.cancellation import TaskCancellation
@@ -113,9 +114,13 @@ def run_strike_task(
             )
             best_effort_release(client, project_id, step.id, worker.name)
             return "failed"
+        imported_evidence = collect_scoped_request_evidence(
+            client, worker, project_id, step.id, result
+        )
         try:
             payload = parse_json_output(driver.extract_response_text(result.stdout, result.stderr))
-            verdict, summary = validate_strike_payload(payload)
+            verdict, summary, requested_evidence_refs = validate_strike_payload(payload)
+            evidence_refs = resolve_evidence_refs(requested_evidence_refs, imported_evidence)
         except ValueError as exc:
             LOG.warning("strike response invalid project=%s step=%s worker=%s error=%s stdout=%s", project_id, step.id, worker.name, exc, preview(result.stdout))
             best_effort_release(client, project_id, step.id, worker.name)
@@ -134,6 +139,7 @@ def run_strike_task(
             kind="negative" if verdict == "refuted" else "regular",
             verification_status=verdict,
             verification_summary=summary,
+            evidence_refs=evidence_refs,
         )
     except Exception:
         LOG.exception("strike task crashed project=%s step=%s worker=%s", project_id, step.id, worker.name)

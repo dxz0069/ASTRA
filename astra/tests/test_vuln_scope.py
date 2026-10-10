@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import threading
 from datetime import datetime, timedelta, timezone
@@ -51,6 +53,14 @@ def _worker(base_url: str, scope: str, agent_dir: Path) -> WorkerConfig:
 def test_missing_scope_denies_worker_before_model_call(tmp_path: Path) -> None:
     with pytest.raises(ValidationError, match="ASTRA_VULN_SCOPE_JSON"):
         _worker("http://127.0.0.1:1/v1", "", tmp_path)
+
+
+def test_collector_credential_cannot_be_worker_env(tmp_path: Path) -> None:
+    worker = _worker("http://127.0.0.1:1/v1", _manifest(), tmp_path)
+    payload = worker.model_dump()
+    payload["env"]["ASTRA_EVIDENCE_COLLECTOR_TOKEN"] = "should-remain-dispatcher-only"
+    with pytest.raises(ValidationError, match="collector token must not enter"):
+        WorkerConfig.model_validate(payload)
 
 
 def test_vuln_profile_has_no_shell_or_mcp(tmp_path: Path) -> None:
@@ -189,6 +199,14 @@ def test_real_pi_scoped_request_loopback(
             result = process.communicate(timeout=45)
             assert result.returncode == 0, result.stderr
             assert target.hits == expected_hits
+            collected = driver.extract_scoped_request_evidence(result.stdout)
+            if case == "allowed":
+                assert len(collected) == 1
+                assert collected[0]["tool_call_id"] == "call-scoped"
+                assert base64.b64decode(collected[0]["body_base64"]) == b"synthetic allowed evidence"
+                assert collected[0]["scope_sha256"] == hashlib.sha256(scope.encode("utf-8")).hexdigest()
+            else:
+                assert collected == []
             tools = model.requests[0].get("tools", [])
             names = {tool.get("function", {}).get("name") for tool in tools}
             assert "scoped_request" in names

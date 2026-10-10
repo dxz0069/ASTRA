@@ -447,7 +447,7 @@ def test_mock_scheduler_enabled_project_skips_bootstrap_when_worker_does_not_sup
     ]
 
 
-def test_mock_scheduler_verifies_high_value_finding_end_to_end(http_client: TestClient) -> None:
+def test_mock_scheduler_cannot_confirm_without_collected_evidence(http_client: TestClient) -> None:
     client = InProcessClient(http_client)
     containers = LocalContainerManager()
     loop = _loop(
@@ -477,8 +477,8 @@ def test_mock_scheduler_verifies_high_value_finding_end_to_end(http_client: Test
         loop.close()
 
     finding = project.findings[0]
-    assert finding.verification_status == "confirmed"
-    assert finding.verification_fact_id is not None
+    assert finding.verification_status == "pending"
+    assert finding.verification_fact_id is None
     strike = next(step for step in project.steps if step.task_type == "strike")
-    assert strike.to == finding.verification_fact_id
+    assert strike.to is None
     assert len(project.findings) == 1

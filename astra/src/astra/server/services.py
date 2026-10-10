@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import sqlite3
+import json
 from datetime import datetime, timezone
 
 from fastapi import HTTPException
 
 from astra.server.models import ProjectDecide, ProjectMeta, Step
+from astra.server.finding_identity import finding_fingerprint
 
 
 def utcnow() -> str:
@@ -73,12 +75,25 @@ def create_fact(
     return fact_id
 
 
-def create_finding(conn: sqlite3.Connection, project_id: str, description: str) -> str:
+def create_finding(
+    conn: sqlite3.Connection, project_id: str, description: str,
+    identity: dict[str, str] | None = None,
+) -> str:
     check_project_active(conn, project_id)
+    fingerprint = finding_fingerprint(identity) if identity is not None else None
+    if fingerprint is not None:
+        rows = conn.execute(
+            """SELECT id, identity_json FROM findings WHERE project_id = ? AND identity_json IS NOT NULL
+               AND verification_status IN ('not_requested', 'pending', 'confirmed')""",
+            (project_id,),
+        ).fetchall()
+        for row in rows:
+            if finding_fingerprint(json.loads(row["identity_json"])) == fingerprint:
+                return row["id"]
     finding_id = next_finding_id(conn, project_id)
     conn.execute(
-        "INSERT INTO findings (id, project_id, description, created_at) VALUES (?, ?, ?, ?)",
-        (finding_id, project_id, description, utcnow()),
+        "INSERT INTO findings (id, project_id, description, created_at, identity_json) VALUES (?, ?, ?, ?, ?)",
+        (finding_id, project_id, description, utcnow(), json.dumps(identity, ensure_ascii=False) if identity else None),
     )
     return finding_id
 

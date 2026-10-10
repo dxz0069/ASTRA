@@ -260,6 +260,8 @@ class WorkerConfig(BaseModel):
             if profile == "vuln":
                 from astra.dispatcher.vuln_scope import validate_scope_json
 
+                if "ASTRA_EVIDENCE_COLLECTOR_TOKEN" in self.env:
+                    raise ValueError("collector token must not enter a vuln worker environment")
                 local_test = self.env.get("ASTRA_VULN_LOCAL_TEST") == "1"
                 if self.env.get("ASTRA_VULN_LOCAL_TEST", "0") not in {"0", "1"}:
                     raise ValueError("ASTRA_VULN_LOCAL_TEST must be 0 or 1")

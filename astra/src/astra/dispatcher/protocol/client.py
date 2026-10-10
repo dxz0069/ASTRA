@@ -131,9 +131,11 @@ class ASTRAClient:
         kind: str = "regular",
         finding: str | None = None,
         finding_high_value: bool = False,
+        finding_identity: dict[str, str] | None = None,
         reuse_fact_id: str | None = None,
         verification_status: str | None = None,
         verification_summary: str | None = None,
+        evidence_refs: list[str] | None = None,
     ) -> ApiResult:
         """Execute 收束（自证写回）：写事实+步骤落点，可携沿途 Finding。"""
         body: dict[str, Any] = {"worker": worker, "description": description}
@@ -143,17 +145,47 @@ class ASTRAClient:
             body["finding"] = finding
         if finding_high_value:
             body["finding_high_value"] = True
+        if finding_identity:
+            body["finding_identity"] = finding_identity
         if reuse_fact_id:
             body["reuse_fact_id"] = reuse_fact_id
         if verification_status:
             body["verification_status"] = verification_status
         if verification_summary:
             body["verification_summary"] = verification_summary
+        if evidence_refs:
+            body["evidence_refs"] = evidence_refs
         return self._request_json(
             "POST",
             f"/projects/{project_id}/steps/{step_id}/conclude",
             json=body,
         )
+
+    def create_evidence(
+        self,
+        project_id: str,
+        step_id: str,
+        payload: dict[str, Any],
+        *,
+        collector_token: str,
+    ) -> ApiResult:
+        """Import a structured tool result using a dispatcher-only credential."""
+        try:
+            response = self._session().request(
+                "POST",
+                self._url(f"/projects/{project_id}/steps/{step_id}/evidence"),
+                json=payload,
+                headers={"X-ASTRA-Collector-Token": collector_token},
+                timeout=self._timeout,
+            )
+        except requests.RequestException as exc:
+            LOG.warning("evidence import failed project=%s step=%s error=%s", project_id, step_id, exc)
+            return ApiResult(status_code=0, text=str(exc))
+        try:
+            data = response.json()
+        except (ValueError, UnicodeDecodeError):
+            data = None
+        return ApiResult(status_code=response.status_code, data=data, text=response.text)
 
     def create_fact(self, project_id: str, description: str, kind: str = "regular", creator: str = "system") -> ApiResult:
         return self._request_json(
@@ -221,12 +253,15 @@ class ASTRAClient:
             json={"status": status},
         )
 
-    def _request_json(self, method: str, path: str, json: dict[str, Any]) -> ApiResult:
+    def _request_json(
+        self, method: str, path: str, json: dict[str, Any], *, headers: dict[str, str] | None = None
+    ) -> ApiResult:
         try:
             response = self._session().request(
                 method,
                 self._url(path),
                 json=json,
+                headers=headers,
                 timeout=self._timeout,
             )
         except requests.RequestException as exc:

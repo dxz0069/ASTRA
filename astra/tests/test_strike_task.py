@@ -51,7 +51,11 @@ def _run_strike(monkeypatch, result: ProcessResult, *, client_override=None):
 @pytest.mark.parametrize("verdict", ["confirmed", "refuted", "blocked"])
 def test_strike_writes_explicit_verdict_without_creating_finding(monkeypatch, verdict) -> None:
     summary = "Independent request reproduced observed response; evidence at verification.txt."
-    result = ProcessResult(0, json.dumps({"accepted": True, "data": {"verdict": verdict, "summary": summary}}), "")
+    data = {"verdict": verdict, "summary": summary}
+    if verdict == "confirmed":
+        data["evidence_refs"] = ["call-new"]
+        monkeypatch.setattr(strike, "collect_scoped_request_evidence", lambda *_args, **_kwargs: {"call-new": "ev_new"})
+    result = ProcessResult(0, json.dumps({"accepted": True, "data": data}), "")
     status, client, lease, runs = _run_strike(monkeypatch, result)
 
     assert status == "success"
@@ -59,6 +63,7 @@ def test_strike_writes_explicit_verdict_without_creating_finding(monkeypatch, ve
     assert verdict in client.concluded[0][3]
     assert client.conclude_options[0]["verification_status"] == verdict
     assert client.conclude_options[0]["verification_summary"] == summary
+    assert client.conclude_options[0]["evidence_refs"] == (["ev_new"] if verdict == "confirmed" else None)
     assert client.created_findings == []
     assert client.released == []
     assert lease.started and lease.stopped
@@ -102,7 +107,7 @@ def test_strike_conclude_failure_releases_step_for_retry(monkeypatch) -> None:
         def conclude(self, *_args, **_kwargs):
             return ApiResult(503, text="temporary failure")
 
-    result = ProcessResult(0, '{"accepted":true,"data":{"verdict":"confirmed","summary":"independent evidence"}}', "")
+    result = ProcessResult(0, '{"accepted":true,"data":{"verdict":"refuted","summary":"independent evidence"}}', "")
     status, client, _lease, _runs = _run_strike(monkeypatch, result, client_override=FailedWrite(project))
     assert status == "failed"
     assert client.released == [("proj_001", "s001", "test-worker")]
@@ -142,9 +147,14 @@ def test_mock_strike_outcomes_run_through_real_driver(tmp_path, outcome) -> None
         with pytest.raises(ValueError):
             strike.validate_strike_payload(strike.parse_json_output(result.stdout))
     else:
-        verdict, summary = strike.validate_strike_payload(strike.parse_json_output(result.stdout))
-        assert verdict == outcome
-        assert "fnd001" in summary
+        if outcome == "confirmed":
+            with pytest.raises(ValueError, match="evidence_refs"):
+                strike.validate_strike_payload(strike.parse_json_output(result.stdout))
+        else:
+            verdict, summary, refs = strike.validate_strike_payload(strike.parse_json_output(result.stdout))
+            assert verdict == outcome
+            assert "fnd001" in summary
+            assert refs == []
 
 
 def test_pi_strike_has_execution_tools_for_independent_reproduction(monkeypatch) -> None:

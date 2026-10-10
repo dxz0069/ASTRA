@@ -9,7 +9,7 @@ from fastapi.staticfiles import StaticFiles
 
 from astra import __version__
 from astra.server import db
-from astra.server.routers import export, hints, projects, settings, steps
+from astra.server.routers import evidence, export, hints, projects, settings, steps
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -119,6 +119,7 @@ app.include_router(settings.router)
 app.include_router(projects.router)
 app.include_router(hints.router)
 app.include_router(steps.router)
+app.include_router(evidence.router)
 app.include_router(export.router)
 
 

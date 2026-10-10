@@ -4,6 +4,7 @@ import logging
 import time
 
 from astra.dispatcher.config import DispatchConfig, WorkerConfig
+from astra.dispatcher.completion_gate import check_project_work_completion
 from astra.dispatcher.context import build_focus_fact_ids, build_focus_open_steps
 from astra.dispatcher.contracts import parse_json_output, validate_decide_payload
 from astra.dispatcher.prompting import (
@@ -225,6 +226,26 @@ def run_decide_task(
             )
             return "rejected"
         if kind == "complete":
+            if config.runtime.prompt_group == "vuln":
+                # Completion in the vulnerability profile must use the latest
+                # persisted graph. The dispatch-time snapshot may predate a
+                # concurrent Execute or Strike task.
+                try:
+                    current_project = client.get_project(project.project.id)
+                except Exception:
+                    LOG.exception("vuln completion graph refresh failed project=%s", project.project.id)
+                    return "failed"
+                gate = check_project_work_completion(current_project)
+                if gate.status != "complete":
+                    LOG.info(
+                        "vuln completion deferred project=%s status=%s reasons=%s",
+                        project.project.id, gate.status, gate.reasons,
+                    )
+                    record_failure_hint(
+                        client, project.project.id, "completion gate",
+                        f"Completion {gate.status}: " + ", ".join(gate.reasons[:8]),
+                    )
+                    return "success"
             # D2 复查（v0.2 复活修复）：decide 长跑（默认 900s）期间租约可能已过期——
             # 服务端已清 decide_worker，另一 decide 可并行认领。写图前复查，失效即放弃
             # 写入（否则与重派 decide 并发双写图；complete 由服务端原子守卫兜底 403）

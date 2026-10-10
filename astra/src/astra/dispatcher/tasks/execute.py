@@ -11,6 +11,7 @@ from astra.dispatcher.contracts import (
 )
 from astra.dispatcher.prompting import load_prompt, render_prompt
 from astra.dispatcher.context import _CRITICAL_RE
+from astra.dispatcher.evidence_collector import collect_scoped_request_evidence, resolve_evidence_refs
 from astra.dispatcher.protocol.client import ASTRAClient
 from astra.dispatcher.runtime.cancellation import TaskCancellation
 from astra.dispatcher.runtime.containers import ContainerManager
@@ -239,6 +240,9 @@ def run_execute_task(
             best_effort_release(client, project.project.id, step.id, worker.name)
             return "failed"
         if not did_timeout(first) and first.returncode == 0:
+            imported_evidence = collect_scoped_request_evidence(
+                client, worker, project.project.id, step.id, first, session_id=session
+            )
             try:
                 model_output = driver.extract_response_text(first.stdout, first.stderr)
                 payload = parse_json_output(model_output)
@@ -246,6 +250,10 @@ def run_execute_task(
                 description = data["description"] if data else None
                 finding = data["finding"] if data else None
                 finding_high_value = bool(data["finding_high_value"]) if data else False
+                finding_identity = data.get("finding_identity") if data else None
+                evidence_refs = resolve_evidence_refs(
+                    data.get("evidence_refs") if data else None, imported_evidence
+                )
             except Exception as exc:
                 LOG.warning(
                     "execute parse failed project=%s step=%s worker=%s error=%s execute_ms=%s total_ms=%s stdout_preview=%s stderr_preview=%s",
@@ -301,7 +309,9 @@ def run_execute_task(
                 kind=_infer_fact_kind(description),
                 finding=finding,
                 finding_high_value=finding_high_value,
+                finding_identity=finding_identity,
                 reuse_fact_id=duplicate.id if duplicate is not None else None,
+                evidence_refs=evidence_refs,
             )
             # 质询星探·关键事实审计：凭据/flag 级发现入图后异步对抗审查
             # （不阻塞旗提交；质疑成立写 hint 留痕，决策链可回放）
@@ -494,6 +504,9 @@ def _try_conclude_fallback(
         )
         best_effort_release(client, project_id, step.id, worker.name)
         return "failed"
+    imported_evidence = collect_scoped_request_evidence(
+        client, worker, project_id, step.id, result, session_id=session
+    )
     try:
         model_output = driver.extract_response_text(result.stdout, result.stderr)
         payload = parse_json_output(model_output)
@@ -501,6 +514,10 @@ def _try_conclude_fallback(
         description = data["description"] if data else None
         finding = data["finding"] if data else None
         finding_high_value = bool(data["finding_high_value"]) if data else False
+        finding_identity = data.get("finding_identity") if data else None
+        evidence_refs = resolve_evidence_refs(
+            data.get("evidence_refs") if data else None, imported_evidence
+        )
     except Exception as exc:
         LOG.warning(
             "conclude parse failed project=%s step=%s worker=%s error=%s conclude_ms=%s stdout_preview=%s stderr_preview=%s",
@@ -540,7 +557,9 @@ def _try_conclude_fallback(
         phase_ms=conclude_ms,
         finding=finding,
         finding_high_value=finding_high_value,
+        finding_identity=finding_identity,
         reuse_fact_id=duplicate.id if duplicate is not None else None,
+        evidence_refs=evidence_refs,
     )
     # 质询星探·关键事实审计（conclude 兜底路径同样把关）
     if conclude_status == "success" and _CRITICAL_RE.search(description or ""):

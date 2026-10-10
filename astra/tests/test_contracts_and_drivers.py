@@ -114,7 +114,7 @@ def test_execute_payload_requires_explicit_boolean_high_value() -> None:
 
 
 def test_strike_payload_needs_explicit_verdict_and_summary() -> None:
-    assert validate_strike_payload({"accepted": True, "data": {"verdict": "blocked", "summary": "No access to target"}}) == ("blocked", "No access to target")
+    assert validate_strike_payload({"accepted": True, "data": {"verdict": "blocked", "summary": "No access to target"}}) == ("blocked", "No access to target", [])
     with pytest.raises(ValueError, match="summary"):
         validate_strike_payload({"verdict": "confirmed", "summary": " "})
     with pytest.raises(ValueError, match="verdict"):
