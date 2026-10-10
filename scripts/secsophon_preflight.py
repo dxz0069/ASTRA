@@ -104,9 +104,16 @@ def _smoke(worker, timeout: int) -> dict[str, object]:
         tool_names = _tool_names(first_result.stdout)
         session = driver.extract_session(first.session, first_result.stdout, first_result.stderr)
         first_text = driver.extract_response_text(first_result.stdout, first_result.stderr)
+        first_completion_error = driver.completion_failure(
+            first_result.stdout,
+            stdout_truncated=first_result.stdout_truncated,
+            require_tool=True,
+        )
         first_ok = (
             first_result.returncode == 0
             and not first_result.timed_out
+            and not first_result.cancelled
+            and first_completion_error is None
             and first_events["tool_execution_end"] >= 1
             and "read" in tool_names
             and first_events["agent_settled"] >= 1
@@ -121,6 +128,7 @@ def _smoke(worker, timeout: int) -> dict[str, object]:
             "response_contains_marker": marker in first_text,
             "response_preview": first_text[:160],
             "tool_turn_ok": first_ok,
+            "tool_turn_completion_error": first_completion_error,
             "session_created": bool(session),
         }
         if not first_ok or not session:
@@ -133,9 +141,16 @@ def _smoke(worker, timeout: int) -> dict[str, object]:
         follow_result, follow_seconds = _run(follow, env, timeout)
         follow_events = _events(follow_result.stdout)
         report["resume_seconds"] = follow_seconds
+        follow_completion_error = driver.completion_failure(
+            follow_result.stdout,
+            stdout_truncated=follow_result.stdout_truncated,
+        )
+        report["resume_completion_error"] = follow_completion_error
         report["resume_ok"] = (
             follow_result.returncode == 0
             and not follow_result.timed_out
+            and not follow_result.cancelled
+            and follow_completion_error is None
             and follow_events["agent_settled"] >= 1
             and marker in driver.extract_response_text(follow_result.stdout, follow_result.stderr)
         )
@@ -150,12 +165,18 @@ def main() -> int:
     parser.add_argument("--require-arm64", action="store_true", help="fail unless running on an ARM64 host")
     args = parser.parse_args()
     try:
+        if args.timeout <= 0:
+            raise ValueError("--timeout must be positive")
         config = DispatchConfig.load(args.config)
         if config.runtime.execution != "local" or config.runtime.offline_model_policy == "disabled":
             raise RuntimeError("SecSophon requires local execution and an enabled offline_model_policy")
         if args.require_arm64 and platform.machine().lower() not in {"aarch64", "arm64"}:
             raise RuntimeError("ARM64 host required; current machine is only a development proxy")
-        report: dict[str, object] = {"versions": _versions(), "policy": config.runtime.offline_model_policy}
+        report: dict[str, object] = {
+            "versions": _versions(),
+            "policy": config.runtime.offline_model_policy,
+            "astra_project_task": "not_run_by_preflight",
+        }
         report["model_catalog"] = {worker.name: _catalog(worker) for worker in config.workers}
         if not all(report["model_catalog"].values()):
             raise RuntimeError("configured model missing from local model catalog")

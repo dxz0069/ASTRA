@@ -28,6 +28,7 @@ from astra.dispatcher.tasks.common import (
     run_worker_process,
     run_worker_process_with_retry,
     task_healthcheck_enabled,
+    worker_completion_failure,
     write_graph_snapshot_reference,
 )
 from astra.dispatcher.workers.registry import get_driver
@@ -192,6 +193,16 @@ def run_decide_task(
                     f"命令失败 code={result.returncode}: {preview(result.stderr, 200)}",
                 )
             return "failed"
+        completion_error = worker_completion_failure(driver, worker, result)
+        if completion_error is not None:
+            LOG.warning(
+                "decide completion evidence missing project=%s worker=%s error=%s stdout_preview=%s",
+                project.project.id,
+                worker.name,
+                completion_error,
+                preview(result.stdout),
+            )
+            return "failed"
         try:
             model_output = driver.extract_response_text(result.stdout, result.stderr)
             payload = parse_json_output(model_output)
@@ -224,6 +235,13 @@ def run_decide_task(
                 preview(result.stdout),
             )
             return "rejected"
+        completion_error = worker_completion_failure(driver, worker, result, require_tool=True)
+        if completion_error is not None:
+            LOG.warning(
+                "decide tool evidence missing project=%s worker=%s error=%s",
+                project.project.id, worker.name, completion_error,
+            )
+            return "failed"
         if kind == "complete":
             # D2 复查（v0.2 复活修复）：decide 长跑（默认 900s）期间租约可能已过期——
             # 服务端已清 decide_worker，另一 decide 可并行认领。写图前复查，失效即放弃

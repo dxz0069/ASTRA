@@ -19,6 +19,7 @@ from astra.dispatcher.tasks.common import (
     run_worker_process,
     run_worker_process_with_retry,
     task_healthcheck_enabled,
+    worker_completion_failure,
     write_conclude_result,
     write_graph_snapshot_reference,
 )
@@ -110,6 +111,14 @@ def run_strike_task(
             LOG.warning(
                 "strike command failed project=%s step=%s worker=%s code=%s timed_out=%s stderr=%s",
                 project_id, step.id, worker.name, result.returncode, did_timeout(result), preview(result.stderr),
+            )
+            best_effort_release(client, project_id, step.id, worker.name)
+            return "failed"
+        completion_error = worker_completion_failure(driver, worker, result, require_tool=True)
+        if completion_error is not None:
+            LOG.warning(
+                "strike evidence missing project=%s step=%s worker=%s error=%s",
+                project_id, step.id, worker.name, completion_error,
             )
             best_effort_release(client, project_id, step.id, worker.name)
             return "failed"

@@ -180,6 +180,7 @@ def _worker(server: _ScenarioServer, name: str, agent_dir: Path) -> WorkerConfig
             "PI_API_KEY": "synthetic-key",
             "PI_PROVIDER_API": "openai-completions",
             "PI_CODING_AGENT_DIR": str(agent_dir),
+            "PI_OFFLINE_MODEL_POLICY": "loopback",
         },
     )
 
@@ -230,6 +231,12 @@ def test_pi_110_read_then_json_and_session_conclude(monkeypatch: pytest.MonkeyPa
         assert len(tool_messages) == 1
         assert "synthetic evidence from the read tool" in str(tool_messages[0].get("content"))
         assert any(event.get("type") == "agent_settled" for event in _events(first_result.stdout))
+        first_events = _events(first_result.stdout)
+        first_end = max(i for i, event in enumerate(first_events) if event.get("type") == "agent_end")
+        first_settled = max(i for i, event in enumerate(first_events) if event.get("type") == "agent_settled")
+        assert first_settled > first_end
+        assert first_events[first_settled].get("aborted") is False
+        assert driver.completion_failure(first_result.stdout, require_tool=True) is None
         session = driver.extract_session(first.session, first_result.stdout, first_result.stderr)
         assert session
         assert driver.extract_response_text(first_result.stdout, first_result.stderr) == '{"accepted":true,"data":{"description":"read evidence"}}'
@@ -240,6 +247,7 @@ def test_pi_110_read_then_json_and_session_conclude(monkeypatch: pytest.MonkeyPa
         conclude_result = conclude_process.communicate(timeout=45)
         assert conclude_result.returncode == 0, conclude_result.stderr
         assert any(event.get("type") == "agent_settled" for event in _events(conclude_result.stdout))
+        assert driver.completion_failure(conclude_result.stdout, require_tool=False) is None
         assert driver.extract_response_text(conclude_result.stdout, conclude_result.stderr) == '{"accepted":true,"data":{"description":"read evidence"}}'
         assert len(server.requests) == 3
 
@@ -279,5 +287,7 @@ def test_pi_110_retry_settles_only_after_success(monkeypatch: pytest.MonkeyPatch
         settled_index = max(i for i, event in enumerate(events) if event.get("type") == "agent_settled")
         last_end_index = max(i for i, event in enumerate(events) if event.get("type") == "agent_end")
         assert settled_index > last_end_index
+        assert events[settled_index].get("aborted") is False
+        assert driver.completion_failure(result.stdout, require_tool=False) is None
         assert driver.extract_response_text(result.stdout, result.stderr) == '{"accepted":true,"data":{"description":"retry succeeded"}}'
         assert request.session is None

@@ -27,6 +27,8 @@ from astra.dispatcher.tasks.common import (
     run_worker_process,
     run_worker_process_with_retry,
     task_healthcheck_enabled,
+    worker_completion_failure,
+    worker_has_tool_evidence,
     write_conclude_result,
     write_conclude_result_with_fact_id,
 )
@@ -168,6 +170,18 @@ def run_bootstrap_task(
             best_effort_release(client, project.project.id, step.id, worker.name)
             return "failed"
         if not did_timeout(first) and first.returncode == 0:
+            completion_error = worker_completion_failure(driver, worker, first)
+            if completion_error is not None:
+                LOG.warning(
+                    "bootstrap completion evidence missing project=%s step=%s worker=%s error=%s stdout_preview=%s",
+                    project.project.id,
+                    step.id,
+                    worker.name,
+                    completion_error,
+                    preview(first.stdout),
+                )
+                best_effort_release(client, project.project.id, step.id, worker.name)
+                return "failed"
             try:
                 model_output = driver.extract_response_text(first.stdout, first.stderr)
                 facts, complete = validate_bootstrap_stream(model_output)
@@ -195,7 +209,20 @@ def run_bootstrap_task(
                     session,
                     lease,
                     cancellation,
+                    prior_tool_evidence=worker_has_tool_evidence(driver, worker, first),
                 )
+            if facts or complete or _extract_flags_from_text(model_output):
+                completion_error = worker_completion_failure(driver, worker, first, require_tool=True)
+                if completion_error is not None:
+                    LOG.warning(
+                        "bootstrap fact evidence missing project=%s step=%s worker=%s error=%s",
+                        project.project.id,
+                        step.id,
+                        worker.name,
+                        completion_error,
+                    )
+                    best_effort_release(client, project.project.id, step.id, worker.name)
+                    return "failed"
             if not facts:
                 # 兜底：模型可能用叙述文本而非 JSON 行——扫描 stdout 中的 flag 写回星图
                 recovered_flags = _extract_flags_from_text(model_output)
@@ -274,6 +301,8 @@ def run_bootstrap_task(
             )
             # 抢救 stdout 中已输出的增量天枢（超时不丢中间产物）
             try:
+                if not worker_has_tool_evidence(driver, worker, first):
+                    raise ValueError("timeout output has no successful tool evidence")
                 model_output = driver.extract_response_text(first.stdout, first.stderr)
                 rescued, _ = validate_bootstrap_stream(model_output)
                 if not rescued:
@@ -299,6 +328,7 @@ def run_bootstrap_task(
                 session,
                 lease,
                 cancellation,
+                prior_tool_evidence=worker_has_tool_evidence(driver, worker, first),
             )
         LOG.warning(
             "bootstrap command failed project=%s step=%s worker=%s code=%s execute_ms=%s total_ms=%s stdout_preview=%s stderr_preview=%s",
@@ -333,6 +363,8 @@ def _try_conclude_fallback(
     session: str | None,
     lease: HeartbeatLease,
     cancellation: TaskCancellation,
+    *,
+    prior_tool_evidence: bool = False,
 ) -> str:
     if not driver.supports_conclude() or not session:
         LOG.info(
@@ -425,6 +457,17 @@ def _try_conclude_fallback(
         )
         best_effort_release(client, project.project.id, step.id, worker.name)
         return "failed"
+    completion_error = worker_completion_failure(driver, worker, result)
+    if completion_error is not None:
+        LOG.warning(
+            "bootstrap conclude completion evidence missing project=%s step=%s worker=%s error=%s",
+            project.project.id,
+            step.id,
+            worker.name,
+            completion_error,
+        )
+        best_effort_release(client, project.project.id, step.id, worker.name)
+        return "failed"
     try:
         model_output = driver.extract_response_text(result.stdout, result.stderr)
         payload = parse_json_output(model_output)
@@ -462,6 +505,19 @@ def _try_conclude_fallback(
         )
         best_effort_release(client, project.project.id, step.id, worker.name)
         return "rejected"
+    completion_error = worker_completion_failure(
+        driver, worker, result, require_tool=not prior_tool_evidence
+    )
+    if completion_error is not None:
+        LOG.warning(
+            "bootstrap conclude fact evidence missing project=%s step=%s worker=%s error=%s",
+            project.project.id,
+            step.id,
+            worker.name,
+            completion_error,
+        )
+        best_effort_release(client, project.project.id, step.id, worker.name)
+        return "failed"
     return write_conclude_result(
         client,
         project.project.id,

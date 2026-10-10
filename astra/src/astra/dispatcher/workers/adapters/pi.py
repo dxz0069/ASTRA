@@ -4,11 +4,28 @@ import json
 import shutil
 import sys
 import uuid
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 from astra.dispatcher.config import WorkerConfig
 from astra.dispatcher.workers.base import DriverResult, WorkerDriver
+
+
+@dataclass(frozen=True, slots=True)
+class PiCompletionEvidence:
+    assistant_text_present: bool
+    assistant_text_after_tools: bool
+    agent_ended: bool
+    agent_settled: bool
+    agent_aborted: bool
+    agent_failed: bool
+    started_tool_calls: int
+    completed_tool_calls: int
+    successful_tool_calls: int
+    incomplete_tool_calls: int
+    malformed_tool_events: int
+    malformed_json_events: int
 
 
 class PiDriver(WorkerDriver):
@@ -155,6 +172,142 @@ class PiDriver(WorkerDriver):
             if isinstance(text, str) and text:
                 parts.append(text)
         return "\n".join(parts).strip() or stdout
+
+    def completion_evidence(self, stdout: str) -> PiCompletionEvidence:
+        """Summarize the JSON event stream; do not infer completion from exit code alone."""
+        assistant_message: dict[str, Any] | None = None
+        message_end: dict[str, Any] | None = None
+        turn_end: dict[str, Any] | None = None
+        agent_end: dict[str, Any] | None = None
+        settled_events: list[dict[str, Any]] = []
+        last_agent_end: dict[str, Any] | None = None
+        last_agent_end_index = -1
+        last_settled_index = -1
+        last_assistant_message_index = -1
+        last_tool_event_index = -1
+        started: set[str] = set()
+        ended: set[str] = set()
+        successful: set[str] = set()
+        malformed_tool_events = 0
+        malformed_json_events = 0
+        for index, line in enumerate(stdout.split("\n")):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                malformed_json_events += 1
+                continue
+            if not isinstance(event, dict):
+                malformed_json_events += 1
+                continue
+            event_type = event.get("type")
+            if event_type == "message_end":
+                message = event.get("message")
+                if isinstance(message, dict) and message.get("role") == "assistant":
+                    message_end = message
+                    last_assistant_message_index = index
+            elif event_type == "turn_end":
+                message = event.get("message")
+                if isinstance(message, dict) and message.get("role") == "assistant":
+                    turn_end = message
+                    last_assistant_message_index = index
+            elif event_type == "agent_end":
+                last_agent_end = event
+                last_agent_end_index = index
+                messages = event.get("messages")
+                if isinstance(messages, list):
+                    for message in reversed(messages):
+                        if isinstance(message, dict) and message.get("role") == "assistant":
+                            agent_end = message
+                            # Older Pi streams may omit message_end after a
+                            # tool turn; agent_end still contains the final
+                            # assistant message in that case.
+                            if message_end is None and turn_end is None:
+                                last_assistant_message_index = index
+                            break
+            elif event_type == "agent_settled":
+                settled_events.append(event)
+                last_settled_index = index
+            elif event_type == "tool_execution_start":
+                last_tool_event_index = index
+                call_id = event.get("toolCallId")
+                if isinstance(call_id, str) and call_id:
+                    if call_id in started:
+                        malformed_tool_events += 1
+                    started.add(call_id)
+                else:
+                    malformed_tool_events += 1
+            elif event_type == "tool_execution_end":
+                last_tool_event_index = index
+                call_id = event.get("toolCallId")
+                if not isinstance(call_id, str) or not call_id:
+                    malformed_tool_events += 1
+                    continue
+                if call_id not in started or call_id in ended:
+                    malformed_tool_events += 1
+                ended.add(call_id)
+                if event.get("isError") is False:
+                    successful.add(call_id)
+        assistant_message = message_end or turn_end or agent_end
+        assistant_text_present = False
+        if assistant_message is not None:
+            content = assistant_message.get("content")
+            if isinstance(content, list):
+                assistant_text_present = any(
+                    isinstance(item, dict)
+                    and item.get("type") == "text"
+                    and isinstance(item.get("text"), str)
+                    and bool(item["text"].strip())
+                    for item in content
+                )
+        last_settled = settled_events[-1] if settled_events else None
+        return PiCompletionEvidence(
+            assistant_text_present=assistant_text_present,
+            assistant_text_after_tools=last_assistant_message_index > last_tool_event_index,
+            agent_ended=last_agent_end is not None,
+            agent_settled=last_settled is not None and last_settled_index > last_agent_end_index,
+            agent_aborted=bool(last_settled.get("aborted")) if last_settled else False,
+            agent_failed=(
+                bool(last_agent_end.get("willRetry"))
+                or bool(agent_end and agent_end.get("stopReason") in {"error", "aborted"})
+            ) if last_agent_end else False,
+            started_tool_calls=len(started),
+            completed_tool_calls=len(started & ended),
+            successful_tool_calls=len(started & ended & successful),
+            incomplete_tool_calls=len(started - ended),
+            malformed_tool_events=malformed_tool_events,
+            malformed_json_events=malformed_json_events,
+        )
+
+    def completion_failure(
+        self, stdout: str, *, stdout_truncated: bool = False, require_tool: bool = False
+    ) -> str | None:
+        if stdout_truncated:
+            return "stdout was truncated"
+        evidence = self.completion_evidence(stdout)
+        if evidence.malformed_json_events:
+            return "Pi emitted malformed JSON events"
+        if not evidence.agent_ended:
+            return "Pi did not emit agent_end"
+        if not evidence.agent_settled:
+            return "Pi did not emit agent_settled"
+        if evidence.agent_aborted:
+            return "Pi agent run was aborted"
+        if evidence.agent_failed:
+            return "Pi agent run ended while retry was pending"
+        if not evidence.assistant_text_present:
+            return "Pi did not emit a final assistant text message"
+        if evidence.started_tool_calls and not evidence.assistant_text_after_tools:
+            return "Pi final assistant text did not follow tool execution"
+        if evidence.malformed_tool_events:
+            return "Pi emitted malformed tool lifecycle events"
+        if evidence.incomplete_tool_calls:
+            return "Pi has tool calls without matching completion events"
+        if require_tool and not evidence.successful_tool_calls:
+            return "no successful tool execution evidence"
+        return None
 
     def _wrap_with_models(
         self, worker: WorkerConfig, pi_argv: list[str], *, enable_tools: bool = True, read_only: bool = False

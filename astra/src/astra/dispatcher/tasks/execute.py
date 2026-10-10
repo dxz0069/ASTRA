@@ -29,6 +29,8 @@ from astra.dispatcher.tasks.common import (
     run_worker_process,
     run_worker_process_with_retry,
     task_healthcheck_enabled,
+    worker_completion_failure,
+    worker_has_tool_evidence,
     write_conclude_result,
     write_graph_snapshot_reference,
 )
@@ -239,6 +241,18 @@ def run_execute_task(
             best_effort_release(client, project.project.id, step.id, worker.name)
             return "failed"
         if not did_timeout(first) and first.returncode == 0:
+            completion_error = worker_completion_failure(driver, worker, first)
+            if completion_error is not None:
+                LOG.warning(
+                    "execute completion evidence missing project=%s step=%s worker=%s error=%s stdout_preview=%s",
+                    project.project.id,
+                    step.id,
+                    worker.name,
+                    completion_error,
+                    preview(first.stdout),
+                )
+                best_effort_release(client, project.project.id, step.id, worker.name)
+                return "failed"
             try:
                 model_output = driver.extract_response_text(first.stdout, first.stderr)
                 payload = parse_json_output(model_output)
@@ -271,6 +285,7 @@ def run_execute_task(
                     session,
                     lease,
                     cancellation,
+                    prior_tool_evidence=worker_has_tool_evidence(driver, worker, first),
                 )
             if kind == "rejected":
                 LOG.warning(
@@ -284,6 +299,19 @@ def run_execute_task(
                 )
                 best_effort_release(client, project.project.id, step.id, worker.name)
                 return "rejected"
+            completion_error = worker_completion_failure(
+                driver, worker, first, require_tool=(kind == "fact")
+            )
+            if completion_error is not None:
+                LOG.warning(
+                    "execute fact evidence missing project=%s step=%s worker=%s error=%s",
+                    project.project.id,
+                    step.id,
+                    worker.name,
+                    completion_error,
+                )
+                best_effort_release(client, project.project.id, step.id, worker.name)
+                return "failed"
             fresh_project = client.get_project(project.project.id)
             duplicate = find_duplicate_fact(fresh_project, description) if finding else None
             if duplicate is None and not _should_write_fact(client, fresh_project, description):
@@ -330,6 +358,8 @@ def run_execute_task(
             # 流式抢救：超时前已输出的确认发现先入图（不依赖会话续接）。
             # 去重必须对新鲜快照做——派发时的 project 快照可能已落后于并行 worker 的写入
             try:
+                if not worker_has_tool_evidence(driver, worker, first):
+                    raise ValueError("timeout output has no successful tool evidence")
                 fresh = client.get_project(project.project.id)
                 rescued = _rescue_streamed_facts(client, fresh, step, first.stdout or "")
                 if rescued:
@@ -349,6 +379,7 @@ def run_execute_task(
                 session,
                 lease,
                 cancellation,
+                prior_tool_evidence=worker_has_tool_evidence(driver, worker, first),
             )
         LOG.warning(
             "execute command failed project=%s step=%s worker=%s code=%s execute_ms=%s total_ms=%s stdout_preview=%s stderr_preview=%s",
@@ -361,7 +392,7 @@ def run_execute_task(
             preview(first.stdout),
             preview(first.stderr),
         )
-        if is_transient_model_failure(first):
+        if is_transient_model_failure(first) and worker_has_tool_evidence(driver, worker, first):
             # 断流重试全部耗尽：流死前已输出的确认发现仍可抢救入图（与超时抢救同径）
             try:
                 fresh = client.get_project(project.project.id)
@@ -398,6 +429,8 @@ def _try_conclude_fallback(
     session: str | None,
     lease: HeartbeatLease,
     cancellation: TaskCancellation,
+    *,
+    prior_tool_evidence: bool = False,
 ) -> str:
     if not driver.supports_conclude() or not session:
         LOG.info(
@@ -494,6 +527,17 @@ def _try_conclude_fallback(
         )
         best_effort_release(client, project_id, step.id, worker.name)
         return "failed"
+    completion_error = worker_completion_failure(driver, worker, result)
+    if completion_error is not None:
+        LOG.warning(
+            "conclude completion evidence missing project=%s step=%s worker=%s error=%s",
+            project_id,
+            step.id,
+            worker.name,
+            completion_error,
+        )
+        best_effort_release(client, project_id, step.id, worker.name)
+        return "failed"
     try:
         model_output = driver.extract_response_text(result.stdout, result.stderr)
         payload = parse_json_output(model_output)
@@ -525,6 +569,19 @@ def _try_conclude_fallback(
         )
         best_effort_release(client, project_id, step.id, worker.name)
         return "rejected"
+    completion_error = worker_completion_failure(
+        driver, worker, result, require_tool=(kind == "fact" and not prior_tool_evidence)
+    )
+    if completion_error is not None:
+        LOG.warning(
+            "conclude fact evidence missing project=%s step=%s worker=%s error=%s",
+            project_id,
+            step.id,
+            worker.name,
+            completion_error,
+        )
+        best_effort_release(client, project_id, step.id, worker.name)
+        return "failed"
     fresh_project = client.get_project(project_id)
     duplicate = find_duplicate_fact(fresh_project, description) if finding else None
     if duplicate is None and not _should_write_fact(client, fresh_project, description):

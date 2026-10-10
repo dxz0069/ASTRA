@@ -10,6 +10,8 @@ from typing import Any
 from docker.errors import APIError, DockerException
 from docker.models.containers import Container
 
+from astra.dispatcher.runtime.bounded_output import BoundedOutput, MAX_STDERR_CHARS, MAX_STDOUT_CHARS
+
 LOG = logging.getLogger(__name__)
 EXEC_KILL_JOIN_TIMEOUT_SECONDS = 5.0
 
@@ -22,6 +24,8 @@ class ProcessResult:
     timed_out: bool = False
     cancelled: bool = False
     cancel_reason: str | None = None
+    stdout_truncated: bool = False
+    stderr_truncated: bool = False
 
 
 class ManagedProcess:
@@ -32,8 +36,8 @@ class ManagedProcess:
         self._api = container.client.api
         self._exec_id: str | None = None
         self._reader: threading.Thread | None = None
-        self._stdout: list[str] = []
-        self._stderr: list[str] = []
+        self._stdout = BoundedOutput(MAX_STDOUT_CHARS)
+        self._stderr = BoundedOutput(MAX_STDERR_CHARS)
         self._returncode: int | None = None
         self._timed_out = False
         self._cancel_reason: str | None = None
@@ -66,15 +70,20 @@ class ManagedProcess:
                 self._returncode = 137
             self._done.set()
         self._done.wait(timeout=0)
-        if self._read_error and not self._stderr:
+        stdout, stdout_truncated = self._stdout.snapshot()
+        stderr, stderr_truncated = self._stderr.snapshot()
+        if self._read_error and not stderr:
             self._stderr.append(self._read_error)
+            stderr, stderr_truncated = self._stderr.snapshot()
         return ProcessResult(
             returncode=self._returncode if self._returncode is not None else 1,
-            stdout="".join(self._stdout),
-            stderr="".join(self._stderr),
+            stdout=stdout,
+            stderr=stderr,
             timed_out=self._timed_out,
             cancelled=self._cancel_reason is not None,
             cancel_reason=self._cancel_reason,
+            stdout_truncated=stdout_truncated,
+            stderr_truncated=stderr_truncated,
         )
 
     def kill(self) -> None:

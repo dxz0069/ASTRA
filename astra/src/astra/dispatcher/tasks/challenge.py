@@ -32,6 +32,7 @@ from astra.dispatcher.tasks.common import (
     preview,
     run_worker_process,
     run_worker_process_with_retry,
+    worker_completion_failure,
     write_graph_snapshot_reference,
 )
 from astra.dispatcher.workers.registry import get_driver
@@ -125,6 +126,13 @@ def run_challenge_task(
             LOG.warning(
                 "challenge worker failed (fail-open) project=%s worker=%s code=%s timed_out=%s stderr=%s",
                 project.project.id, worker.name, result.returncode, result.timed_out, preview(result.stderr),
+            )
+            return "uphold", None
+        completion_error = worker_completion_failure(driver, worker, result, require_tool=True)
+        if completion_error is not None:
+            LOG.warning(
+                "challenge evidence missing project=%s worker=%s error=%s",
+                project.project.id, worker.name, completion_error,
             )
             return "uphold", None
         model_output = driver.extract_response_text(result.stdout, result.stderr)

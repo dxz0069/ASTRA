@@ -189,6 +189,38 @@ def did_timeout(result: ProcessResult) -> bool:
     return not result.cancelled and (result.timed_out or result.returncode in (124, 137))
 
 
+def worker_completion_failure(
+    driver,
+    worker: WorkerConfig,
+    result: ProcessResult,
+    *,
+    require_tool: bool = False,
+) -> str | None:
+    """Apply deterministic output checks before a worker result can change project state."""
+    stdout_truncated = bool(getattr(result, "stdout_truncated", False))
+    if stdout_truncated:
+        return "stdout was truncated by the process output limit"
+    if worker.type != "pi" or worker.env.get("PI_OFFLINE_MODEL_POLICY", "disabled") == "disabled":
+        return None
+    check = getattr(driver, "completion_failure", None)
+    if not callable(check):
+        return "offline Pi driver does not expose completion evidence"
+    return check(result.stdout, stdout_truncated=stdout_truncated, require_tool=require_tool)
+
+
+def worker_has_tool_evidence(driver, worker: WorkerConfig, result: ProcessResult) -> bool:
+    """Allow partial-output recovery only after a completed successful tool call."""
+    if worker.type != "pi" or worker.env.get("PI_OFFLINE_MODEL_POLICY", "disabled") == "disabled":
+        return True
+    if bool(getattr(result, "stdout_truncated", False)):
+        return False
+    inspect = getattr(driver, "completion_evidence", None)
+    if not callable(inspect):
+        return False
+    evidence = inspect(result.stdout)
+    return evidence.successful_tool_calls > 0 and evidence.malformed_tool_events == 0
+
+
 def cancel_reason(result: ProcessResult, cancellation: TaskCancellation | None = None) -> str | None:
     if result.cancelled:
         return result.cancel_reason or "cancelled"
