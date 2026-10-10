@@ -1,0 +1,37 @@
+# 安全智子本地推理示例。复制为 dispatch.secsophon.yaml 后按现场设备改模型名。
+# 所有 Pi worker 共用本机 Ollama OpenAI 兼容端点；不会回退到云模型。
+server: "http://127.0.0.1:8000"
+runtime:
+  execution: local
+  offline_model_policy: loopback
+  interval: 3
+  max_workers: 1
+  max_running_projects: 1
+  max_project_workers: 1
+  healthcheck_timeout: 180
+  worker_healthcheck: disabled
+  prompt_group: default
+tasks:
+  bootstrap: {timeout: 600, conclude_timeout: 180}
+  decide: {timeout: 600, max_steps: 2}
+  execute: {timeout: 600, conclude_timeout: 180}
+  strike: {timeout: 180}
+# local 模式不创建容器；schema 仍要求这些字段。
+container:
+  image: "unused-local-mode"
+  network_mode: "none"
+  completed_action: stop
+workers:
+  - name: pi-local
+    type: pi
+    task_types: [bootstrap, decide, execute, strike]
+    max_running: 1
+    priority: 0
+    env:
+      PI_MODEL: "qwen3.6-35b-a3b-hauhaucs:q4_k_m"
+      PI_BASE_URL: "http://127.0.0.1:11434/v1"
+      PI_API_KEY: "ollama-local-placeholder"
+      PI_PROVIDER_API: "openai-completions"
+      PI_MODEL_CONTEXT_WINDOW: "8192"
+      PI_MODEL_MAX_TOKENS: "4096"
+      PI_TOOL_PROFILE: "minimal"

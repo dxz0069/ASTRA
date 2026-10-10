@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
+import ipaddress
 import json
+import os
 from importlib import resources
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -214,6 +217,9 @@ class RuntimeConfig(BaseModel):
     prompt_group: str = Field(min_length=1)
     context_budget: ContextBudget = ContextBudget()
     execution: Literal["docker", "local"] = "docker"
+    # Opt-in gate for the SecSophon deployment.  This checks every Pi model
+    # endpoint at config load, including the decide and strike workers.
+    offline_model_policy: Literal["disabled", "loopback", "private_lan"] = "disabled"
 
 
 class WorkerConfig(BaseModel):
@@ -302,15 +308,50 @@ class DispatchConfig(BaseModel):
             raise ValueError("workers must not be empty")
         if self.runtime.max_project_workers > self.runtime.max_workers:
             raise ValueError("max_project_workers cannot exceed max_workers")
+        if self.runtime.offline_model_policy != "disabled":
+            for worker in self.workers:
+                if worker.type != "pi":
+                    raise ValueError("offline_model_policy requires Pi workers only")
+                if not _is_local_model_url(worker.env["PI_BASE_URL"], self.runtime.offline_model_policy):
+                    raise ValueError(f"worker {worker.name} PI_BASE_URL is outside offline_model_policy")
         return self
 
     @classmethod
     def load(cls, path: Path) -> "DispatchConfig":
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         config = cls.model_validate(data)
+        if config.runtime.offline_model_policy != "disabled":
+            enabled = [key for key in ("ASTRA_EMBED_API_KEY", "ASTRA_EMBED_MODEL", "ASTRA_LLM_API_KEY") if os.environ.get(key)]
+            if enabled:
+                raise ValueError(f"offline_model_policy requires unsetting auxiliary model settings: {', '.join(enabled)}")
         validate_prompt_resources(config.runtime.prompt_group)
         return config
 
+
+def _is_local_model_url(url: str, policy: Literal["loopback", "private_lan"]) -> bool:
+    """Accept numeric local addresses only; DNS names can resolve outside the venue."""
+    try:
+        parsed = urlsplit(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return False
+        if parsed.username or parsed.password or parsed.query or parsed.fragment:
+            return False
+        if parsed.port is not None and parsed.port <= 0:
+            return False
+        address = ipaddress.ip_address(parsed.hostname)
+    except (ValueError, TypeError):
+        return False
+    if address.is_loopback:
+        return True
+    if policy == "loopback":
+        return False
+    if isinstance(address, ipaddress.IPv4Address):
+        return any(address in network for network in (
+            ipaddress.ip_network("10.0.0.0/8"),
+            ipaddress.ip_network("172.16.0.0/12"),
+            ipaddress.ip_network("192.168.0.0/16"),
+        ))
+    return address in ipaddress.ip_network("fc00::/7")
 
 def _validate_optional_positive_int_env(worker_name: str, env: dict[str, str], key: str) -> None:
     value = env.get(key)

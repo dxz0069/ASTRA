@@ -1,0 +1,28 @@
+# SecSophon ARM64 preparation image: ASTRA + Pi only. The inference server and
+# weights stay outside this image until the organizers publish their contract.
+# Build on an ARM64 host or with buildx --platform linux/arm64.
+FROM node:22.23.2-bookworm-slim AS node
+
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
+COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm && \
+    node --version && \
+    npm --version && \
+    npm install -g --engine-strict @earendil-works/pi-coding-agent@1.1.0 && \
+    test "$(pi --version)" = "1.1.0"
+
+WORKDIR /opt/astra
+COPY astra/pyproject.toml astra/uv.lock ./
+RUN uv sync --frozen --no-install-project
+COPY astra/ ./
+RUN uv sync --frozen && \
+    uv run python -c 'import astra'
+
+COPY dispatch.secsophon.example.yaml /opt/astra/dispatch.secsophon.example.yaml
+COPY scripts/secsophon_preflight.py /opt/astra/secsophon_preflight.py
+ENV PATH="/opt/astra/.venv/bin:${PATH}" \
+    PYTHONUNBUFFERED=1 \
+    ASTRA_AUTO_DISTILL=0 \
+    ASTRA_CHALLENGE_MODE=0
+CMD ["astra", "--help"]
